@@ -214,3 +214,37 @@ def test_cli_scanner_missing_is_failed(tmp_path: Path) -> None:
     )
     assert code == EXIT_FAILED
     assert json.loads((out / "report.json").read_text())["status"] == "failed"
+
+
+def test_llm_performance_is_aggregated(tmp_path: Path) -> None:
+    from tantular_cyber.models import LLMMetrics
+
+    class MeteredLLM(FakeLLM):
+        def chat(self, messages, format_schema=None):
+            n = len(self.messages)
+            self.last_metrics = LLMMetrics(
+                wall_s=10.0 + n * 30,
+                load_s=30.0 if n == 0 else 0.1,
+                prompt_tokens=800,
+                output_tokens=400,
+                eval_s=40.0,
+                output_tokens_per_s=10.0,
+            )
+            return super().chat(messages, format_schema)
+
+    report = run_scan(
+        settings(tmp_path),
+        scanners=[FakeScanner(vulnerable_raw_findings())],
+        llm_client_factory=lambda: MeteredLLM([GOOD_EXPLANATION]),
+    ).report
+    perf = report.llm.performance
+    assert perf is not None
+    assert (perf.calls, perf.total_wall_s, perf.min_wall_s, perf.max_wall_s) == (
+        2,
+        50.0,
+        10.0,
+        40.0,
+    )
+    assert perf.first_call_load_s == 30.0 and perf.total_load_s == 30.1
+    assert (perf.prompt_tokens, perf.output_tokens) == (1600, 800)
+    assert all(f.analysis.metrics is not None for f in report.findings)

@@ -1,4 +1,7 @@
-# Benchmark plan (proposed, not yet executed)
+# Benchmark plan (POC-003 proposal)
+
+Latency/throughput has a first baseline in [benchmark-results.md](benchmark-results.md);
+the detection and quality measurements below are not yet executed.
 
 POC-002 validates the pipeline on two hand-written fixtures. Before relying on it, measure
 scanner recall/precision and LLM explanation quality separately.

@@ -256,6 +256,17 @@
           ],
           "default": null,
           "title": "Duration S"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -431,12 +442,196 @@
           ],
           "default": null,
           "title": "Error"
+        },
+        "performance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMPerformance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
         "enabled"
       ],
       "title": "LLMInfo",
+      "type": "object"
+    },
+    "LLMMetrics": {
+      "description": "Per-call timing/token counters reported by the LLM server (Ollama ``/api/chat``).",
+      "properties": {
+        "wall_s": {
+          "description": "Client-measured request time.",
+          "title": "Wall S",
+          "type": "number"
+        },
+        "total_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total S"
+        },
+        "load_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model load time (cold start).",
+          "title": "Load S"
+        },
+        "prompt_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Tokens"
+        },
+        "prompt_eval_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Eval S"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
+        "eval_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eval S"
+        },
+        "output_tokens_per_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens Per S"
+        }
+      },
+      "required": [
+        "wall_s"
+      ],
+      "title": "LLMMetrics",
+      "type": "object"
+    },
+    "LLMPerformance": {
+      "description": "Aggregate of ``LLMMetrics`` over all completed LLM calls in a run.",
+      "properties": {
+        "calls": {
+          "title": "Calls",
+          "type": "integer"
+        },
+        "total_wall_s": {
+          "title": "Total Wall S",
+          "type": "number"
+        },
+        "mean_wall_s": {
+          "title": "Mean Wall S",
+          "type": "number"
+        },
+        "min_wall_s": {
+          "title": "Min Wall S",
+          "type": "number"
+        },
+        "max_wall_s": {
+          "title": "Max Wall S",
+          "type": "number"
+        },
+        "first_call_load_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "First Call Load S"
+        },
+        "total_load_s": {
+          "title": "Total Load S",
+          "type": "number"
+        },
+        "prompt_tokens": {
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "mean_output_tokens_per_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mean Output Tokens Per S"
+        }
+      },
+      "required": [
+        "calls",
+        "total_wall_s",
+        "mean_wall_s",
+        "min_wall_s",
+        "max_wall_s",
+        "first_call_load_s",
+        "total_load_s",
+        "prompt_tokens",
+        "output_tokens",
+        "mean_output_tokens_per_s"
+      ],
+      "title": "LLMPerformance",
       "type": "object"
     },
     "ReportError": {
@@ -462,6 +657,62 @@
         "message"
       ],
       "title": "ReportError",
+      "type": "object"
+    },
+    "ScanCoverage": {
+      "description": "What a scanner actually analyzed, verified against the tool's own output.",
+      "properties": {
+        "languages": {
+          "description": "Languages declared by the rules.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Languages",
+          "type": "array"
+        },
+        "targets_submitted": {
+          "title": "Targets Submitted",
+          "type": "integer"
+        },
+        "in_scope": {
+          "description": "Submitted files whose language the rules cover.",
+          "title": "In Scope",
+          "type": "integer"
+        },
+        "scanned": {
+          "description": "In-scope files the tool reported as scanned.",
+          "title": "Scanned",
+          "type": "integer"
+        },
+        "not_scanned": {
+          "description": "In-scope files the tool did not scan (coverage gap).",
+          "items": {
+            "$ref": "#/$defs/SkippedEntry"
+          },
+          "title": "Not Scanned",
+          "type": "array"
+        },
+        "out_of_scope": {
+          "description": "Submitted files no rule language applies to.",
+          "title": "Out Of Scope",
+          "type": "integer"
+        },
+        "verified": {
+          "description": "Whether the tool reported its scanned paths.",
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "languages",
+        "targets_submitted",
+        "in_scope",
+        "scanned",
+        "not_scanned",
+        "out_of_scope",
+        "verified"
+      ],
+      "title": "ScanCoverage",
       "type": "object"
     },
     "ScannerInfo": {
@@ -510,6 +761,17 @@
         "succeeded": {
           "title": "Succeeded",
           "type": "boolean"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScanCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -585,12 +847,22 @@
           "type": "string"
         },
         "files_scanned": {
+          "description": "Eligible files submitted to the scanners.",
           "title": "Files Scanned",
           "type": "integer"
         },
         "files_skipped": {
+          "description": "Files excluded by the inventory safety policy.",
           "title": "Files Skipped",
           "type": "integer"
+        },
+        "ignore_files_present": {
+          "description": "Repository-controlled ignore files found (e.g. .semgrepignore). They are NOT used to select targets; coverage is verified per scanner instead.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Ignore Files Present",
+          "type": "array"
         }
       },
       "required": [
@@ -641,7 +913,7 @@
   },
   "properties": {
     "schema_version": {
-      "default": "1.0.0",
+      "default": "1.1.0",
       "title": "Schema Version",
       "type": "string"
     },

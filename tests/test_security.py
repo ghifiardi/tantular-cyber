@@ -114,7 +114,7 @@ def test_redact_leaves_sql_concatenation_intact() -> None:
 
 
 def test_sanitize_text_strips_control_and_bidi_chars_and_bounds_length() -> None:
-    assert sanitize_text("a\x1b[31mb‮c\x00d") == "a[31mbcd"
+    assert sanitize_text("a\x1b[31mb\u202ec\x00d") == "a[31mbcd"
     assert len(sanitize_text("x" * 50, max_len=10)) == 10
 
 
@@ -123,3 +123,13 @@ def test_scrub_paths_hides_absolute_locations(tmp_path: Path) -> None:
     scrubbed = scrub_paths(text, tmp_path)
     assert str(tmp_path) not in scrubbed
     assert "<repo>/app.py" in scrubbed
+
+
+def test_source_tree_contains_no_invisible_or_bidi_characters() -> None:
+    """Guards against Trojan-Source style characters slipping into the code base."""
+    root = Path(__file__).parents[1]
+    bad = {*range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x206A), 0xFEFF}
+    for path in [*root.glob("src/**/*.py"), *root.glob("tests/**/*.py"), *root.glob("*.md")]:
+        text = path.read_text(encoding="utf-8")
+        hits = [hex(ord(ch)) for ch in text if ord(ch) in bad]
+        assert not hits, f"{path.relative_to(root)} contains {hits}"

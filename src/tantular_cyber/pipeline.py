@@ -29,7 +29,9 @@ from .models import (
     FindingAnalysis,
     Generator,
     LLMInfo,
+    LLMPerformance,
     ReportError,
+    ScanCoverage,
     ScannerInfo,
     ScanReport,
     SkippedEntry,
@@ -44,7 +46,13 @@ from .security import FileInventory, collect_files, redact, resolve_output, reso
 log = logging.getLogger(__name__)
 
 MAX_EVIDENCE_LINES = 20
+REDACTION_MARKER = "[REDACTED:"
 MAX_SKIPPED_ENTRIES = 200
+MAX_COVERAGE_ENTRIES = 50
+# Repository-controlled files that could narrow a tool's scan scope if a tool honored them.
+IGNORE_FILE_NAMES = frozenset(
+    {".semgrepignore", ".gitignore", ".ignore", ".banditrc", ".bandit", ".trivyignore"}
+)
 
 BASE_LIMITATIONS = [
     "Static analysis only: findings are pattern matches and remain 'unverified' until a human "
@@ -55,7 +63,9 @@ BASE_LIMITATIONS = [
     "LLM explanations are advisory, may be incorrect or overstated, and are never treated as "
     "verification. Scanner evidence is authoritative.",
     "Excluded from scanning: VCS metadata, dependency/cache directories, likely secret files, "
-    "binary and oversized files, and symlinks.",
+    "binary and oversized files, and symlinks (see the skipped section).",
+    "Target selection ignores repository-controlled ignore files (.semgrepignore, .gitignore); "
+    "files are passed explicitly and each scanner's reported coverage is verified.",
     "No repository code was executed, no dependencies were installed, and no code was modified.",
 ]
 
@@ -72,21 +82,35 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def read_lines(path: Path) -> list[str]:
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+def split_lines(text: str) -> list[str]:
+    """Split on ``\n`` only, like Semgrep. ``str.splitlines`` also splits on form feeds,
+    U+2028 etc., which would shift line numbers and show the wrong evidence."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def read_redacted_lines(path: Path) -> list[str]:
+    """Redact the whole file first so multiline secrets cannot leak line by line.
+
+    Redaction preserves newlines, so scanner line numbers remain valid.
+    """
+    text, _ = redact(path.read_text(encoding="utf-8", errors="replace"))
+    return split_lines(text)
 
 
 def build_evidence(lines: list[str], start: int, end: int) -> Evidence:
+    """``lines`` must already be redacted (see ``read_redacted_lines``)."""
     start = max(1, start)
     end = max(start, min(end, len(lines)))
     shown_end = min(end, start + MAX_EVIDENCE_LINES - 1)
     width = len(str(shown_end))
-    ev_lines: list[EvidenceLine] = []
-    redactions = 0
-    for n in range(start, shown_end + 1):
-        text, count = redact(lines[n - 1] if n - 1 < len(lines) else "")
-        redactions += count
-        ev_lines.append(EvidenceLine(line=n, text=text))
+    ev_lines = [
+        EvidenceLine(line=n, text=lines[n - 1] if n - 1 < len(lines) else "")
+        for n in range(start, shown_end + 1)
+    ]
+    redactions = sum(ln.text.count(REDACTION_MARKER) for ln in ev_lines)
     snippet = "\n".join(f"{ln.line:>{width}} | {ln.text}" for ln in ev_lines)
     return Evidence(
         start_line=start,
@@ -101,8 +125,7 @@ def build_evidence(lines: list[str], start: int, end: int) -> Evidence:
 def build_context(lines: list[str], start: int, end: int, radius: int) -> str:
     lo, hi = max(1, start - radius), min(len(lines), end + radius)
     width = len(str(hi))
-    out = [f"{n:>{width}} | {lines[n - 1]}" for n in range(lo, hi + 1)]
-    return redact("\n".join(out))[0]
+    return "\n".join(f"{n:>{width}} | {lines[n - 1]}" for n in range(lo, hi + 1))
 
 
 def finding_id(raw: RawFinding, evidence: Evidence) -> str:
@@ -134,7 +157,7 @@ def normalize_findings(
             )
             continue
         if raw.path not in cache:
-            cache[raw.path] = read_lines(repo / raw.path)
+            cache[raw.path] = read_redacted_lines(repo / raw.path)
         lines = cache[raw.path]
         evidence = build_evidence(lines, raw.start_line, raw.end_line)
         fid = finding_id(raw, evidence)
@@ -172,6 +195,50 @@ def _skipped_summary(inventory: FileInventory) -> SkippedSummary:
         by_reason=dict(sorted(Counter(s.reason for s in inventory.skipped).items())),
         entries=entries,
         entries_truncated=len(inventory.skipped) > MAX_SKIPPED_ENTRIES,
+    )
+
+
+def _coverage(run: ScannerRun) -> tuple[ScanCoverage | None, list[str]]:
+    """Compare in-scope targets with what the tool says it scanned. Returns (coverage, gaps)."""
+    if run.in_scope is None:
+        return None, []
+    in_scope = run.in_scope
+    gaps = sorted(t for t in in_scope if t not in run.scanned) if run.scanned_reported else []
+    entries = [
+        SkippedEntry(path=t, reason=run.tool_skipped.get(t, "not reported as scanned by tool"))
+        for t in gaps[:MAX_COVERAGE_ENTRIES]
+    ]
+    return (
+        ScanCoverage(
+            languages=run.languages,
+            targets_submitted=run.targets,
+            in_scope=len(in_scope),
+            scanned=len([t for t in in_scope if t in run.scanned]),
+            not_scanned=entries,
+            out_of_scope=run.targets - len(in_scope),
+            verified=run.scanned_reported,
+        ),
+        gaps,
+    )
+
+
+def summarize_performance(findings: Sequence[Finding]) -> LLMPerformance | None:
+    metrics = [f.analysis.metrics for f in findings if f.analysis.metrics is not None]
+    if not metrics:
+        return None
+    walls = [m.wall_s for m in metrics]
+    rates = [m.output_tokens_per_s for m in metrics if m.output_tokens_per_s]
+    return LLMPerformance(
+        calls=len(metrics),
+        total_wall_s=round(sum(walls), 3),
+        mean_wall_s=round(sum(walls) / len(walls), 3),
+        min_wall_s=round(min(walls), 3),
+        max_wall_s=round(max(walls), 3),
+        first_call_load_s=metrics[0].load_s,
+        total_load_s=round(sum(m.load_s or 0.0 for m in metrics), 3),
+        prompt_tokens=sum(m.prompt_tokens or 0 for m in metrics),
+        output_tokens=sum(m.output_tokens or 0 for m in metrics),
+        mean_output_tokens_per_s=round(sum(rates) / len(rates), 2) if rates else None,
     )
 
 
@@ -269,6 +336,7 @@ def _analyze(
     finally:
         _close(client)
 
+    info.performance = summarize_performance(findings)
     statuses = Counter(f.analysis.status for f in findings)
     if statuses.get("error") or statuses.get("invalid_output"):
         reasons.append(
@@ -329,6 +397,23 @@ def run_scan(
     if scanner_failed:
         reasons.append("one or more scanners failed; findings may be incomplete or missing")
 
+    coverages: dict[str, ScanCoverage | None] = {}
+    for run in runs:
+        coverages[run.tool], gaps = _coverage(run)
+        if run.succeeded and gaps:
+            reasons.append(
+                f"{run.tool} did not scan {len(gaps)} in-scope file(s); coverage is incomplete"
+            )
+            shown = ", ".join(gaps[:10]) + (" ..." if len(gaps) > 10 else "")
+            errors.append(ReportError(stage="scanner", message=f"{run.tool} coverage gap: {shown}"))
+        elif run.succeeded and not run.scanned_reported and run.in_scope is not None:
+            reasons.append(f"{run.tool} did not report scanned paths; coverage unverified")
+    ignore_files = sorted(
+        path
+        for path in [*inventory.files, *(s.path for s in inventory.skipped)]
+        if Path(path).name in IGNORE_FILE_NAMES
+    )
+
     factory = llm_client_factory or (lambda: OllamaClient(settings.ollama))
     llm_info = _analyze(findings, settings, factory, errors, reasons)
 
@@ -352,7 +437,10 @@ def run_scan(
         finished_at=_now(),
         duration_s=round(time.monotonic() - t0, 3),
         target=TargetInfo(
-            name=repo.name, files_scanned=len(inventory.files), files_skipped=len(inventory.skipped)
+            name=repo.name,
+            files_scanned=len(inventory.files),
+            files_skipped=len(inventory.skipped),
+            ignore_files_present=ignore_files,
         ),
         scanners=[
             ScannerInfo(
@@ -363,6 +451,7 @@ def run_scan(
                 rules=r.rules,
                 targets=r.targets,
                 succeeded=r.succeeded,
+                coverage=coverages.get(r.tool),
             )
             for r in runs
         ],

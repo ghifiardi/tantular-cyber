@@ -23,7 +23,9 @@ src/tantular_cyber/
   models.py         pydantic models; ScanReport is the GATRA-facing contract
   reports.py        JSON / Markdown writers (atomic, escaped)
   rules/            local Semgrep rules (shipped in the wheel)
-tests/              pytest; fixtures/vulnerable + fixtures/clean (sqlite3 CWE-89 pair)
+tests/              pytest; fixtures/vulnerable + fixtures/clean (sqlite3 CWE-89 pair),
+                    fixtures/bench (6 findings, every rule branch)
+benchmarks/         llm_latency.py (cold/warm latency + token throughput)
 docs/               architecture, benchmark plan, report-schema.json (generated)
 ```
 
@@ -35,6 +37,7 @@ make test               # unit + integration tests, no Ollama required
 make smoke              # live test vs local Ollama (TANTULAR_RUN_OLLAMA_SMOKE=1)
 make lint               # ruff check + ruff format --check
 make schema             # regenerate docs/report-schema.json after changing models.py
+make bench              # latency benchmark vs local Ollama (unloads the model first)
 .venv/bin/tantular-cyber doctor
 .venv/bin/tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out
 ```
@@ -57,6 +60,10 @@ make schema             # regenerate docs/report-schema.json after changing mode
 9. **Degrade loudly.** Any LLM/scanner problem must surface in `status`, `status_reasons`,
    `errors`, and the exit code — never a silent `complete`.
 10. Reports: repo-relative paths only, redacted snippets, no absolute local paths.
+11. **Repo files never choose scan targets.** Ignore files in the analyzed repo are not
+    honored; scanner coverage is verified against the tool's output and gaps degrade.
+12. **Redact whole files before cutting evidence**, and split lines on `\n` only.
+    New redaction rules must preserve newline counts (`_apply` enforces this).
 
 ## Conventions
 
@@ -67,6 +74,12 @@ make schema             # regenerate docs/report-schema.json after changing mode
   `OllamaClient(transport=..., sleep=...)`, `run_scan(scanners=..., llm_client_factory=...)`.
   Tests use `FakeScanner` / `FakeLLM` from `tests/conftest.py` and `httpx.MockTransport`.
 * User-facing report text is Bahasa Indonesia; code, logs, and errors are English.
+* Never put literal invisible/bidi characters (U+200B…, U+202A…) in source; write `\uXXXX`
+  escapes. A test scans `src/`, `tests/`, and `*.md` for them. Note: tool/JSON pipelines can
+  silently decode `\uXXXX` into the literal character — re-check after generating code.
+* Overclaim guard and redaction are lexical: when the model or a reviewer finds a new
+  phrasing/secret shape, add it to the lexicon **and** to `tests/test_overclaims.py` /
+  `tests/test_secrets.py` in the same change.
 * Changing `models.ScanReport` = contract change: bump `SCHEMA_VERSION` (semver), run
   `make schema`, mention it in the PR. `test_committed_json_schema_matches_models` enforces it.
 * Adding a scanner or model: see "Extension points" in docs/architecture.md. Do not add
@@ -76,8 +89,14 @@ make schema             # regenerate docs/report-schema.json after changing mode
 ## Milestones
 
 * **POC-002 (this)** — Semgrep CWE-89 + Ollama explanation + JSON/MD reports + tests + CI.
-* Next — more rules (CWE-78/79/22/798), Bandit/Gitleaks adapters, SARIF export,
-  benchmark execution (docs/benchmark-plan.md), GATRA ingestion of `report.json`.
+* **POC-003 (proposed)** — evaluation & reliability benchmark: scanner precision/recall and
+  CWE accuracy measured separately from model evidence-grounding, unsupported-claim rate,
+  remediation correctness, prompt-injection resistance, latency/throughput
+  (docs/benchmark-plan.md).
+* Then — expand coverage (CWE-78/79/22/798, Bandit/Gitleaks adapters, SARIF), then GATRA
+  ingestion of `report.json`.
+* Open decision: software license (pyproject currently says "Proprietary" as a placeholder;
+  application code and model weights may be licensed differently).
 
 ## Acceptance criteria (POC-002)
 

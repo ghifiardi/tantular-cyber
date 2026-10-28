@@ -34,6 +34,35 @@ _SEVERITY_MAP = {
 }
 
 _CWE_RE = re.compile(r"CWE-(\d+)", re.IGNORECASE)
+_LANGUAGES_RE = re.compile(r"^\s*languages:\s*\[([^\]]*)\]", re.MULTILINE)
+
+# File extensions per Semgrep language, used to decide which targets a ruleset applies to.
+LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "python": (".py", ".pyi"),
+    "javascript": (".js", ".jsx", ".mjs", ".cjs"),
+    "typescript": (".ts", ".tsx", ".mts", ".cts"),
+    "java": (".java",),
+    "go": (".go",),
+    "ruby": (".rb",),
+    "php": (".php",),
+    "c": (".c", ".h"),
+    "cpp": (".cpp", ".cc", ".cxx", ".hpp", ".hh"),
+    "csharp": (".cs",),
+    "kotlin": (".kt", ".kts"),
+    "rust": (".rs",),
+    "scala": (".scala",),
+    "swift": (".swift",),
+}
+_LANGUAGE_ALIASES = {
+    "py": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "c#": "csharp",
+    "c++": "cpp",
+    "golang": "go",
+    "rb": "ruby",
+    "kt": "kotlin",
+}
 _RULE_ID_RE = re.compile(r"^\s*-\s*id:\s*['\"]?([A-Za-z0-9_.\-]+)['\"]?\s*$", re.MULTILINE)
 
 
@@ -62,6 +91,12 @@ class ScannerRun:
     errors: list[str] = field(default_factory=list)
     succeeded: bool = True
     raw_outputs: list[dict[str, Any]] = field(default_factory=list)
+    # Coverage: which submitted targets the rules apply to and which the tool really scanned.
+    languages: list[str] = field(default_factory=list)
+    in_scope: list[str] | None = None  # None = unknown (cannot be verified)
+    scanned: set[str] = field(default_factory=set)
+    scanned_reported: bool = False
+    tool_skipped: dict[str, str] = field(default_factory=dict)
 
 
 class Scanner(Protocol):
@@ -92,6 +127,42 @@ def declared_rule_ids(rule_files: Sequence[Path]) -> list[str]:
     for rule_file in rule_files:
         ids.extend(_RULE_ID_RE.findall(rule_file.read_text(encoding="utf-8")))
     return ids
+
+
+def declared_languages(rule_files: Sequence[Path]) -> list[str]:
+    langs: list[str] = []
+    for rule_file in rule_files:
+        for group in _LANGUAGES_RE.findall(rule_file.read_text(encoding="utf-8")):
+            for raw in group.split(","):
+                lang = raw.strip().strip("'\"").lower()
+                lang = _LANGUAGE_ALIASES.get(lang, lang)
+                if lang and lang not in langs:
+                    langs.append(lang)
+    return langs
+
+
+def in_scope_targets(targets: Sequence[str], languages: Sequence[str]) -> list[str] | None:
+    """Targets the rules apply to, or None when a language's file types are unknown."""
+    extensions: list[str] = []
+    for lang in languages:
+        if lang not in LANGUAGE_EXTENSIONS:
+            return None
+        extensions.extend(LANGUAGE_EXTENSIONS[lang])
+    suffixes = tuple(extensions)
+    return [t for t in targets if t.lower().endswith(suffixes)]
+
+
+def parse_semgrep_paths(data: dict[str, Any], repo: Path) -> tuple[set[str] | None, dict[str, str]]:
+    """Return (scanned paths or None if not reported, skipped path -> reason)."""
+    paths = data.get("paths")
+    if not isinstance(paths, dict) or not isinstance(paths.get("scanned"), list):
+        return None, {}
+    scanned = {rel for p in paths["scanned"] if (rel := _relative_path(str(p), repo))}
+    skipped: dict[str, str] = {}
+    for item in paths.get("skipped") or []:
+        if isinstance(item, dict) and (rel := _relative_path(str(item.get("path", "")), repo)):
+            skipped[rel] = sanitize_text(str(item.get("reason", "unknown")), 100)
+    return scanned, skipped
 
 
 def normalize_rule_id(check_id: str, known_ids: Sequence[str]) -> str:
@@ -234,12 +305,22 @@ class SemgrepScanner:
 
     def scan(self, repo: Path, targets: Sequence[str]) -> ScannerRun:
         known_ids = declared_rule_ids(self.rules)
-        run = ScannerRun(tool=self.name, version=None, rules=known_ids, targets=len(targets))
+        languages = declared_languages(self.rules)
+        run = ScannerRun(
+            tool=self.name,
+            version=None,
+            rules=known_ids,
+            targets=len(targets),
+            languages=languages,
+            in_scope=in_scope_targets(targets, languages),
+        )
+        run.scanned_reported = True  # cleared if any batch omits its scanned-path list
         started = time.monotonic()
         try:
             run.version = self.version()
             if run.version is None:
                 run.succeeded = False
+                run.scanned_reported = False
                 run.errors.append(
                     f"semgrep binary '{self.binary}' not found or not runnable; install with "
                     "`brew install semgrep` or `pip install 'tantular-cyber[semgrep]'`"
@@ -293,3 +374,11 @@ class SemgrepScanner:
             run.findings.extend(findings)
             run.errors.extend(errors)
             run.raw_outputs.append(data)
+            scanned, skipped = parse_semgrep_paths(data, repo)
+            if scanned is None:
+                run.scanned_reported = False
+            else:
+                run.scanned |= scanned
+            run.tool_skipped.update(skipped)
+        else:
+            run.scanned_reported = False

@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 REPORT_TYPE = "tantular-cyber.repository-scan"
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -104,6 +104,34 @@ class LLMExplanation(BaseModel):
         return value
 
 
+class LLMMetrics(BaseModel):
+    """Per-call timing/token counters reported by the LLM server (Ollama ``/api/chat``)."""
+
+    wall_s: float = Field(description="Client-measured request time.")
+    total_s: float | None = None
+    load_s: float | None = Field(default=None, description="Model load time (cold start).")
+    prompt_tokens: int | None = None
+    prompt_eval_s: float | None = None
+    output_tokens: int | None = None
+    eval_s: float | None = None
+    output_tokens_per_s: float | None = None
+
+
+class LLMPerformance(BaseModel):
+    """Aggregate of ``LLMMetrics`` over all completed LLM calls in a run."""
+
+    calls: int
+    total_wall_s: float
+    mean_wall_s: float
+    min_wall_s: float
+    max_wall_s: float
+    first_call_load_s: float | None
+    total_load_s: float
+    prompt_tokens: int
+    output_tokens: int
+    mean_output_tokens_per_s: float | None
+
+
 class FindingAnalysis(BaseModel):
     status: AnalysisStatus
     provider: str | None = None
@@ -115,6 +143,7 @@ class FindingAnalysis(BaseModel):
     validation_warnings: list[str] = Field(default_factory=list)
     error: str | None = None
     duration_s: float | None = None
+    metrics: LLMMetrics | None = None
 
 
 class Finding(BaseModel):
@@ -139,10 +168,34 @@ class Generator(BaseModel):
     version: str
 
 
+class SkippedEntry(BaseModel):
+    path: str
+    reason: str
+
+
 class TargetInfo(BaseModel):
     name: str = Field(description="Repository directory name only (no absolute path).")
-    files_scanned: int
-    files_skipped: int
+    files_scanned: int = Field(description="Eligible files submitted to the scanners.")
+    files_skipped: int = Field(description="Files excluded by the inventory safety policy.")
+    ignore_files_present: list[str] = Field(
+        default_factory=list,
+        description="Repository-controlled ignore files found (e.g. .semgrepignore). They are "
+        "NOT used to select targets; coverage is verified per scanner instead.",
+    )
+
+
+class ScanCoverage(BaseModel):
+    """What a scanner actually analyzed, verified against the tool's own output."""
+
+    languages: list[str] = Field(description="Languages declared by the rules.")
+    targets_submitted: int
+    in_scope: int = Field(description="Submitted files whose language the rules cover.")
+    scanned: int = Field(description="In-scope files the tool reported as scanned.")
+    not_scanned: list[SkippedEntry] = Field(
+        description="In-scope files the tool did not scan (coverage gap)."
+    )
+    out_of_scope: int = Field(description="Submitted files no rule language applies to.")
+    verified: bool = Field(description="Whether the tool reported its scanned paths.")
 
 
 class ScannerInfo(BaseModel):
@@ -153,6 +206,7 @@ class ScannerInfo(BaseModel):
     rules: list[str]
     targets: int
     succeeded: bool
+    coverage: ScanCoverage | None = None
 
 
 class LLMInfo(BaseModel):
@@ -163,11 +217,7 @@ class LLMInfo(BaseModel):
     server_version: str | None = None
     available: bool | None = None
     error: str | None = None
-
-
-class SkippedEntry(BaseModel):
-    path: str
-    reason: str
+    performance: LLMPerformance | None = None
 
 
 class SkippedSummary(BaseModel):

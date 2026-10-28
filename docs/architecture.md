@@ -33,7 +33,7 @@ Status semantics (`report.status`, mirrored in the CLI exit code):
 | status | exit | meaning |
 |---|---|---|
 | `complete` | 0 | all scanners succeeded; every finding explained (or `--no-llm`) |
-| `degraded` | 4 | scanner findings present, but LLM unreachable / invalid output / limit hit |
+| `degraded` | 4 | reports written, but LLM unreachable / invalid output / limit hit, or a scanner coverage gap / unverified coverage |
 | `failed` | 3 | every scanner failed — findings are missing; report still written |
 | — | 2 | invalid input paths or rule files; no report written |
 
@@ -55,13 +55,20 @@ finding status, or report status; (4) model output is only ever rendered as esca
 
 The model is known to overstate impact. For each item in `confirmed_evidence` the guard
 checks four claim classes — authentication bypass, data deletion/modification, OS command
-execution, verified exploitation. If a claim appears and the evidence/context does not
-contain supporting tokens (e.g. `DELETE`/`DROP` for deletion, `os.system`/`subprocess`
-for OS execution), the item is moved to `conditional_impact` with a
-`[Dipindahkan …]` prefix, confidence is forced to `low`, and a `validation_warnings` entry
-is recorded. Certainty words (`terbukti`, `proven`, …) about such claims in `summary` are
-flagged. CVE identifiers are removed from all model text. The guard is regex-based and
-deliberately conservative; it reduces but does not eliminate overstated explanations.
+execution, verified exploitation — using word-family lexicons in Indonesian and English
+(stems such as `*hapus*`, `*hancur*`, `mengosong*`; synonyms such as "login tanpa
+password", "masuk sebagai admin", "reverse shell", "server compromise", "exploitation is
+confirmed"), proximity matching (up to four words between verb and object), and
+whitespace/zero-width normalization. If a claim appears and the evidence/context does not
+contain supporting tokens (e.g. `DELETE`/`DROP`/`UPDATE` for modification,
+`os.system`/`subprocess` for OS execution), the item is moved to `conditional_impact` with
+a `[Dipindahkan …]` prefix, confidence is forced to `low`, and a `validation_warnings`
+entry is recorded. Certainty words (`terbukti`, `dipastikan`, `proven`, …) about such
+claims in `summary` are flagged. CVE identifiers are removed from all model text.
+
+`tests/test_overclaims.py` holds 36 adversarial paraphrases plus grounded statements that
+must not be flagged (e.g. "mengeksekusi perintah SQL"). The guard is still lexical: novel
+phrasing outside the lexicons can pass. Extend the lexicon and the test list together.
 
 ## Ruleset limits (`src/tantular_cyber/rules/python-sqli.yml`)
 
@@ -73,8 +80,50 @@ One rule, `tantular.python.sqli.dynamic-query-execute`, matching DB-API
 * Does not know whether interpolated values are attacker-controlled (hence `unverified`).
 * Concatenating constants also matches (possible false positives).
 * Misses ORM raw APIs (`text()`, `.raw()`, `.extra()`), query builders, and non-Python code.
-* A `.semgrepignore` inside the analyzed repo is honored by Semgrep; a hostile repo could
-  use it to hide files from the scan.
+* `tests/fixtures/bench` exercises every rule branch (and one expected false positive).
+
+## Scan scope and coverage verification
+
+Repository-controlled files must not be able to shrink the scan silently.
+
+* **Target selection** is done by `security.collect_files`, never by the tools. Repo
+  `.semgrepignore` / `.gitignore` files are not consulted; files are passed to Semgrep
+  explicitly after `--`. (Verified on Semgrep 1.143: explicit targets are scanned even when
+  a `.semgrepignore` matches them; `tests/test_coverage.py` keeps this true.)
+* **Coverage check**: from the rules' `languages:` the scanner derives which submitted
+  targets are in scope (by extension), then compares them with the tool's own
+  `paths.scanned`. Any in-scope file the tool did not scan is listed in
+  `scanners[].coverage.not_scanned` (with the tool's skip reason when available), recorded
+  as an error, and makes the report `degraded`. If the tool does not report scanned paths,
+  coverage is `verified: false` and the report is `degraded` as well.
+* **Reported scope**: `target.ignore_files_present` lists repo ignore files found;
+  `skipped` lists every file excluded by the inventory policy, with reasons (capped list in
+  JSON, first 50 in Markdown).
+* Out-of-scope files (no rule language applies) are counted, not flagged. Python files
+  without a `.py`/`.pyi` extension (e.g. extensionless scripts) are out of scope for Semgrep
+  and therefore for this ruleset.
+
+## Secret redaction (`security.redact`)
+
+Applied to the **whole file** before evidence and context lines are cut, and again to all
+scanner messages and model output. Every rule preserves the newline count, so scanner line
+numbers stay valid. Layers:
+
+1. Known credential formats: private-key blocks (multiline), AWS, GitHub, Slack, Google,
+   `sk-` API keys, JWTs, bearer tokens, credentials in URLs.
+2. Encoded: HTTP Basic credentials (base64 `user:pass`); base64 blobs whose decoded content
+   matches a known format.
+3. Contextual: quoted, triple-quoted (multiline), type-annotated, and unquoted
+   (`.env`/YAML style, must contain a digit or symbol) values assigned to credential-like
+   names; credentials written in comments (`# admin password is …`, `// api key: …`,
+   `# kata sandi: …`).
+
+Limits: heuristic. Plain-letter unquoted values (`api_key: abcdefgh`), hex-encoded or
+custom-encoded secrets, and secrets in variables with innocuous names are not detected.
+Secret-like *files* (`.env`, `*.pem`, …) are never read at all.
+
+Lines are split on `\n` only (like Semgrep). `str.splitlines()` also splits on form feeds
+and U+2028, which would let a crafted file shift the displayed evidence line.
 
 ## Extension points
 

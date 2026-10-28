@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .config import OllamaSettings
+from .models import LLMMetrics
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class OllamaClient:
         self.base_url = validate_base_url(settings.base_url, allow_remote=settings.allow_remote)
         self.model = settings.model
         self._sleep = sleep
+        self.last_metrics: LLMMetrics | None = None
         # trust_env=False: never route local inference through a system HTTP proxy.
         self._http = httpx.Client(
             base_url=self.base_url,
@@ -158,6 +160,7 @@ class OllamaClient:
         if format_schema is not None:
             payload["format"] = format_schema
         started = time.monotonic()
+        self.last_metrics = None
         response = self._request("POST", "/api/chat", json=payload)
         try:
             data = response.json()
@@ -166,6 +169,7 @@ class OllamaClient:
             raise OllamaError("malformed /api/chat response") from exc
         if not isinstance(content, str):
             raise OllamaError("malformed /api/chat response: content is not text")
+        self.last_metrics = chat_metrics(data, time.monotonic() - started)
         log.info(
             "ollama chat ok model=%s done_reason=%s duration=%.1fs",
             self.model,
@@ -175,6 +179,31 @@ class OllamaClient:
         if data.get("done_reason") not in (None, "stop"):
             raise OllamaError(f"generation ended early (done_reason={data.get('done_reason')})")
         return content
+
+
+def chat_metrics(data: dict[str, Any], wall_s: float) -> LLMMetrics:
+    """Convert Ollama's nanosecond counters into an ``LLMMetrics`` record."""
+
+    def seconds(key: str) -> float | None:
+        value = data.get(key)
+        return round(value / 1e9, 3) if isinstance(value, int | float) else None
+
+    def count(key: str) -> int | None:
+        value = data.get(key)
+        return int(value) if isinstance(value, int | float) else None
+
+    output_tokens, eval_s = count("eval_count"), seconds("eval_duration")
+    rate = round(output_tokens / eval_s, 2) if output_tokens and eval_s else None
+    return LLMMetrics(
+        wall_s=round(wall_s, 3),
+        total_s=seconds("total_duration"),
+        load_s=seconds("load_duration"),
+        prompt_tokens=count("prompt_eval_count"),
+        prompt_eval_s=seconds("prompt_eval_duration"),
+        output_tokens=output_tokens,
+        eval_s=eval_s,
+        output_tokens_per_s=rate,
+    )
 
 
 def _error_text(response: httpx.Response) -> str:

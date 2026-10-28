@@ -71,7 +71,7 @@ documented in [.env.example](.env.example). CLI flags take precedence.
 
 ## Sample output
 
-Terminal (live run on the Mac baseline, ~110 s for 2 findings):
+Terminal (live run on the Mac baseline; the first run includes model load):
 
 ```
 $ tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out
@@ -149,13 +149,16 @@ Clean fixture: `status: complete`, `findings: 0`, and the LLM is never called.
 make test     # .venv/bin/pytest -q   — no Ollama needed; real-semgrep tests auto-skip if missing
 make lint
 make smoke    # TANTULAR_RUN_OLLAMA_SMOKE=1 pytest -m ollama — live tantular-cyber:latest
+make bench    # cold + warm latency benchmark on tests/fixtures/bench (6 findings)
 ```
 
 Coverage: Semgrep JSON parsing and command construction, path safety and skip policy
-(secrets, binary, oversized, escaping symlinks), redaction, Ollama payload/retries/localhost
-policy (mocked with `httpx.MockTransport`), model-output schema validation and fallback,
-overclaim guard (auth bypass / data deletion / OS execution / invented CVEs), prompt
-injection isolation, report writers, end-to-end CLI with real Semgrep and Ollama down.
+(secrets, binary, oversized, escaping symlinks), scan-coverage verification (including a
+hostile `.semgrepignore` against real Semgrep), multiline/encoded/comment secret redaction
+end-to-end (evidence, LLM prompt, reports), Ollama payload/retries/localhost policy and
+performance metrics (mocked with `httpx.MockTransport`), model-output schema validation and
+fallback, adversarial overclaim wording (`tests/test_overclaims.py`), prompt-injection
+isolation, report writers, end-to-end CLI with real Semgrep and Ollama down.
 CI (`.github/workflows/ci.yml`) runs lint + tests on macOS and Ubuntu, Python 3.11/3.12,
 without Ollama.
 
@@ -166,13 +169,21 @@ without Ollama.
   findings ≠ secure. See "Ruleset limits" in docs/architecture.md.
 * All findings are `unverified` pattern matches; reachability and attacker control are
   not established.
-* The model can overstate impact or invent details. The overclaim guard is regex-based and
-  reduces, but does not eliminate, this. Read `validation_warnings`.
-* ~50 s per finding on the reference Mac with a 9.7B Q8 model; bounded by
-  `--max-llm-findings`.
+* The model can overstate impact or invent details. The overclaim guard uses Indonesian
+  and English word-family lexicons (36 adversarial paraphrases tested) but is still lexical;
+  novel phrasing can pass. Read `validation_warnings`.
+* ~31 s per finding (median) on an M4 Pro / 24 GB with the 9.7B Q8 model, ~15 output
+  tokens/s, sequential; bounded by `--max-llm-findings`. See
+  [docs/benchmark-results.md](docs/benchmark-results.md).
 * Skips `.git`, dependency/cache dirs, secret-like files, binaries, files > 1 MB, and all
-  symlinks. A `.semgrepignore` in the target repo is honored by Semgrep.
-* Redaction is heuristic (known token formats + `password=`-style assignments).
+  symlinks; every skipped file is listed with its reason. Repo `.semgrepignore` /
+  `.gitignore` files are **not** used to pick targets, and each scan's coverage is checked
+  against Semgrep's own `paths.scanned`; any gap makes the report `degraded`.
+* Redaction is heuristic: known token formats, multiline keys and triple-quoted values,
+  base64-encoded known tokens, HTTP Basic credentials, credential-named assignments
+  (quoted, unquoted with a digit/symbol), and credentials in comments. Plain-letter
+  unquoted values, hex/custom encodings, and secrets in innocuously named variables are
+  not detected.
 
 ## Troubleshooting
 

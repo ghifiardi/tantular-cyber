@@ -136,43 +136,114 @@ def parse_explanation(raw: str) -> tuple[LLMExplanation | None, str | None]:
 # --- Overclaim guard -----------------------------------------------------------
 
 # Severe outcomes that must not be presented as confirmed facts unless the evidence shows them.
+# Each class is a list of word-family patterns (Indonesian + English) matched against text
+# that has been whitespace-normalized; ``_NEAR`` allows a few words between verb and object.
+# Extend these lists (and tests/test_overclaims.py) rather than loosening them.
+_NEAR = r"(?:\W+\w+){0,4}?\W+"
+_AUTH_OBJ = r"(?:autentikasi|otentikasi|authentication|auth|login|log\s+in|sign[\s-]?in)"
+_DATA_OBJ = r"(?:data|tabel|table|database|basis\s+data|records?|rows?|catatan)"
+_HOST_OBJ = r"(?:server|host|mesin|machine|sistem(?!\s+basis)|system|os)"
+
+
+def _alternation(*patterns: str) -> re.Pattern[str]:
+    return re.compile("|".join(f"(?:{p})" for p in patterns), re.IGNORECASE)
+
+
 _OVERCLAIMS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
     (
         "authentication bypass",
-        re.compile(
-            r"(?i)(bypass\w*\s+(autentikasi|otentikasi|login|authentication)|"
-            r"(authentication|auth|login)\s+bypass|melewati\s+(autentikasi|otentikasi|login))"
+        _alternation(
+            rf"\bby-?pass\w*{_NEAR}{_AUTH_OBJ}\b",
+            rf"\b{_AUTH_OBJ}{_NEAR}(?:by-?pass\w*|dilewati|diakali|dibypass|circumvent\w*|"
+            r"evaded|defeated|skipped)\b",
+            rf"\b(?:melewati|mengakali|membobol|circumvent\w*|evade|defeat|skip)\w*{_NEAR}"
+            rf"{_AUTH_OBJ}\b",
+            r"\b(?:login|log\s+in|masuk|sign\s+in)\w*\b.{0,40}\b(?:tanpa|without)\s+"
+            r"(?:\w+\s+)?(?:password|kata\s+sandi|sandi|kredensial|credentials?)",
+            r"\b(?:login|log\s+in|masuk|sign\s+in)\s+(?:sebagai|as)\s+(?:admin\w*|any|"
+            r"pengguna|user|siapa|root|another|other)",
+            r"\b(?:akses\s+tidak\s+sah|unauthori[sz]ed\s+access)\s+(?:ke|to)\s+"
+            r"(?:\w+\s+)?(?:akun|accounts?)",
+            r"\b(?:mengambil\s+alih|ambil\s+alih|take\s*over|takeover|hijack\w*|membajak)"
+            r"\s+(?:\w+\s+){0,2}(?:akun|accounts?|sesi|sessions?)",
         ),
         re.compile(r"(?i)(password|passwd|login|auth)"),
     ),
     (
         "data deletion/modification",
-        re.compile(
-            r"(?i)(\b(menghapus|penghapusan|dihapus|hapus)\b[^.\n]{0,30}"
-            r"\b(data|tabel|table|database|basis data)|"
-            r"\bdrop\s+table\b|\bdata\s+(deletion|destruction)\b|\bdelete[sd]?\s+(the\s+)?data\b)"
+        _alternation(
+            r"\b(?:\w*hapus\w*|\w*kosong\w*|mengosong\w*|\w*hancur\w*|\w*rusak\w*|memodifikasi|dimodifikasi|"
+            r"modif\w*|mengubah|diubah|wipe\w*|destroy\w*|delet\w*|eras\w*|corrupt\w*|"
+            r"tamper\w*|overwrit\w*|tamper)" + _NEAR + _DATA_OBJ + r"\b",
+            r"\b" + _DATA_OBJ + _NEAR + r"(?:\w*hapus\w*|\w*kosong\w*|\w*hancur\w*|\w*rusak\w*|"
+            r"dimodifikasi|diubah|wiped|destroyed|deleted|erased|corrupted|tampered|"
+            r"overwritten|dropped|truncated)\b",
+            r"\bdrop\s+(?:table|database|schema)\b",
+            r"\btruncate\b",
+            r"\bdelete\s+from\b",
+            r"\bupdate\s+\w+\s+set\b",
+            r"\binsert\s+into\b",
+            r"\balter\s+table\b",
         ),
-        re.compile(r"(?i)\b(delete|drop|truncate|update)\b"),
+        re.compile(r"(?i)\b(delete|drop|truncate|update|insert|alter)\b"),
     ),
     (
         "OS command execution",
-        re.compile(
-            r"(?i)(remote\s+code\s+execution|\brce\b|os\s+command|command\s+injection|"
-            r"perintah\s+(sistem\s+operasi|os|shell)|eksekusi\s+kode|kode\s+arbitrer|"
-            r"arbitrary\s+code|xp_cmdshell)"
+        _alternation(
+            r"\bremote\s+code\s+execution\b",
+            r"\brce\b",
+            r"\barbitrary\s+(?:code|commands?)\b",
+            r"\bkode\s+arbitrer\b",
+            r"\bcommand\s+injection\b",
+            r"\bos\s+commands?\b",
+            r"\bxp_cmdshell\b",
+            r"\b(?:perintah|commands?)\s+(?:\w+\s+)?(?:sistem\s+operasi|os|shell)\b",
+            r"\b(?:eksekusi|mengeksekusi|menjalankan|jalankan|execut\w*|run\w*)"
+            r"\s+(?:\w+\s+){0,3}?(?:shell|malware|perintah\s+(?:os|shell|sistem)|"
+            rf"commands?\s+on\s+the\s+{_HOST_OBJ})\b",
+            r"\b(?:akses|access)\s+shell\b",
+            r"\bshell\s+access\b",
+            r"\b(?:reverse|bind|web)\s*shell\b",
+            r"\bspawn\w*\s+(?:\w+\s+){0,2}shell\b",
+            rf"\b(?:mengambil\s+alih|ambil\s+alih|take\s*over|takeover|compromis\w*|"
+            rf"kompromi\w*|menguasai)\s+(?:\w+\s+){{0,2}}{_HOST_OBJ}\b",
+            rf"\b{_HOST_OBJ}\s+(?:compromise|takeover|diambil\s+alih|dikuasai)\b",
+            r"\b(?:menulis|tulis|write|upload)\w*\s+(?:\w+\s+)?(?:file|berkas)\s+(?:ke|to)\s+"
+            r"(?:\w+\s+)?(?:sistem|server|disk|host|filesystem)\b",
         ),
-        re.compile(r"(?i)\b(os\.system|subprocess|popen|exec|eval|xp_cmdshell)\b"),
+        re.compile(
+            r"(?i)(\bos\.system\b|\bsubprocess\b|\bpopen\b|\bexec\b|\beval\b|"
+            r"\bxp_cmdshell\b|shell\s*=\s*true)"
+        ),
     ),
     (
         "verified exploitation",
-        re.compile(
-            r"(?i)((telah|sudah)\s+(terbukti|dieksploitasi|diverifikasi)|terbukti\s+dapat\s+dieksploitasi|"
-            r"has\s+been\s+exploited|exploitation\s+(is\s+)?(confirmed|verified|proven))"
+        _alternation(
+            r"\b(?:telah|sudah|berhasil|successfully)\s+(?:\w+\s+){0,2}?(?:terbukti|"
+            r"dieksploitasi|diverifikasi|dikonfirmasi|exploited)\b",
+            r"\bterbukti\s+(?:dapat\s+|bisa\s+)?dieksploitasi\b",
+            r"\beksploitasi\s+(?:\w+\s+)?(?:dikonfirmasi|terverifikasi|terbukti|berhasil)\b",
+            r"\b(?:pasti|dipastikan|definitely|certainly|guaranteed)\s+(?:\w+\s+){0,2}?"
+            r"(?:dieksploitasi|exploitable|exploited)\b",
+            r"\bhas\s+been\s+(?:\w+\s+)?exploited\b",
+            r"\bexploitation\s+(?:is\s+|was\s+|has\s+been\s+)?(?:confirmed|verified|proven|"
+            r"successful)\b",
         ),
         re.compile(r"(?!x)x"),  # never supported by static evidence
     ),
 )
-_CERTAINTY = re.compile(r"(?i)\b(terbukti|pasti|dipastikan|confirmed|proven|verified|definitely)\b")
+_CERTAINTY = re.compile(
+    r"(?i)\b(terbukti|pasti|dipastikan|dikonfirmasi|confirmed|proven|verified|definitely|"
+    r"certainly|guaranteed)\b"
+)
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+
+
+def _normalize_claim(text: str) -> str:
+    """Collapse whitespace and drop zero-width characters so spacing tricks do not evade."""
+    return " ".join(_INVISIBLE.sub("", text).split())
+
+
 _CVE_RE = re.compile(r"(?i)\bCVE-\d{4}-\d{4,}\b")
 _RELOCATED_PREFIX = "[Dipindahkan dari bukti terkonfirmasi — belum diverifikasi] "
 
@@ -191,7 +262,7 @@ def enforce_claim_policy(
             (
                 label
                 for label, claim, support in _OVERCLAIMS
-                if claim.search(item) and not support.search(evidence_text)
+                if claim.search(_normalize_claim(item)) and not support.search(evidence_text)
             ),
             None,
         )
@@ -205,10 +276,11 @@ def enforce_claim_policy(
         else:
             confirmed.append(item)
 
+    summary = _normalize_claim(expl.summary)
     for label, claim, support in _OVERCLAIMS:
         if (
-            claim.search(expl.summary)
-            and _CERTAINTY.search(expl.summary)
+            claim.search(summary)
+            and _CERTAINTY.search(summary)
             and not support.search(evidence_text)
         ):
             warnings.append(
@@ -268,9 +340,11 @@ class FindingAnalyzer:
     def analyze(self, finding: Finding) -> FindingAnalysis:
         """Analyze one finding. Transport errors propagate so the caller can stop early."""
         started = time.monotonic()
-        base = {"provider": self.client.provider, "model": self.client.model}
+        base: dict[str, Any] = {"provider": self.client.provider, "model": self.client.model}
         raw = self.client.chat(build_messages(finding), EXPLANATION_JSON_SCHEMA)
         duration = round(time.monotonic() - started, 3)
+        # Optional: clients may expose per-call metrics (OllamaClient.last_metrics).
+        base["metrics"] = getattr(self.client, "last_metrics", None)
 
         expl, error = parse_explanation(raw)
         if expl is None:

@@ -3,7 +3,7 @@ VENV ?= .venv
 BIN := $(VENV)/bin
 OUT ?= ./out
 
-.PHONY: install install-semgrep test smoke lint format schema scan scan-clean doctor clean
+.PHONY: install install-semgrep test smoke bench lint format schema scan scan-clean doctor clean
 
 install:  ## create venv and install with dev extras (semgrep from brew or `make install-semgrep`)
 	$(PYTHON) -m venv $(VENV)
@@ -18,6 +18,9 @@ test:  ## unit + integration tests (no Ollama needed)
 
 smoke:  ## live test against local Ollama tantular-cyber:latest
 	TANTULAR_RUN_OLLAMA_SMOKE=1 $(BIN)/pytest -m ollama -q
+
+bench:  ## LLM latency/throughput benchmark (unloads the model first for a cold run)
+	$(BIN)/python benchmarks/llm_latency.py --runs 2 --output $(OUT)/bench
 
 lint:
 	$(BIN)/ruff check .

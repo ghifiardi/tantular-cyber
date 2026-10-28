@@ -167,3 +167,30 @@ def test_env_overrides_and_cli_precedence() -> None:
         5.0,
     )
     assert OllamaSettings.from_env(env, model="cli:2", base_url=None).model == "cli:2"
+
+
+def test_chat_records_ollama_performance_metrics() -> None:
+    body = {
+        "message": {"content": "{}"},
+        "done_reason": "stop",
+        "total_duration": 52_000_000_000,
+        "load_duration": 3_500_000_000,
+        "prompt_eval_count": 900,
+        "prompt_eval_duration": 4_000_000_000,
+        "eval_count": 420,
+        "eval_duration": 42_000_000_000,
+    }
+    client = make_client(lambda r: httpx.Response(200, json=body))
+    client.chat([{"role": "user", "content": "x"}])
+    m = client.last_metrics
+    assert m is not None
+    assert (m.load_s, m.prompt_tokens, m.output_tokens, m.eval_s) == (3.5, 900, 420, 42.0)
+    assert m.output_tokens_per_s == 10.0
+    assert m.total_s == 52.0 and m.wall_s >= 0
+
+
+def test_metrics_tolerate_missing_counters() -> None:
+    client = make_client(lambda r: chat_ok())
+    client.chat([])
+    m = client.last_metrics
+    assert m is not None and m.output_tokens is None and m.output_tokens_per_s is None

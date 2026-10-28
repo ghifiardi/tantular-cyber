@@ -15,6 +15,7 @@ from .security import scrub_paths
 JSON_NAME = "report.json"
 MARKDOWN_NAME = "report.md"
 RAW_NAME_TEMPLATE = "{tool}-raw.json"
+MD_MAX_SKIPPED = 50
 
 _STATUS_BADGE = {"complete": "✅ complete", "degraded": "⚠️ DEGRADED", "failed": "❌ FAILED"}
 
@@ -104,6 +105,40 @@ def render_markdown(report: ScanReport) -> str:
     else:
         llm_detail = "dinonaktifkan (--no-llm)"
     out += [f"| {llm.provider or 'llm'} | {llm.server_version or 'n/a'} | {llm_detail} |", ""]
+    if perf := llm.performance:
+        rate = f"{perf.mean_output_tokens_per_s:.1f}" if perf.mean_output_tokens_per_s else "n/a"
+        load = f"{perf.first_call_load_s:.1f} s" if perf.first_call_load_s is not None else "n/a"
+        out += [
+            f"**Kinerja LLM:** {perf.calls} panggilan, total {perf.total_wall_s:.1f} s, "
+            f"rata-rata {perf.mean_wall_s:.1f} s/temuan (min {perf.min_wall_s:.1f}, "
+            f"maks {perf.max_wall_s:.1f}), load model awal {load}, "
+            f"{perf.prompt_tokens} token prompt / {perf.output_tokens} token output, "
+            f"{rate} token/s.",
+            "",
+        ]
+
+    out += ["## Cakupan pemindaian", ""]
+    for s in r.scanners:
+        c = s.coverage
+        if c is None:
+            out.append(f"- {s.name}: cakupan tidak dapat diverifikasi (bahasa rule tidak dikenal).")
+            continue
+        out.append(
+            f"- {s.name} ({', '.join(c.languages)}): {c.scanned}/{c.in_scope} file in-scope "
+            f"dipindai; {c.out_of_scope} file di luar cakupan bahasa rule; "
+            f"terverifikasi dari output tool: {'ya' if c.verified else 'TIDAK'}."
+        )
+        out += [
+            f"  - ⚠️ TIDAK dipindai: `{_inline(e.path)}` ({_inline(e.reason)})"
+            for e in c.not_scanned
+        ]
+    if r.target.ignore_files_present:
+        files = ", ".join(f"`{_inline(p)}`" for p in r.target.ignore_files_present)
+        out.append(
+            f"- File ignore milik repositori ditemukan: {files}. File ini tidak dipakai untuk "
+            "memilih target; target dikirim eksplisit dan cakupan diverifikasi."
+        )
+    out.append("")
 
     out += ["## Temuan", ""]
     if not r.findings:
@@ -190,6 +225,11 @@ def render_markdown(report: ScanReport) -> str:
     out += ["## File yang dilewati", ""]
     if r.skipped.by_reason:
         out += [f"- {reason}: {count}" for reason, count in r.skipped.by_reason.items()]
+        out += ["", "<details><summary>Daftar file yang dilewati</summary>", ""]
+        out += [f"- `{_inline(e.path)}` — {e.reason}" for e in r.skipped.entries[:MD_MAX_SKIPPED]]
+        if r.skipped.total > MD_MAX_SKIPPED:
+            out.append(f"- … {r.skipped.total - MD_MAX_SKIPPED} lainnya (lihat report.json)")
+        out += ["", "</details>"]
     else:
         out.append("- _(tidak ada)_")
     out += ["", "## Batasan", ""]
