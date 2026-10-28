@@ -34,3 +34,12 @@ jobs:
           ruff format --check .
       - name: Tests (live Ollama smoke test is skipped)
         run: pytest -q
+      - name: Benchmark (offline, deterministic gates; no Ollama)
+        run: tantular-cyber benchmark --corpus benchmarks/corpus --output out/benchmark-ci
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: out/benchmark-ci/
+          if-no-files-found: ignore

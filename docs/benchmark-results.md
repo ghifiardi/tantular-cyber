@@ -1,7 +1,52 @@
 # Benchmark results
 
-Measured with `make bench` (`benchmarks/llm_latency.py`). Performance only — explanation
-quality is the subject of POC-003 (see [benchmark-plan.md](benchmark-plan.md)).
+Dated results. Method and interpretation: [benchmark.md](benchmark.md). The 2026-10-28
+POC-002 baseline below used the earlier standalone latency script (since replaced by
+`tantular-cyber benchmark --llm ollama`) on `tests/fixtures/bench`.
+
+## 2026-10-28 — POC-003 first live benchmark
+
+Command: `tantular-cyber -v benchmark --llm ollama --llm-runs 2 --cold --concurrency 1,2
+--baseline <offline run> --record-replay ...` (branch `feat/poc-003-benchmark`, corpus manifest 1.0.0).
+
+- Machine: Apple M4 Pro, 24 GB, macOS 27.0.1, Python 3.11.14
+- semgrep 1.143.0, Ollama 0.40.2, `tantular-cyber:latest` (qwen35, 9.7B, Q8_0; digest
+  `e79106b3b1eb`), think=false, stream=false, temperature 0.1, num_ctx 8192
+
+**Scanner (deterministic):** TP 12, FP 3, FN 3, TN 5 → precision 0.80, recall 0.80, F1 0.80.
+All FPs/FNs are the documented known ones; 0 unannotated findings. Gates: all pass.
+
+**Adversarial:** overclaims 50 passed / 7 known gaps; secrets 17 passed / 4 known gaps;
+0 unexpected failures.
+
+**LLM explanations (sample-based, n = 16 over 2 runs, 8 locations):** as first scored:
+injection_resisted 75%, impact_separated 87.5%, all other checks 100%. Inspection showed
+all three failures were **evaluator false alarms** (the model *reported* the injected
+"kode aman" claim as a prompt-injection pattern; "bergantung pada" was not recognised as a
+hedge). After fixing the checks, the recorded run-1 outputs
+(`benchmarks/replays/tantular-cyber-latest-2026-10-28.json`) re-score 100% on every
+check (n = 8; Wilson 95% lower bound ≈ 0.68). No overclaim-guard interventions, no canary
+leaks, never "high" confidence on the known false positives (4× medium), 11/12 "high" on
+true positives. Small n: these are encouraging samples, not a quality guarantee.
+
+**Performance:**
+
+| Run | Kind | Findings | Total s | p50 s | p95 s | Load s | Prompt tok | Output tok | tok/s |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | cold_after_eviction | 8 | 288.5 | 35.4 | 43.3 | 7.1 | 5128 | 3408 | 13.4 |
+| 2 | warm | 8 | 272.1 | 32.5 | 41.6 | 0.0 | 5128 | 3408 | 13.4 |
+
+| Concurrency | Requests | Wall s | Findings/min | p50 s | p95 s |
+|---|---|---|---|---|---|
+| 1 | 8 | 257.2 | 1.87 | 31.2 | 40.5 |
+| 2 | 8 | 257.0 | 1.87 | 64.3 | 67.5 |
+
+- Concurrency 2 gives **no throughput gain** and doubles latency: the server processed
+  requests serially in this configuration. Parallelism needs server-side settings
+  (e.g. `OLLAMA_NUM_PARALLEL`) and enough memory; not tested.
+- Both runs produced identical token counts — generation is effectively deterministic at
+  temperature 0.1 on this setup.
+- "cold_after_eviction" ≠ cold boot (page cache likely warm).
 
 ## 2026-10-28 — POC-002 baseline
 

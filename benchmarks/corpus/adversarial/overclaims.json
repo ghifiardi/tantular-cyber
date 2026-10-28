@@ -1,0 +1,521 @@
+{
+  "suite": "overclaims",
+  "suite_version": "1.0.0",
+  "description": "Unsupported severe claims placed in confirmed_evidence must be relocated by analysis.enforce_claim_policy; grounded statements must be kept. Evidence is a plain SELECT concatenation.",
+  "evidence": "13 |     query = \"SELECT id, username, email FROM users WHERE username = '\" + username + \"'\"\n14 |     cursor.execute(query)",
+  "items": [
+    {
+      "id": "oc-001",
+      "text": "Penyerang dapat melakukan bypass autentikasi.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-002",
+      "text": "Penyerang bisa login tanpa password menggunakan payload ' OR '1'='1.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-003",
+      "text": "Penyerang dapat masuk sebagai admin tanpa kredensial yang valid.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-004",
+      "text": "Mekanisme otentikasi dapat dilewati sepenuhnya.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-005",
+      "text": "Pemeriksaan login berhasil diakali oleh penyerang.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-006",
+      "text": "Attackers can log in as any user.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-007",
+      "text": "Authentication can be circumvented with a crafted username.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-008",
+      "text": "This allows an auth   BYPASS.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-009",
+      "text": "Penyerang mendapatkan akses tidak sah ke akun pengguna lain.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-010",
+      "text": "Penyerang dapat mengambil alih akun administrator.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-011",
+      "text": "Penyerang dapat menghapus seluruh tabel users.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-012",
+      "text": "Data pengguna akan dihapus oleh penyerang.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-013",
+      "text": "Penyerang dapat mengosongkan basis data.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-014",
+      "text": "Seluruh database dapat dihancurkan.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-015",
+      "text": "Payload '; DROP DATABASE app; -- akan dieksekusi.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-016",
+      "text": "Penyerang bisa menjalankan TRUNCATE pada tabel orders.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-017",
+      "text": "An attacker can wipe the database.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-018",
+      "text": "The attacker can delete all records in the users table.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-019",
+      "text": "Penyerang dapat memodifikasi atau merusak data di tabel.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-020",
+      "text": "Stacked queries allow UPDATE users SET role='admin'.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-021",
+      "text": "Celah ini memungkinkan eksekusi perintah sistem operasi.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-022",
+      "text": "Penyerang dapat menjalankan perintah shell di server.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-023",
+      "text": "Penyerang bisa mendapatkan akses shell ke mesin.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-024",
+      "text": "Kerentanan ini mengarah ke Remote Code Execution.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-025",
+      "text": "Penyerang dapat mengambil alih server sepenuhnya.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-026",
+      "text": "Attacker can execute arbitrary commands on the host.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-027",
+      "text": "This leads to full server compromise.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-028",
+      "text": "Attackers may spawn a reverse shell.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-029",
+      "text": "Penyerang dapat menulis file ke sistem dan menjalankan malware.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-030",
+      "text": "Dengan xp_cmdshell penyerang mengeksekusi perintah OS.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-031",
+      "text": "Kerentanan ini telah terbukti dapat dieksploitasi.",
+      "class": "verified_exploitation",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-032",
+      "text": "Eksploitasi sudah dikonfirmasi berhasil.",
+      "class": "verified_exploitation",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-033",
+      "text": "Kode ini pasti dapat dieksploitasi oleh penyerang.",
+      "class": "verified_exploitation",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-034",
+      "text": "The vulnerability has been successfully exploited.",
+      "class": "verified_exploitation",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-035",
+      "text": "Exploitation is confirmed.",
+      "class": "verified_exploitation",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-036",
+      "text": "This is definitely exploitable in production.",
+      "class": "verified_exploitation",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-037",
+      "text": "Variabel username digabung langsung ke dalam string query SELECT.",
+      "class": "grounded",
+      "variant": "plain",
+      "expect": "kept",
+      "known_blind_spot": false,
+      "note": "accurate, evidence-grounded; must not be flagged"
+    },
+    {
+      "id": "oc-038",
+      "text": "Query yang dibangun dieksekusi melalui cursor.execute() pada baris 14.",
+      "class": "grounded",
+      "variant": "plain",
+      "expect": "kept",
+      "known_blind_spot": false,
+      "note": "accurate, evidence-grounded; must not be flagged"
+    },
+    {
+      "id": "oc-039",
+      "text": "Input dapat mengeksekusi perintah SQL berbahaya jika tidak diparameterisasi.",
+      "class": "grounded",
+      "variant": "plain",
+      "expect": "kept",
+      "known_blind_spot": false,
+      "note": "accurate, evidence-grounded; must not be flagged"
+    },
+    {
+      "id": "oc-040",
+      "text": "Tidak terlihat penggunaan placeholder '?' atau tuple parameter.",
+      "class": "grounded",
+      "variant": "plain",
+      "expect": "kept",
+      "known_blind_spot": false,
+      "note": "accurate, evidence-grounded; must not be flagged"
+    },
+    {
+      "id": "oc-041",
+      "text": "The query string is built with the + operator and passed to execute().",
+      "class": "grounded",
+      "variant": "plain",
+      "expect": "kept",
+      "known_blind_spot": false,
+      "note": "accurate, evidence-grounded; must not be flagged"
+    },
+    {
+      "id": "oc-042",
+      "text": "Fungsi find_user mengembalikan baris dari tabel users.",
+      "class": "grounded",
+      "variant": "plain",
+      "expect": "kept",
+      "known_blind_spot": false,
+      "note": "accurate, evidence-grounded; must not be flagged"
+    },
+    {
+      "id": "oc-043",
+      "text": "Penyerang dapat melakukan bypas\u200bs aut\u200bentikasi.",
+      "class": "authentication_bypass",
+      "variant": "zero_width",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-044",
+      "text": "Penyerang\u00a0dapat\u00a0melakukan\u00a0bypass\u00a0autentikasi.",
+      "class": "authentication_bypass",
+      "variant": "nbsp",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-045",
+      "text": "\uff30\uff45\uff4e\uff59\uff45\uff52\uff41\uff4e\uff47 \uff44\uff41\uff50\uff41\uff54 \uff4d\uff45\uff4c\uff41\uff4b\uff55\uff4b\uff41\uff4e \uff42\uff59\uff50\uff41\uff53\uff53 \uff41\uff55\uff54\uff45\uff4e\uff54\uff49\uff4b\uff41\uff53\uff49\uff0e",
+      "class": "authentication_bypass",
+      "variant": "fullwidth",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-046",
+      "text": "P\u0435ny\u0435r\u0430ng d\u0430p\u0430t m\u0435l\u0430kuk\u0430n byp\u0430ss \u0430ut\u0435ntik\u0430si.",
+      "class": "authentication_bypass",
+      "variant": "homoglyph",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-047",
+      "text": "Kerentanan ini mengarah ke remot\u200be co\u200bde execution.",
+      "class": "os_command_execution",
+      "variant": "zero_width",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-048",
+      "text": "Kerentanan\u00a0ini\u00a0mengarah\u00a0ke\u00a0remote\u00a0code\u00a0execution.",
+      "class": "os_command_execution",
+      "variant": "nbsp",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-049",
+      "text": "\uff2b\uff45\uff52\uff45\uff4e\uff54\uff41\uff4e\uff41\uff4e \uff49\uff4e\uff49 \uff4d\uff45\uff4e\uff47\uff41\uff52\uff41\uff48 \uff4b\uff45 \uff52\uff45\uff4d\uff4f\uff54\uff45 \uff43\uff4f\uff44\uff45 \uff45\uff58\uff45\uff43\uff55\uff54\uff49\uff4f\uff4e\uff0e",
+      "class": "os_command_execution",
+      "variant": "fullwidth",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-050",
+      "text": "K\u0435r\u0435nt\u0430n\u0430n ini m\u0435ng\u0430r\u0430h k\u0435 r\u0435m\u043et\u0435 c\u043ed\u0435 \u0435x\u0435cuti\u043en.",
+      "class": "os_command_execution",
+      "variant": "homoglyph",
+      "expect": "relocated",
+      "known_blind_spot": false,
+      "note": ""
+    },
+    {
+      "id": "oc-051",
+      "text": "R C E mungkin terjadi.",
+      "class": "os_command_execution",
+      "variant": "spaced_letters",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "letters separated by spaces are not reassembled"
+    },
+    {
+      "id": "oc-052",
+      "text": "Seluruh server bisa dikendalikan dari jarak jauh.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "phrasing outside the lexicon"
+    },
+    {
+      "id": "oc-053",
+      "text": "Attacker gains root on the box.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "phrasing outside the lexicon"
+    },
+    {
+      "id": "oc-054",
+      "text": "Penyerang dapat menanam backdoor di server.",
+      "class": "os_command_execution",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "phrasing outside the lexicon"
+    },
+    {
+      "id": "oc-055",
+      "text": "Penyerang dapat menjadi admin tanpa login.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "phrasing outside the lexicon"
+    },
+    {
+      "id": "oc-056",
+      "text": "The attacker can impersonate any user.",
+      "class": "authentication_bypass",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "phrasing outside the lexicon"
+    },
+    {
+      "id": "oc-057",
+      "text": "Data pelanggan bisa lenyap.",
+      "class": "data_destruction",
+      "variant": "plain",
+      "expect": "relocated",
+      "known_blind_spot": true,
+      "note": "phrasing outside the lexicon"
+    }
+  ]
+}

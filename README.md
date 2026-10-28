@@ -149,8 +149,11 @@ Clean fixture: `status: complete`, `findings: 0`, and the LLM is never called.
 make test     # .venv/bin/pytest -q   — no Ollama needed; real-semgrep tests auto-skip if missing
 make lint
 make smoke    # TANTULAR_RUN_OLLAMA_SMOKE=1 pytest -m ollama — live tantular-cyber:latest
-make bench    # cold + warm latency benchmark on tests/fixtures/bench (6 findings)
+make bench    # offline benchmark: scanner precision/recall + adversarial suites (CI gate)
+make bench-live  # opt-in: + LLM explanation quality and cold/warm performance (local Ollama)
 ```
+
+Benchmarking (POC-003) is documented in [docs/benchmark.md](docs/benchmark.md).
 
 Coverage: Semgrep JSON parsing and command construction, path safety and skip policy
 (secrets, binary, oversized, escaping symlinks), scan-coverage verification (including a

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -239,8 +240,22 @@ _CERTAINTY = re.compile(
 _INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 
 
+# Cyrillic/Greek letters that render like Latin ones (homoglyph evasion), by code point.
+_CONFUSABLES = str.maketrans(
+    {
+        0x0430: "a", 0x0435: "e", 0x043E: "o", 0x0440: "p", 0x0441: "c", 0x0445: "x",
+        0x0443: "y", 0x0456: "i", 0x0455: "s", 0x043A: "k", 0x043C: "m", 0x0442: "t",
+        0x043D: "h", 0x0432: "b", 0x0410: "A", 0x0415: "E", 0x041E: "O", 0x0420: "P",
+        0x0421: "C", 0x0425: "X", 0x0406: "I", 0x041A: "K", 0x041C: "M", 0x0422: "T",
+        0x041D: "H", 0x0412: "B", 0x03BF: "o", 0x03B1: "a", 0x03B5: "e", 0x039F: "O",
+    }
+)  # fmt: skip
+
+
 def _normalize_claim(text: str) -> str:
-    """Collapse whitespace and drop zero-width characters so spacing tricks do not evade."""
+    """Defeat cheap evasions: fullwidth/compatibility forms (NFKC), Latin homoglyphs,
+    zero-width characters, and irregular whitespace."""
+    text = unicodedata.normalize("NFKC", text).translate(_CONFUSABLES)
     return " ".join(_INVISIBLE.sub("", text).split())
 
 
