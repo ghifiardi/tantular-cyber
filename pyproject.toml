@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.24,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tantular-cyber"
+version = "0.2.0"
+description = "Tantular Cyber POC-002: local, read-only repository security analyzer (Semgrep + local Ollama)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "ghifiardi" }]
+dependencies = [
+    "httpx>=0.27,<1",
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<10",
+    "ruff>=0.6,<1",
+]
+# Semgrep is a large dependency; it is optional so `brew install semgrep` works too.
+semgrep = [
+    "semgrep>=1.90,<2",
+]
+
+[project.scripts]
+tantular-cyber = "tantular_cyber.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tantular_cyber"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "semgrep: requires a local semgrep binary (auto-skipped when missing)",
+    "ollama: live smoke test against a local Ollama server (opt-in via TANTULAR_RUN_OLLAMA_SMOKE=1)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = [
+    "S603",  # subprocess without shell: we deliberately use argument lists
+    "RUF001", "RUF002", "RUF003",  # Bahasa Indonesia text / typographic chars
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
