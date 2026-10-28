@@ -95,8 +95,7 @@ make bench              # latency benchmark vs local Ollama (unloads the model f
   (docs/benchmark-plan.md).
 * Then — expand coverage (CWE-78/79/22/798, Bandit/Gitleaks adapters, SARIF), then GATRA
   ingestion of `report.json`.
-* Open decision: software license (pyproject currently says "Proprietary" as a placeholder;
-  application code and model weights may be licensed differently).
+* Application source code is licensed under Apache-2.0 (see LICENSE). Model weights are separate and retain their own applicable license.
 
 ## Acceptance criteria (POC-002)
 
