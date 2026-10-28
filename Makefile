@@ -3,7 +3,7 @@ VENV ?= .venv
 BIN := $(VENV)/bin
 OUT ?= ./out
 
-.PHONY: install install-semgrep test smoke bench lint format schema scan scan-clean doctor clean
+.PHONY: install install-semgrep test smoke bench bench-live bench-replay lint format schema scan scan-clean doctor clean
 
 install:  ## create venv and install with dev extras (semgrep from brew or `make install-semgrep`)
 	$(PYTHON) -m venv $(VENV)
@@ -19,8 +19,17 @@ test:  ## unit + integration tests (no Ollama needed)
 smoke:  ## live test against local Ollama tantular-cyber:latest
 	TANTULAR_RUN_OLLAMA_SMOKE=1 $(BIN)/pytest -m ollama -q
 
-bench:  ## LLM latency/throughput benchmark (unloads the model first for a cold run)
-	$(BIN)/python benchmarks/llm_latency.py --runs 2 --output $(OUT)/bench
+bench:  ## offline deterministic benchmark (same as CI)
+	$(BIN)/tantular-cyber benchmark --output $(OUT)/benchmark
+
+bench-live:  ## opt-in: + local Ollama explanation quality, cold/warm perf, concurrency 1,2
+	$(BIN)/tantular-cyber -v benchmark --output $(OUT)/benchmark-live --llm ollama \
+		--llm-runs 2 --cold --concurrency 1,2 \
+		$(if $(BASELINE),--baseline $(BASELINE),)
+
+bench-replay:  ## LLM evaluation path with recorded outputs (no model needed)
+	$(BIN)/tantular-cyber benchmark --output $(OUT)/benchmark-replay --llm replay \
+		--replay-file tests/fixtures/bench_replay.json
 
 lint:
 	$(BIN)/ruff check .

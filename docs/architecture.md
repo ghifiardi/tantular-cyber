@@ -59,7 +59,8 @@ execution, verified exploitation — using word-family lexicons in Indonesian an
 (stems such as `*hapus*`, `*hancur*`, `mengosong*`; synonyms such as "login tanpa
 password", "masuk sebagai admin", "reverse shell", "server compromise", "exploitation is
 confirmed"), proximity matching (up to four words between verb and object), and
-whitespace/zero-width normalization. If a claim appears and the evidence/context does not
+normalization (NFKC for fullwidth forms, a Latin homoglyph map for common Cyrillic/Greek
+lookalikes, zero-width removal, whitespace collapsing). If a claim appears and the evidence/context does not
 contain supporting tokens (e.g. `DELETE`/`DROP`/`UPDATE` for modification,
 `os.system`/`subprocess` for OS execution), the item is moved to `conditional_impact` with
 a `[Dipindahkan …]` prefix, confidence is forced to `low`, and a `validation_warnings`
@@ -68,7 +69,8 @@ claims in `summary` are flagged. CVE identifiers are removed from all model text
 
 `tests/test_overclaims.py` holds 36 adversarial paraphrases plus grounded statements that
 must not be flagged (e.g. "mengeksekusi perintah SQL"). The guard is still lexical: novel
-phrasing outside the lexicons can pass. Extend the lexicon and the test list together.
+phrasing outside the lexicons can pass (measured blind spots are listed in
+`benchmarks/corpus/adversarial/overclaims.json`). Extend the lexicon and the tests together.
 
 ## Ruleset limits (`src/tantular_cyber/rules/python-sqli.yml`)
 

@@ -23,10 +23,13 @@ src/tantular_cyber/
   models.py         pydantic models; ScanReport is the GATRA-facing contract
   reports.py        JSON / Markdown writers (atomic, escaped)
   rules/            local Semgrep rules (shipped in the wheel)
+  benchmark/        POC-003 evaluation: manifest, matching, adversarial, llm_eval, perf,
+                    provenance, results (gates/comparison), render, runner
 tests/              pytest; fixtures/vulnerable + fixtures/clean (sqlite3 CWE-89 pair),
                     fixtures/bench (6 findings, every rule branch)
-benchmarks/         llm_latency.py (cold/warm latency + token throughput)
-docs/               architecture, benchmark plan, report-schema.json (generated)
+benchmarks/corpus/  benchmark corpus: manifest.json (ground truth), cases/ (never run),
+                    adversarial/ (overclaim + secret suites)
+docs/               architecture, benchmark guide + results, report-schema.json (generated)
 ```
 
 ## Commands
@@ -37,7 +40,9 @@ make test               # unit + integration tests, no Ollama required
 make smoke              # live test vs local Ollama (TANTULAR_RUN_OLLAMA_SMOKE=1)
 make lint               # ruff check + ruff format --check
 make schema             # regenerate docs/report-schema.json after changing models.py
-make bench              # latency benchmark vs local Ollama (unloads the model first)
+make bench              # offline deterministic benchmark (what CI gates on)
+make bench-replay       # LLM-evaluation path with recorded outputs, no model
+make bench-live         # opt-in: local Ollama quality + cold/warm perf + concurrency 1,2
 .venv/bin/tantular-cyber doctor
 .venv/bin/tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out
 ```
@@ -88,14 +93,23 @@ make bench              # latency benchmark vs local Ollama (unloads the model f
 
 ## Milestones
 
-* **POC-002 (this)** — Semgrep CWE-89 + Ollama explanation + JSON/MD reports + tests + CI.
-* **POC-003 (proposed)** — evaluation & reliability benchmark: scanner precision/recall and
-  CWE accuracy measured separately from model evidence-grounding, unsupported-claim rate,
-  remediation correctness, prompt-injection resistance, latency/throughput
-  (docs/benchmark-plan.md).
+* **POC-002 (done)** — Semgrep CWE-89 + Ollama explanation + JSON/MD reports + tests + CI.
+* **POC-003 (this)** — `tantular-cyber benchmark`: scanner detection (deterministic, gated)
+  separate from LLM explanation quality (sample-based, never gated), adversarial suites,
+  performance with honest cold/warm labels. Guide: docs/benchmark.md.
 * Then — expand coverage (CWE-78/79/22/798, Bandit/Gitleaks adapters, SARIF), then GATRA
   ingestion of `report.json`.
 * Application source code is licensed under Apache-2.0 (see LICENSE). Model weights are separate and retain their own applicable license.
+
+## Benchmark conventions (POC-003)
+
+* Ground truth lives only in `benchmarks/corpus/manifest.json`; case files must not contain
+  labels (the model reads them). Never execute or import case files.
+* Deterministic results gate CI; LLM and performance numbers are reported, never gated.
+* Changing scanner behavior on the corpus = update `expect_detected` in the manifest in the
+  same change (an improvement fails the gate until acknowledged).
+* Blind spots are data, not secrets: record them with `known_blind_spot: true` + a note.
+* Benchmark output schema (`benchmark_schema_version`) is independent of `report.json`.
 
 ## Acceptance criteria (POC-002)
 
