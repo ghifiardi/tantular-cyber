@@ -1,0 +1,57 @@
+# Tantular Cyber local ruleset — Python SQL injection (CWE-89).
+#
+# Small, auditable, offline rules. They are syntactic, intra-procedural and
+# do NOT track taint across functions or files. Limits are documented in
+# docs/architecture.md ("Ruleset limits").
+rules:
+  - id: tantular.python.sqli.dynamic-query-execute
+    languages: [python]
+    severity: ERROR
+    message: >-
+      SQL statement is built with string formatting/concatenation and passed to
+      a DB-API execute call. If any interpolated value is attacker-controlled
+      this may allow SQL injection. Use parameterized queries (placeholders
+      plus a parameters tuple) instead.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      category: security
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://docs.python.org/3/library/sqlite3.html#sqlite3-placeholders
+    patterns:
+      - pattern-either:
+          # Query built inline in the call.
+          - pattern: $CUR.$EXEC(f"...", ...)
+          - pattern: $CUR.$EXEC("..." + $X, ...)
+          - pattern: $CUR.$EXEC($X + "...", ...)
+          - pattern: $CUR.$EXEC("..." % $X, ...)
+          - pattern: $CUR.$EXEC("...".format(...), ...)
+          # Query built in a local variable first, then executed.
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      $Q = f"..."
+                      ...
+                  - pattern-inside: |
+                      $Q = "..." + $X
+                      ...
+                  - pattern-inside: |
+                      $Q = $X + "..."
+                      ...
+                  - pattern-inside: |
+                      $Q = "..." % $X
+                      ...
+                  - pattern-inside: |
+                      $Q = "...".format(...)
+                      ...
+                  - pattern-inside: |
+                      $Q += $X
+                      ...
+              - pattern: $CUR.$EXEC($Q, ...)
+      - metavariable-regex:
+          metavariable: $EXEC
+          regex: ^(execute|executemany|executescript)$

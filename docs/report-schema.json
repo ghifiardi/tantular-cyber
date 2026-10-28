@@ -1,0 +1,1020 @@
+{
+  "$defs": {
+    "Evidence": {
+      "properties": {
+        "start_line": {
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "title": "End Line",
+          "type": "integer"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/EvidenceLine"
+          },
+          "title": "Lines",
+          "type": "array"
+        },
+        "snippet": {
+          "description": "Exact source lines, prefixed with line numbers, redacted.",
+          "title": "Snippet",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "redactions": {
+          "default": 0,
+          "title": "Redactions",
+          "type": "integer"
+        },
+        "context": {
+          "default": "",
+          "description": "Surrounding lines (+/- context_lines) with line numbers, redacted. Reader aid only; the match is defined by start_line..end_line.",
+          "title": "Context",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_line",
+        "end_line",
+        "lines",
+        "snippet"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "EvidenceLine": {
+      "properties": {
+        "line": {
+          "title": "Line",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "line",
+        "text"
+      ],
+      "title": "EvidenceLine",
+      "type": "object"
+    },
+    "Finding": {
+      "properties": {
+        "id": {
+          "description": "Deterministic: sha256(tool|rule|path|start|end|evidence)[:16].",
+          "title": "Id",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "rule_id": {
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "cwe": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cwe",
+          "type": "array"
+        },
+        "severity": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "info"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repository-relative POSIX path.",
+          "title": "Path",
+          "type": "string"
+        },
+        "start_line": {
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "title": "End Line",
+          "type": "integer"
+        },
+        "evidence": {
+          "$ref": "#/$defs/Evidence"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Confidence declared by the rule.",
+          "title": "Confidence"
+        },
+        "confidence_source": {
+          "default": "scanner_rule_metadata",
+          "title": "Confidence Source",
+          "type": "string"
+        },
+        "status": {
+          "const": "unverified",
+          "default": "unverified",
+          "title": "Status",
+          "type": "string"
+        },
+        "analysis": {
+          "$ref": "#/$defs/FindingAnalysis"
+        }
+      },
+      "required": [
+        "id",
+        "tool",
+        "rule_id",
+        "cwe",
+        "severity",
+        "path",
+        "start_line",
+        "end_line",
+        "evidence",
+        "message"
+      ],
+      "title": "Finding",
+      "type": "object"
+    },
+    "FindingAnalysis": {
+      "properties": {
+        "status": {
+          "enum": [
+            "completed",
+            "invalid_output",
+            "error",
+            "skipped",
+            "disabled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "language": {
+          "default": "id",
+          "title": "Language",
+          "type": "string"
+        },
+        "explanation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMExplanation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "verified": {
+          "const": false,
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "disclaimer": {
+          "default": "Penjelasan ini dihasilkan oleh model bahasa lokal dan bersifat saran (advisory). Semua klaim model belum diverifikasi dan harus diperiksa secara independen. Bukti dari scanner adalah sumber otoritatif.",
+          "title": "Disclaimer",
+          "type": "string"
+        },
+        "validation_warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Warnings",
+          "type": "array"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration S"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "FindingAnalysis",
+      "type": "object"
+    },
+    "Generator": {
+      "properties": {
+        "name": {
+          "default": "tantular-cyber",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "Generator",
+      "type": "object"
+    },
+    "LLMExplanation": {
+      "description": "Contract the model must satisfy (validated; extra keys ignored).",
+      "properties": {
+        "summary": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "confirmed_evidence": {
+          "description": "Only facts directly visible in the scanner evidence.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Confirmed Evidence",
+          "type": "array"
+        },
+        "conditional_impact": {
+          "description": "Impact that MAY occur, with the conditions required.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Conditional Impact",
+          "type": "array"
+        },
+        "remediation": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remediation",
+          "type": "array"
+        },
+        "corrected_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only when supported by the evidence; never applied.",
+          "title": "Corrected Code"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "summary",
+        "confirmed_evidence",
+        "conditional_impact",
+        "remediation",
+        "confidence"
+      ],
+      "title": "LLMExplanation",
+      "type": "object"
+    },
+    "LLMInfo": {
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Endpoint"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "server_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server Version"
+        },
+        "available": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Available"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "performance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LLMPerformance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "LLMInfo",
+      "type": "object"
+    },
+    "LLMMetrics": {
+      "description": "Per-call timing/token counters reported by the LLM server (Ollama ``/api/chat``).",
+      "properties": {
+        "wall_s": {
+          "description": "Client-measured request time.",
+          "title": "Wall S",
+          "type": "number"
+        },
+        "total_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total S"
+        },
+        "load_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model load time (cold start).",
+          "title": "Load S"
+        },
+        "prompt_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Tokens"
+        },
+        "prompt_eval_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Eval S"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
+        "eval_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eval S"
+        },
+        "output_tokens_per_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens Per S"
+        }
+      },
+      "required": [
+        "wall_s"
+      ],
+      "title": "LLMMetrics",
+      "type": "object"
+    },
+    "LLMPerformance": {
+      "description": "Aggregate of ``LLMMetrics`` over all completed LLM calls in a run.",
+      "properties": {
+        "calls": {
+          "title": "Calls",
+          "type": "integer"
+        },
+        "total_wall_s": {
+          "title": "Total Wall S",
+          "type": "number"
+        },
+        "mean_wall_s": {
+          "title": "Mean Wall S",
+          "type": "number"
+        },
+        "min_wall_s": {
+          "title": "Min Wall S",
+          "type": "number"
+        },
+        "max_wall_s": {
+          "title": "Max Wall S",
+          "type": "number"
+        },
+        "first_call_load_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "First Call Load S"
+        },
+        "total_load_s": {
+          "title": "Total Load S",
+          "type": "number"
+        },
+        "prompt_tokens": {
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "mean_output_tokens_per_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mean Output Tokens Per S"
+        }
+      },
+      "required": [
+        "calls",
+        "total_wall_s",
+        "mean_wall_s",
+        "min_wall_s",
+        "max_wall_s",
+        "first_call_load_s",
+        "total_load_s",
+        "prompt_tokens",
+        "output_tokens",
+        "mean_output_tokens_per_s"
+      ],
+      "title": "LLMPerformance",
+      "type": "object"
+    },
+    "ReportError": {
+      "properties": {
+        "stage": {
+          "enum": [
+            "input",
+            "scanner",
+            "normalize",
+            "llm",
+            "report"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "message"
+      ],
+      "title": "ReportError",
+      "type": "object"
+    },
+    "ScanCoverage": {
+      "description": "What a scanner actually analyzed, verified against the tool's own output.",
+      "properties": {
+        "languages": {
+          "description": "Languages declared by the rules.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Languages",
+          "type": "array"
+        },
+        "targets_submitted": {
+          "title": "Targets Submitted",
+          "type": "integer"
+        },
+        "in_scope": {
+          "description": "Submitted files whose language the rules cover.",
+          "title": "In Scope",
+          "type": "integer"
+        },
+        "scanned": {
+          "description": "In-scope files the tool reported as scanned.",
+          "title": "Scanned",
+          "type": "integer"
+        },
+        "not_scanned": {
+          "description": "In-scope files the tool did not scan (coverage gap).",
+          "items": {
+            "$ref": "#/$defs/SkippedEntry"
+          },
+          "title": "Not Scanned",
+          "type": "array"
+        },
+        "out_of_scope": {
+          "description": "Submitted files no rule language applies to.",
+          "title": "Out Of Scope",
+          "type": "integer"
+        },
+        "verified": {
+          "description": "Whether the tool reported its scanned paths.",
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "languages",
+        "targets_submitted",
+        "in_scope",
+        "scanned",
+        "not_scanned",
+        "out_of_scope",
+        "verified"
+      ],
+      "title": "ScanCoverage",
+      "type": "object"
+    },
+    "ScannerInfo": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Version"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exit Code"
+        },
+        "duration_s": {
+          "title": "Duration S",
+          "type": "number"
+        },
+        "rules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "targets": {
+          "title": "Targets",
+          "type": "integer"
+        },
+        "succeeded": {
+          "title": "Succeeded",
+          "type": "boolean"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScanCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "exit_code",
+        "duration_s",
+        "rules",
+        "targets",
+        "succeeded"
+      ],
+      "title": "ScannerInfo",
+      "type": "object"
+    },
+    "SkippedEntry": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "title": "SkippedEntry",
+      "type": "object"
+    },
+    "SkippedSummary": {
+      "properties": {
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        },
+        "by_reason": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Reason",
+          "type": "object"
+        },
+        "entries": {
+          "description": "Capped sample of skipped paths.",
+          "items": {
+            "$ref": "#/$defs/SkippedEntry"
+          },
+          "title": "Entries",
+          "type": "array"
+        },
+        "entries_truncated": {
+          "title": "Entries Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "total",
+        "by_reason",
+        "entries",
+        "entries_truncated"
+      ],
+      "title": "SkippedSummary",
+      "type": "object"
+    },
+    "TargetInfo": {
+      "properties": {
+        "name": {
+          "description": "Repository directory name only (no absolute path).",
+          "title": "Name",
+          "type": "string"
+        },
+        "files_scanned": {
+          "description": "Eligible files submitted to the scanners.",
+          "title": "Files Scanned",
+          "type": "integer"
+        },
+        "files_skipped": {
+          "description": "Files excluded by the inventory safety policy.",
+          "title": "Files Skipped",
+          "type": "integer"
+        },
+        "ignore_files_present": {
+          "description": "Repository-controlled ignore files found (e.g. .semgrepignore). They are NOT used to select targets; coverage is verified per scanner instead.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Ignore Files Present",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "files_scanned",
+        "files_skipped"
+      ],
+      "title": "TargetInfo",
+      "type": "object"
+    },
+    "Totals": {
+      "properties": {
+        "findings": {
+          "title": "Findings",
+          "type": "integer"
+        },
+        "by_severity": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Severity",
+          "type": "object"
+        },
+        "by_cwe": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Cwe",
+          "type": "object"
+        },
+        "analyses_by_status": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Analyses By Status",
+          "type": "object"
+        }
+      },
+      "required": [
+        "findings",
+        "by_severity",
+        "by_cwe",
+        "analyses_by_status"
+      ],
+      "title": "Totals",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "default": "1.1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "report_type": {
+      "default": "tantular-cyber.repository-scan",
+      "title": "Report Type",
+      "type": "string"
+    },
+    "generator": {
+      "$ref": "#/$defs/Generator"
+    },
+    "scan_id": {
+      "title": "Scan Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "degraded",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "status_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Status Reasons",
+      "type": "array"
+    },
+    "started_at": {
+      "title": "Started At",
+      "type": "string"
+    },
+    "finished_at": {
+      "title": "Finished At",
+      "type": "string"
+    },
+    "duration_s": {
+      "title": "Duration S",
+      "type": "number"
+    },
+    "target": {
+      "$ref": "#/$defs/TargetInfo"
+    },
+    "scanners": {
+      "items": {
+        "$ref": "#/$defs/ScannerInfo"
+      },
+      "title": "Scanners",
+      "type": "array"
+    },
+    "llm": {
+      "$ref": "#/$defs/LLMInfo"
+    },
+    "totals": {
+      "$ref": "#/$defs/Totals"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "skipped": {
+      "$ref": "#/$defs/SkippedSummary"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/ReportError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "generator",
+    "scan_id",
+    "status",
+    "status_reasons",
+    "started_at",
+    "finished_at",
+    "duration_s",
+    "target",
+    "scanners",
+    "llm",
+    "totals",
+    "findings",
+    "skipped",
+    "errors",
+    "limitations"
+  ],
+  "title": "ScanReport",
+  "type": "object"
+}
