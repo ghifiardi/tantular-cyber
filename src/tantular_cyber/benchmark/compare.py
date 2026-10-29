@@ -101,6 +101,11 @@ class ArmSummary(BaseModel):
     output_tokens_mean: float | None
     output_tokens_per_s_mean: float | None
     errors: int
+    provenance_changed: bool = Field(
+        default=False,
+        description="The model's provenance differed before vs after the run: samples may "
+        "come from more than one model file and must not be read as a single-version result.",
+    )
 
 
 class PairedResult(BaseModel):
@@ -121,7 +126,7 @@ class Adoption(BaseModel):
 
 class ComparisonResult(BaseModel):
     result_type: str = "tantular-cyber.model-comparison"
-    schema_version: str = "1.0.0"
+    schema_version: str = "1.1.0"
     started_at: str
     finished_at: str | None = None
     sample_based: bool = True
@@ -137,6 +142,11 @@ class ComparisonResult(BaseModel):
     paired: list[PairedResult]
     adoption: list[Adoption]
     profile_identity: dict[str, object] | None = None
+    provenance_changes: list[str] = Field(
+        default_factory=list,
+        description="Differences between the provenance captured before and after the arms "
+        "(e.g. Ollama migrated or re-pulled a model mid-run).",
+    )
     notes: list[str]
     caveats: list[str] = [
         "Sample-based: rates come from deterministic proxy checks on a small synthetic corpus "
@@ -204,6 +214,27 @@ def model_provenance(base_url: str, names: Sequence[str]) -> list[ModelProvenanc
             if b is not a and a.weights_blob and a.weights_blob == b.weights_blob
         )
     return out
+
+
+def provenance_drift(
+    before: Sequence[ModelProvenance], after: Sequence[ModelProvenance]
+) -> dict[str, list[str]]:
+    """Per model, the fields that changed between two provenance snapshots."""
+    later = {m.name: m for m in after}
+    changes: dict[str, list[str]] = {}
+    for m in before:
+        b = later.get(m.name)
+        if b is None:
+            changes[m.name] = [f"{m.name}: missing from the post-run snapshot"]
+            continue
+        diffs = [
+            f"{m.name}: {key} {getattr(m, key)} -> {getattr(b, key)}"
+            for key in ("installed", "digest", "weights_blob", "quantization", "system_sha256")
+            if getattr(m, key) != getattr(b, key)
+        ]
+        if diffs:
+            changes[m.name] = diffs
+    return changes
 
 
 @dataclass
@@ -547,6 +578,11 @@ def run_comparison(
     identity = None
     if len(identity_pair) == 2 and all(m in installed for m in identity_pair):
         identity = profile_identity_check(identity_pair, findings, ollama)
+    # Ollama can rewrite a manifest during a run (e.g. its GGUF compat migration on first
+    # load), so the pre-run snapshot alone may not describe the weights that were served.
+    drift = provenance_drift(provenance, model_provenance(ollama.base_url, names))
+    for s in summaries:
+        s.provenance_changed = s.model in drift
     commit, _ = code_state()
     return ComparisonResult(
         started_at=started,
@@ -563,6 +599,7 @@ def run_comparison(
         paired=pairs,
         adoption=adoption,
         profile_identity=identity,
+        provenance_changes=[c for diffs in drift.values() for c in diffs],
         notes=notes,
     )
 
@@ -579,13 +616,13 @@ def render_comparison(r: ComparisonResult) -> str:
         "",
         "## Models",
         "",
-        "| Model | Installed | Weights blob | Quant | Params | Modelfile SYSTEM "
+        "| Model | Installed | Digest | Weights blob | Quant | Params | Modelfile SYSTEM "
         "| Shares weights with |",
-        "|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for m in r.models:
         out.append(
-            f"| `{m.name}` | {m.installed} | `{m.weights_blob or '-'}` | "
+            f"| `{m.name}` | {m.installed} | `{m.digest or '-'}` | `{m.weights_blob or '-'}` | "
             f"{m.quantization or '-'} | {m.parameter_size or '-'} | "
             f"{m.modelfile_has_system} | {', '.join(m.shares_weights_with) or '-'} |"
         )
@@ -614,6 +651,14 @@ def render_comparison(r: ComparisonResult) -> str:
             + ". In `~modelfile-profile` arms any difference is the **combined** profile "
             "effect of all of these, not of the SYSTEM prompt alone.",
         ]
+    if r.provenance_changes:
+        out += [
+            "",
+            "**Provenance changed during the run** (the table shows the pre-run snapshot; "
+            "affected arms may mix weights — check the Ollama server log):",
+            "",
+            *[f"- {c}" for c in r.provenance_changes],
+        ]
     if r.profile_identity:
         pi = r.profile_identity
         out += [
@@ -639,7 +684,7 @@ def render_comparison(r: ComparisonResult) -> str:
                 else f"{c['rate']:.0%} ({c['ci95_low']:.2f}–{c['ci95_high']:.2f})"
             )
         out.append(
-            f"| `{a.arm}` | {a.n} | "
+            f"| `{a.arm}`{' ⚠ provenance changed' if a.provenance_changed else ''} | {a.n} | "
             + " | ".join(cells)
             + f" | {a.latency.get('p50_s')} | {a.latency.get('p95_s')} | "
             f"{a.prompt_tokens_mean} | {a.prompt_cached_tokens_mean} | "

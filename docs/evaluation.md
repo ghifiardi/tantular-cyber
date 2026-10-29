@@ -91,6 +91,17 @@ tantular-cyber -v compare --models tantular-cyber:latest --profiles baseline,con
   paired wins/losses vs the reference arm with an exact McNemar test.
 * Quantization confound: Tantular weights are Q8_0, `qwen3.5:9b`/`qwen3:8b` are Q4_K_M —
   differences mix weights, tuning and quantization; no single "winner" is declared.
+* Provenance is captured **before and after** the arms; any difference (digest, weights
+  blob, quantization, SYSTEM hash) is listed under `provenance_changes`, shown as a
+  warning, and every arm of an affected model is flagged `provenance_changed` (⚠ in the
+  table) — its samples may mix model files and are not a single-version result. Recording
+  the digest per response is a follow-up, not part of POC-005. Ollama 0.40.x runs a "local compat GGUF migration" the first time it loads an
+  older model and rewrites the manifest to a new weights blob, so the first request(s) of
+  an arm can be served by the pre-migration file. Warm every model once (or run a short
+  smoke comparison) before a long comparison, and confirm in the Ollama server log
+  (`~/.ollama/logs/server.log`, `llama-server --model …`) which blob served each arm.
+* Keep the machine awake (`caffeinate -i`) during long runs; idle sleep pauses between
+  requests inflate wall time (per-request latency is unaffected).
 * `--modes profile` sends **no system message and no sampling options** (only the per-run
   seed): each model's own Modelfile SYSTEM prompt and PARAMETERs apply, and our instructions
   travel at the top of the user message, so inputs stay identical. Comparing

@@ -17,6 +17,7 @@ from tantular_cyber.benchmark.compare import (
     adoption_decision,
     mcnemar_exact,
     parse_arms,
+    provenance_drift,
     render_comparison,
     run_comparison,
 )
@@ -112,10 +113,18 @@ def test_run_comparison_offline_with_pinned_options(monkeypatch) -> None:
             )
             return GOOD_EXPLANATION
 
+    snapshots: list[list[str]] = []
+
     def fake_provenance(base_url, names):
+        # The second (post-run) snapshot simulates Ollama migrating m:b's weights mid-run.
+        blob = "v" * 16 if snapshots else "w" * 16
+        snapshots.append(list(names))
         return [
             ModelProvenance(
-                name=n, installed=n != "missing:1", weights_blob="w" * 16, quantization="Q8_0"
+                name=n,
+                installed=n != "missing:1",
+                weights_blob=blob if n == "m:b" else "w" * 16,
+                quantization="Q8_0",
             )
             for n in names
         ]
@@ -140,7 +149,25 @@ def test_run_comparison_offline_with_pinned_options(monkeypatch) -> None:
     assert any("Batasan panjang" in s["system"] for s in sent)  # concise profile applied
     assert all(a.n == 10 for a in result.arms)
     assert [a.arm for a in result.adoption] == ["m:a|concise"]  # same model only
-    assert "Paired comparison" in render_comparison(result)
+    assert len(snapshots) == 2
+    assert result.provenance_changes == [f"m:b: weights_blob {'w' * 16} -> {'v' * 16}"]
+    assert [a.arm for a in result.arms if a.provenance_changed] == ["m:b|baseline"]
+    rendered = render_comparison(result)
+    assert "Paired comparison" in rendered and "Provenance changed during the run" in rendered
+    assert "`m:b|baseline` ⚠ provenance changed" in rendered
+
+
+def test_provenance_drift_reports_changed_and_missing_models() -> None:
+    before = [
+        ModelProvenance(name="a", installed=True, digest="d1", weights_blob="b1"),
+        ModelProvenance(name="b", installed=True, digest="d2", weights_blob="b2"),
+    ]
+    after = [ModelProvenance(name="a", installed=True, digest="d1x", weights_blob="b1")]
+    assert provenance_drift(before, after) == {
+        "a": ["a: digest d1 -> d1x"],
+        "b": ["b: missing from the post-run snapshot"],
+    }
+    assert provenance_drift(before, before) == {}
 
 
 def test_modelfile_profile_mode_sends_no_system_role_or_pinned_options() -> None:

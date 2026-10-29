@@ -18,8 +18,9 @@ from .provenance import Provenance
 from .realworld import RealWorldResult
 
 LIMITATIONS = [
-    "The corpus is small and synthetic (Python, CWE-89 only). Precision/recall describe the "
-    "bundled rule on this corpus and are regression floors, not real-world performance.",
+    "The corpus is small and synthetic (Python; CWE-89/78/22/79/798). Precision/recall "
+    "describe the bundled rules and tantular-callgraph on this corpus and are regression "
+    "floors, not real-world performance.",
     "Ground-truth matching is line-range based (see docs/benchmark.md); it does not judge "
     "whether a finding's message is correct.",
     "LLM metrics are sample-based (small n, sampling noise) and come from deterministic "

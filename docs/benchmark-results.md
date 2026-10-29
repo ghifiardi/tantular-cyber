@@ -4,6 +4,149 @@ Dated results. Method and interpretation: [benchmark.md](benchmark.md). The 2026
 POC-002 baseline below used the earlier standalone latency script (since replaced by
 `tantular-cyber benchmark --llm ollama`) on `tests/fixtures/bench`.
 
+## 2026-10-29 — POC-005 (callgraph, real-world pointers, model/profile comparison)
+
+Branch `feat/poc-005-accuracy-evaluation`, corpus manifest 1.2.0, Apple M4 Pro 24 GB,
+Ollama 0.40.2, think=false, stream=false. Method: [evaluation.md](evaluation.md).
+
+### Scanner detection (deterministic, offline, CI-gated)
+
+`tantular-cyber benchmark` (gate: **pass**), manifest 1.2.0 (corpus grew from POC-004's
+1.1.0 with interprocedural and chain cases, so totals are not directly comparable).
+
+| Scanners | TP | FP | FN | TN | Precision | Recall |
+|---|---|---|---|---|---|---|
+| Semgrep + tantular-callgraph (gated) | 43 | 8 | 4 | 23 | 0.843 | 0.915 |
+| Semgrep only | 36 | 8 | 11 | 23 | 0.818 | 0.766 |
+| tantular-callgraph only | 30 | 2 | 17 | 29 | 0.938 | 0.638 |
+
+| CWE | TP | FP | FN | TN | Precision | Recall |
+|---|---|---|---|---|---|---|
+| CWE-89 | 20 | 4 | 2 | 8 | 0.83 | 0.91 |
+| CWE-78 | 6 | 1 | 0 | 3 | 0.86 | 1.00 |
+| CWE-22 | 5 | 1 | 0 | 3 | 0.83 | 1.00 |
+| CWE-79 | 7 | 1 | 1 | 6 | 0.88 | 0.88 |
+| CWE-798 | 5 | 1 | 1 | 3 | 0.83 | 0.83 |
+
+* Callgraph-only detections (7): the five former known FNs (`known-fn-cross-function`,
+  `known-fn-join`, `known-fn-sqlalchemy-text`, `cmdi-known-fn-sh-c`,
+  `path-known-fn-pathlib`) plus `interproc-cross-module` and `interproc-self-dispatch`.
+  The callgraph flags **no safe-code location** that Semgrep did not already flag.
+* Rule change vs POC-004 on the same corpus: +`chain-sql-inline`, +`chain-sql-variable`,
+  nothing lost. Remaining FNs include the pinned limits `interproc-known-fn-depth` and
+  `interproc-known-fn-dynamic-dispatch`.
+* Evidence context (51 locations): construct + sink visible — window 47/51 (92%), AST
+  51/51 (100%); 0 over budget. Adversarial: overclaims 50 passed / 7 known gaps; secrets
+  23 passed / 4 known gaps (unchanged).
+* Precision/recall are regression floors on a small synthetic corpus, not real-world rates.
+
+### Real-world pointers (descriptive, not a rate)
+
+7 pointer-only locations (no code committed; hashes verified on opt-in fetch): **3 detected**
+(wsgidav SELECT, wsgidav DESCRIBE, scitokens), 4 missed with `coverage_candidate` notes
+(vendor SDK SQL, directory creation, in-repo command wrapper, helper-based path use).
+`wsgidav SELECT` has `development_use` set (it prompted the chain pattern), so only 6 are
+held out. Upstream labels are unverified hypotheses. No precision/recall is claimed.
+
+### Model comparison (pinned options, our system prompt; sample-based, never gated)
+
+40 findings × 3 runs (seeds 1–3) = **n = 120 per model**, 0 request errors; Wilson 95%
+intervals; exact McNemar on paired samples vs `tantular-cyber:latest`. Started
+2026-10-29T03:23Z, code `76a9318`.
+
+| Model | Digest | Weights blob | Quant | Integrity |
+|---|---|---|---|---|
+| `tantular-cyber:latest` | `e79106b3b1ebcc77` | `4da76d43e612c0aa` | Q8_0 | ✅ stable before/after; one runner, same blob, whole arm |
+| `qwen3:8b` | `500a1f067a9f7826` | `a3de86cd1c132c82` | Q4_K_M | ✅ stable before/after |
+| `qwen3.5:9b` | `6488c96f…` → `c97eb11d…` | `dec52a44…` → `733ca544…` | Q4_K_M | ⚠ **mixed model files** (1 + 119 samples) — exploratory only |
+| `tantular-office:0.5-9b` | `0ed8471c…` → `983443e6…` | `73b25b60…` → `4da76d43…` | Q8_0 | ⚠ **not independent** — 118/120 samples served by the Tantular Cyber weights blob |
+| `ghifidanukusumo/tantular:latest` | `2df730ac1bdaafc1` | `4da76d43e612c0aa` | Q8_0 | identity pair only (see below) |
+
+**Integrity issue.** Ollama 0.40.2 ran its automatic "local compat GGUF migration" the first
+time it loaded `qwen3.5:9b` (11:18 WIB) and `tantular-office:0.5-9b` (13:38 WIB), rewriting
+each manifest to a new weights blob mid-arm. The server log shows the first request(s) were
+served by the pre-migration file and the rest by the migrated one. Nobody changed the models;
+the harness only snapshotted provenance at start, so the original report shows pre-run
+digests. Fixed in this PR: provenance is re-captured after the arms, changes are listed and
+affected arms are flagged `provenance_changed`. The migrated `tantular-office` file is
+byte-identical (same blob hash) to the Tantular Cyber weights, which explains why its results
+track the reference (a single discordant pair across all paired checks). Per-response digest recording
+is a follow-up.
+
+| Model | evidence_grounded | impact_separated | remediation_sound | cwe_consistent | calibrated | p50 / p95 s | output tok | tok/s |
+|---|---|---|---|---|---|---|---|---|
+| `tantular-cyber:latest` | 57% (0.48–0.66) | 92% (0.85–0.95) | 98% (0.93–0.99) | 100% (0.97–1.00) | 98% (0.93–0.99) | 25.9 / 30.8 | 523 | 23.1 |
+| `qwen3:8b` | **95%** (0.89–0.98) | **100%** (0.97–1.00) | 83% (0.76–0.89) | 96% (0.91–0.98) | 97% (0.92–0.99) | 12.9 / 21.9 | 305 | 28.9 |
+| `qwen3.5:9b` ⚠ | 56% (0.47–0.65) | 87% (0.79–0.92) | 96% (0.91–0.98) | 100% (0.97–1.00) | 96% (0.91–0.98) | 31.2 / 46.2 | 526 | 20.5 |
+| `tantular-office:0.5-9b` ⚠ | 57% (0.48–0.66) | 91% (0.84–0.95) | 98% (0.93–0.99) | 100% (0.97–1.00) | 98% (0.93–0.99) | 24.4 / 29.5 | 524 | 23.6 |
+
+All four: `schema_valid`, `no_unsupported_assertions` and `bahasa_indonesia` 100% (0.97–1.00).
+`injection_resisted` applies to only 6 samples per model (2 findings × 3 runs; Tantular 5/6,
+others 6/6) — too few to compare.
+
+**Tantular Cyber vs Qwen3 8B (the clean pair):** Qwen3 8B is better on `evidence_grounded`
+(27 vs 0 discordant pairs, p < 0.001) and `impact_separated` (10 vs 0, p = 0.002), worse on
+`remediation_sound` (3 vs 20, p = 0.0005), and about 2× faster at p50 with ~40% fewer output
+tokens. The comparison is confounded with quantization (Q4_K_M vs Q8_0) and model family; it
+is **evidence for evaluating models per security task**, not a ranking. `prompt tok` differs
+(908 vs 811) because the tokenizers differ.
+
+**Same weights, pinned request:** `tantular-cyber:latest` and `ghifidanukusumo/tantular:latest`
+gave byte-identical outputs on 3 findings (seed 1) — under our pinned request the Modelfile
+profile has no effect. `tantular-cyber:latest` is a profile of those weights, not a separate
+fine-tune.
+
+Machine idle-sleep paused the run between requests (gaps of 2–14 min during the `qwen3.5:9b`
+arm); no single request exceeded 56 s, so per-request latency is unaffected but wall times
+in the raw report are not comparable.
+
+### Prompt/context optimization (`tantular-cyber:latest`, n = 80 per arm)
+
+40 findings × 2 runs, pinned options, 0 errors; reference = `baseline` @ num_ctx 8192.
+
+| Arm | evidence_grounded | impact_separated | remediation_sound | other checks | p50 / p95 s (all) | p50 / p95 s (uncontended) | Decision |
+|---|---|---|---|---|---|---|---|
+| baseline | 56% (0.45–0.67) | 90% (0.81–0.95) | 98% (0.91–0.99) | 98–100% | 22.9 / 27.4 | 22.8 / 27.1 (n = 59) | reference |
+| baseline @ctx4096 | 56% | 90% | 98% | identical | 23.9 / 51.3 | same (n = 80) | **do not adopt** — no speed-up (+4%) |
+| concise | 72% (0.61–0.81) | 96% (0.90–0.99) | **82%** (0.73–0.89) | 100% | 20.5 / 39.9 | same (n = 80) | **do not adopt** — remediation 12 net losses (p = 0.0005) |
+| concise @ctx4096 | 72% | 96% | **82%** | 100% | 19.1 / 21.3 | same (n = 80) | **do not adopt** — same quality loss |
+
+* Quality decides first: `concise` improves evidence grounding (19 vs 9 discordant,
+  p = 0.087, not significant) but loses remediation in 12 paired samples with no gains, which
+  fails the rule regardless of its 10–17% latency gain. The default stays `baseline` / 8192.
+* num_ctx 4096 produced the same outputs as 8192 (prompt + output stay below 4096 tokens);
+  its p95 of 51 s comes from a few slow requests without CPU contention — latency only.
+* **CPU contention:** offline tests ran during the baseline arm (≈14:30–14:36 and
+  14:43:25–14:44:23 WIB). Samples were classified by their full request interval (start =
+  server completion − duration, Ollama log): 21/80 baseline samples overlap. All are kept;
+  latency is reported with and without them and no decision changes.
+
+### Same-weights Modelfile-profile comparison — **PARTIAL, in progress**
+
+`--modes profile` (no system message, no pinned options; each Modelfile's SYSTEM and
+PARAMETERs apply) on `tantular-cyber:latest` vs `ghifidanukusumo/tantular:latest` — identical
+weights blob `4da76d43…`, profiles differ in SYSTEM prompt (hash) and `num_ctx` 8192 vs
+32768. Any difference is the **combined** profile effect, not the SYSTEM prompt alone.
+Resumable run (`out/sameweights`, checkpointed). At PR time only ~20 of 240 planned samples
+were complete, so **no results are reported yet**; this section will be updated on the PR
+when the run finishes, with any `provenance_changed` arm flagged rather than aggregated.
+Latency from this run is not comparable: the machine ran on battery and slept between
+17:00 and 18:57 WIB, and the offline tests and benchmark ran concurrently (19:00:32–
+19:04:50 and 19:27:49–19:28:21 WIB); samples overlapping those intervals will be labelled
+by full request interval, not dropped.
+
+### Limitations and follow-ups
+
+* All LLM numbers are deterministic proxies on a small synthetic corpus; no human review
+  data exists yet (the ingestion workflow is ready). Nothing here gates CI.
+* `evidence_grounded` is ~57% for Tantular Cyber despite AST context and call paths. Whether
+  the cause is the evidence supplied, the model's use of it, the prompt or the rubric is the
+  next model-quality milestone — not POC-005.
+* `qwen3.5:9b` and `tantular-office:0.5-9b` results are exploratory (mixed files /
+  non-independent); a clean rerun would need pre-warmed (migrated) models.
+* Real-world sample: 7 pointers, labels unverified; descriptive only.
+* Known scanner limitations stay pinned as tests (call depth, dynamic dispatch).
+
 ## 2026-10-29 — POC-004 (five CWEs, AST context)
 
 Branch `feat/poc-004-security-intelligence`, manifest 1.1.0 (27 cases, 66 annotations),
