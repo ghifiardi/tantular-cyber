@@ -38,6 +38,14 @@ class OllamaSettings:
     allow_remote: bool = False
     temperature: float = 0.1
     num_ctx: int = 8192
+    # Optional pinned sampling options (None = not sent; the model's defaults apply).
+    # Model comparisons pin all of them so Modelfile defaults cannot differ between arms.
+    top_p: float | None = None
+    top_k: int | None = None
+    repeat_penalty: float | None = None
+    presence_penalty: float | None = None
+    num_predict: int | None = None
+    seed: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, **overrides: object) -> OllamaSettings:
@@ -73,4 +81,6 @@ class ScanSettings:
     context_strategy: str = "ast"  # "ast" (bounded, AST-aware) or "window" (POC-002 behavior)
     context_max_lines: int = 60
     context_max_chars: int = 4000
+    callgraph_enabled: bool = True
+    callgraph_max_depth: int = 3
     ollama: OllamaSettings = field(default_factory=OllamaSettings)

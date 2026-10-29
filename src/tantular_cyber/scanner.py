@@ -80,6 +80,9 @@ class RawFinding:
     severity: str  # normalized
     cwe: tuple[str, ...] = ()
     confidence: str | None = None
+    # Interprocedural scanners: source-to-sink steps and explicit uncertainty notes.
+    trace: tuple[dict[str, object], ...] = ()
+    uncertainty: tuple[str, ...] = ()
 
 
 @dataclass
@@ -100,6 +103,7 @@ class ScannerRun:
     scanned: set[str] = field(default_factory=set)
     scanned_reported: bool = False
     tool_skipped: dict[str, str] = field(default_factory=dict)
+    stats: dict[str, object] = field(default_factory=dict)
 
 
 class Scanner(Protocol):

@@ -41,6 +41,13 @@ rules:
                     - pattern: f"..."
                     - pattern: '"..." + $X'
                     - pattern: '$X + "..."'
+                    - patterns:
+                        - pattern: $A + $B
+                        - metavariable-pattern:
+                            metavariable: $A
+                            pattern-either:
+                              - pattern: '"..." + $Z'
+                              - pattern: '$Z + "..."'
                 - pattern-not-regex: (os\.path\.basename|secure_filename)\(
       - patterns:
           - pattern-inside: |

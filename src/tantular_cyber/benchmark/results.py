@@ -14,6 +14,7 @@ from .manifest import Thresholds
 from .matching import MatchRecord, Metrics, UnmatchedFinding
 from .perf import PerfSummary
 from .provenance import Provenance
+from .realworld import RealWorldResult
 
 LIMITATIONS = [
     "The corpus is small and synthetic (Python, CWE-89 only). Precision/recall describe the "
@@ -88,6 +89,7 @@ class BenchmarkResult(BaseModel):
     llm: LLMBench | None = None
     performance: PerfSummary | None = None
     comparison: Comparison | None = None
+    real_world: RealWorldResult | None = None
     limitations: list[str] = LIMITATIONS
 
 

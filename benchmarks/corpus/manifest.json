@@ -1,5 +1,5 @@
 {
-  "manifest_version": "1.1.0",
+  "manifest_version": "1.2.0",
   "corpus_id": "tantular-python-security",
   "description": "Synthetic Python/HTML-template corpus (CWE-89, 78, 22, 79, 798) for regression benchmarking of the bundled Semgrep rules and of LLM explanations. Independently written; not representative of real-world prevalence.",
   "language": "python",
@@ -366,6 +366,7 @@
       "id": "known-fn-helpers",
       "path": "known_fn/helpers.py",
       "tags": [
+        "callgraph",
         "known_false_negative"
       ],
       "llm_eval": false,
@@ -378,12 +379,12 @@
           "line": 9,
           "end_line": 13,
           "anchor": "conn.execute(build_filter(name))",
-          "rule_id": "tantular.python.sqli.dynamic-query-execute",
-          "expect_detected": false,
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": true,
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: inter-procedural",
+          "note": "missed by the Semgrep rule (inter-procedural); detected by tantular-callgraph since POC-005",
           "near_miss": false
         },
         {
@@ -393,12 +394,12 @@
           "line": 17,
           "end_line": 17,
           "anchor": "session.execute(text(f",
-          "rule_id": "tantular.python.sqli.dynamic-query-execute",
-          "expect_detected": false,
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": true,
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: text() wrapper",
+          "note": "missed by the Semgrep rule (text() wrapper); detected by tantular-callgraph since POC-005",
           "near_miss": false
         },
         {
@@ -408,12 +409,12 @@
           "line": 21,
           "end_line": 21,
           "anchor": "conn.execute(\" \".join(",
-          "rule_id": "tantular.python.sqli.dynamic-query-execute",
-          "expect_detected": false,
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": true,
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: str.join",
+          "note": "missed by the Semgrep rule (str.join); detected by tantular-callgraph since POC-005",
           "near_miss": false
         }
       ],
@@ -703,8 +704,9 @@
       "id": "cmdi-limits",
       "path": "cmdi/limits.py",
       "tags": [
-        "known_false_positive",
-        "known_false_negative"
+        "callgraph",
+        "known_false_negative",
+        "known_false_positive"
       ],
       "llm_eval": false,
       "provenance": {
@@ -732,12 +734,12 @@
           "line": 13,
           "end_line": 13,
           "anchor": "subprocess.run([\"sh\", \"-c\", \"convert \" + image_name",
-          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
-          "expect_detected": false,
+          "rule_id": "tantular.callgraph.cmdi-interprocedural",
+          "expect_detected": true,
           "preconditions": [
             "image_name comes from an untrusted source"
           ],
-          "note": "known FN: shell via argv",
+          "note": "missed by the Semgrep rule (shell via argv); detected by tantular-callgraph since POC-005",
           "near_miss": false
         }
       ]
@@ -870,8 +872,9 @@
       "id": "path-limits",
       "path": "path/limits.py",
       "tags": [
-        "known_false_positive",
-        "known_false_negative"
+        "callgraph",
+        "known_false_negative",
+        "known_false_positive"
       ],
       "llm_eval": false,
       "provenance": {
@@ -899,12 +902,12 @@
           "line": 18,
           "end_line": 18,
           "anchor": "(Path(BASE) / name).read_text()",
-          "rule_id": "tantular.python.path.dynamic-file-path",
-          "expect_detected": false,
+          "rule_id": "tantular.callgraph.path-interprocedural",
+          "expect_detected": true,
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: pathlib",
+          "note": "missed by the Semgrep rule (pathlib '/'); detected by tantular-callgraph since POC-005",
           "near_miss": false
         }
       ]
@@ -1430,6 +1433,269 @@
             "branch or repo_dir comes from an untrusted source"
           ],
           "note": "construction far from the sink, inside a loop",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "interproc-service",
+      "path": "interproc/app/service.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss",
+        "known_false_positive",
+        "callgraph"
+      ],
+      "llm_eval": true,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Cross-module flows: a query built in app/queries.py and executed here; a helper returning a parameterized query; a constant-query helper; an allow-list-validated ORDER BY column.",
+      "annotations": [
+        {
+          "id": "interproc-cross-module",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "return conn.execute(customer_filter(customer)).fetchall()",
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "construction in app/queries.py (customer_filter)",
+          "near_miss": false
+        },
+        {
+          "id": "interproc-param-helper",
+          "truth": "safe",
+          "cwe": "CWE-89",
+          "line": 14,
+          "end_line": 14,
+          "anchor": "return conn.execute(sql, params).fetchall()",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "helper returns placeholder SQL + params",
+          "near_miss": true
+        },
+        {
+          "id": "interproc-constant-helper",
+          "truth": "safe",
+          "cwe": "CWE-89",
+          "line": 18,
+          "end_line": 18,
+          "anchor": "return conn.execute(latest_orders_sql()).fetchall()",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "helper returns a constant",
+          "near_miss": false
+        },
+        {
+          "id": "interproc-known-fp-allowlist",
+          "truth": "safe",
+          "cwe": "CWE-89",
+          "line": 22,
+          "end_line": 22,
+          "anchor": "conn.execute(\"SELECT id FROM orders\" + sort_clause(column))",
+          "rule_id": "tantular.python.sqli.dynamic-query-execute",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP (both scanners): allow-list check in sort_clause is not modelled",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "interproc-queries",
+      "path": "interproc/app/queries.py",
+      "tags": [
+        "callgraph"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Query-building helpers used by app/service.py (no sinks here).",
+      "annotations": []
+    },
+    {
+      "id": "interproc-package",
+      "path": "interproc/app/__init__.py",
+      "tags": [
+        "callgraph"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Package marker for relative imports.",
+      "annotations": []
+    },
+    {
+      "id": "interproc-repository",
+      "path": "interproc/repository.py",
+      "tags": [
+        "true_positive",
+        "known_false_negative",
+        "callgraph"
+      ],
+      "llm_eval": true,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "A method building SQL via self._name_query (resolved, with uncertainty) and a builder chosen from a dict at runtime (dynamic dispatch, not followed).",
+      "annotations": [
+        {
+          "id": "interproc-self-dispatch",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 11,
+          "end_line": 14,
+          "anchor": "return self.conn.execute(self._name_query(name)).fetchall()",
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "self.method resolved to the defining class; subclass overrides not considered",
+          "near_miss": false
+        },
+        {
+          "id": "interproc-known-fn-dynamic-dispatch",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 30,
+          "end_line": 30,
+          "anchor": "return conn.execute(builder(value)).fetchall()",
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": false,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "known FN: callee chosen at runtime (BUILDERS[kind]); deliberately not resolved",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "interproc-deep-chain",
+      "path": "interproc/deep_chain.py",
+      "tags": [
+        "known_false_negative",
+        "callgraph"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Query built four calls deep; exceeds the default call-depth budget (3).",
+      "annotations": [
+        {
+          "id": "interproc-known-fn-depth",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 23,
+          "end_line": 23,
+          "anchor": "return conn.execute(level1(term)).fetchall()",
+          "rule_id": "tantular.callgraph.sqli-interprocedural",
+          "expect_detected": false,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "known FN: call depth 4 > budget 3 (raise --callgraph-depth to follow)",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "chains-schema-browser",
+      "path": "chains/schema_browser.py",
+      "tags": [
+        "true_positive",
+        "near_miss",
+        "concatenation_chain"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Concatenation chains whose last operand is a variable (\"a\" + x + \".\" + y) for SQL, shell and file paths; a log call as near miss.",
+      "annotations": [
+        {
+          "id": "chain-sql-inline",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 12,
+          "end_line": 12,
+          "anchor": "cursor.execute(\"SELECT * FROM \" + schema + \".\" + table)",
+          "rule_id": "tantular.python.sqli.dynamic-query-execute",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "missed before POC-005 (chain ends in a variable)",
+          "near_miss": false
+        },
+        {
+          "id": "chain-sql-variable",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 17,
+          "end_line": 18,
+          "anchor": "cursor.execute(statement)",
+          "rule_id": "tantular.python.sqli.dynamic-query-execute",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "chain-log-near-miss",
+          "truth": "safe",
+          "cwe": "CWE-89",
+          "line": 23,
+          "end_line": 23,
+          "anchor": "log.info(\"lookup \" + schema + \".\" + table)",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "concatenation into a log call",
+          "near_miss": true
+        },
+        {
+          "id": "chain-cmd",
+          "truth": "vulnerable",
+          "cwe": "CWE-78",
+          "line": 27,
+          "end_line": 27,
+          "anchor": "subprocess.run(\"tar czf /tmp/\" + name",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "chain-path",
+          "truth": "vulnerable",
+          "cwe": "CWE-22",
+          "line": 31,
+          "end_line": 31,
+          "anchor": "with open(\"/srv/exports/\" + base + \"/\" + name) as fh:",
+          "rule_id": "tantular.python.path.dynamic-file-path",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
           "near_miss": false
         }
       ]

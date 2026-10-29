@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.3.0"
 REPORT_TYPE = "tantular-cyber.repository-scan"
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -128,6 +128,9 @@ class LLMMetrics(BaseModel):
     total_s: float | None = None
     load_s: float | None = Field(default=None, description="Model load time (cold start).")
     prompt_tokens: int | None = None
+    prompt_cached_tokens: int | None = Field(
+        default=None, description="Prompt tokens served from the KV cache (prefix reuse)."
+    )
     prompt_eval_s: float | None = None
     output_tokens: int | None = None
     eval_s: float | None = None
@@ -163,6 +166,17 @@ class FindingAnalysis(BaseModel):
     metrics: LLMMetrics | None = None
 
 
+class CallStep(BaseModel):
+    """One step of a source-to-sink path from an interprocedural scanner (schema 1.3)."""
+
+    path: str
+    line: int
+    function: str
+    kind: Literal["source", "build", "call", "return", "wrapper", "sink"]
+    detail: str
+    code: str = Field(default="", description="The redacted source line at this step.")
+
+
 class Finding(BaseModel):
     id: str = Field(description="Deterministic: sha256(tool|rule|path|start|end|evidence)[:16].")
     tool: str
@@ -176,6 +190,14 @@ class Finding(BaseModel):
     message: str
     confidence: str | None = Field(default=None, description="Confidence declared by the rule.")
     confidence_source: str = "scanner_rule_metadata"
+    call_path: list[CallStep] = Field(
+        default_factory=list,
+        description="Source-to-sink steps (interprocedural findings, schema 1.3). Resolution "
+        "is conservative; see ``uncertainty``.",
+    )
+    uncertainty: list[str] = Field(
+        default_factory=list, description="Why the scanner fact may not hold (schema 1.3)."
+    )
     status: Literal["unverified"] = "unverified"
     analysis: FindingAnalysis = Field(default_factory=lambda: FindingAnalysis(status="disabled"))
 
@@ -224,6 +246,12 @@ class ScannerInfo(BaseModel):
     targets: int
     succeeded: bool
     coverage: ScanCoverage | None = None
+    stats: dict[str, int | bool] = Field(default_factory=dict)
+    suppressed_duplicates: int = Field(
+        default=0,
+        description="Findings dropped because an earlier scanner reported the same path, "
+        "CWE and overlapping lines (scanner order = precedence).",
+    )
 
 
 class LLMInfo(BaseModel):

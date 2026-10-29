@@ -1,4 +1,4 @@
-# Architecture — Tantular Cyber (POC-002 … POC-004)
+# Architecture — Tantular Cyber (POC-002 … POC-005)
 
 ## Pipeline
 
@@ -80,6 +80,38 @@ All rules are syntactic and same-scope; none tracks taint across functions or fi
 none knows whether a value is attacker-controlled (hence `unverified`). The CWE-79 template
 rule runs in Semgrep's `generic` mode on `*.html`/Jinja files, so coverage verification
 treats those extensions as in scope.
+
+## Interprocedural scanner (`callgraph.py`, report schema 1.3)
+
+`tantular-callgraph` runs after Semgrep as a second `Scanner` plugin (disable with
+`--no-callgraph`). It is pure Python (`ast.parse` only; nothing is imported or executed)
+and bounded by `CallgraphBudget` (call depth 3, 2000 files, 20000 functions, 8 trace steps).
+
+* **Index:** every in-scope `.py` file becomes a module (`a/b/c.py` → `a.b.c`); top-level
+  functions and class methods are indexed with their imports (absolute and relative).
+* **Resolution (conservative):** a call is followed only if it resolves to exactly one
+  repository function — same-module name, explicit import, or `self.method` within the
+  defining class (flagged: subclass overrides are not considered). Dynamic dispatch
+  (`table[k](x)`), ambiguous redefinitions, star imports and external calls are
+  *unresolved*: counted in `scanners[].stats`, never turned into findings.
+* **Taint:** sources are function parameters (low confidence) and request inputs such as
+  `request.args`, `request.GET`, `sys.argv`, `input()` (medium). A finding needs a value
+  that was **built** (f-string, `+`, `%`, `.format`, `str.join`, `os.path.join`,
+  `Path / x`) — or raw request input — reaching a sink. Sanitizers (`int`, `shlex.quote`,
+  `basename`, `secure_filename`, `escape`) and UPPER_CASE constants clear taint.
+* **Summaries:** per function, which parameters flow to the return value and which reach a
+  sink unbuilt; recomputed for up to `max_depth` rounds, so flows crossing more calls than
+  the budget are not reported (`stats.depth_limited`).
+* **Sinks:** CWE-89 `execute*` on DB-like receivers (name/annotation/`.cursor()` origin),
+  CWE-78 `shell=True` / `os.system` / `["sh", "-c", ...]`, CWE-22 `open` / `send_file` /
+  `Path.read_*` on composed paths. CWE-79/798 stay with Semgrep.
+* **Evidence:** `findings[].call_path` (source → build → call → return → sink, each with
+  the redacted source line) and `findings[].uncertainty`. The LLM receives both as
+  untrusted data and is told the path is not proof of exploitability.
+* **Precedence:** scanner order is precedence. A callgraph finding with the same file, CWE
+  and overlapping lines as a Semgrep finding is dropped (`suppressed_duplicates`).
+* A file Semgrep scans but the callgraph cannot parse is a coverage gap for that scanner
+  (`python_syntax_error`); if only one scanner fails the report is `degraded`, not `failed`.
 
 ## Evidence context (`context.py`, report schema 1.2)
 

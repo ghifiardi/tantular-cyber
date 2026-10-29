@@ -234,6 +234,28 @@ def benchmark_markdown(r: BenchmarkResult) -> str:
             out += [""] + [f"- {_inline(n)}" for n in perf.notes]
         out.append("")
 
+    if rw := r.real_world:
+        out += [
+            "## Real-world pointers (separate from the synthetic corpus)",
+            "",
+            f"> {_inline(rw.caveat)}",
+            "",
+            f"Entries {rw.entries}, fetched {rw.fetched}, evaluated {rw.evaluated}: "
+            f"detected {rw.detected}, missed {rw.missed}. Verification: "
+            + ", ".join(f"{k} {v}" for k, v in rw.by_verification.items())
+            + ".",
+            "",
+            "| Pointer | CWE | Advisory | Verification | Held out | Result | Tools |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        out += [
+            f"| {x.id} | {x.cwe} | {x.advisory_id} | {x.verification_status} | "
+            f"{'yes' if x.held_out else '**no** (informed development)'} | {x.state} | "
+            f"{', '.join(x.tools) or '-'} |"
+            for x in rw.results
+        ]
+        out.append("")
+
     if cmp := r.comparison:
         changed = [d for d in cmp.deltas if d.delta not in (None, 0)]
         out += [

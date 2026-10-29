@@ -19,18 +19,21 @@ src/tantular_cyber/
   scanner.py        Scanner protocol, SemgrepScanner, Semgrep JSON parser
   pipeline.py       orchestrator run_scan(): inventory → scan → normalize → LLM → ScanReport
   context.py        bounded AST-aware evidence context + dataflow hints (window fallback)
+  callgraph.py      tantular-callgraph: bounded same-repo interprocedural scanner (POC-005)
   analysis.py       system prompt, message building, output parsing, overclaim guard
   ollama_client.py  /api/chat client (think=false, stream=false), retries, localhost policy
   models.py         pydantic models; ScanReport is the GATRA-facing contract
   reports.py        JSON / Markdown writers (atomic, escaped)
   rules/            local Semgrep rules, one file per CWE (89/78/22/79/798; docs/rules.md)
-  benchmark/        POC-003 evaluation: manifest, matching, adversarial, llm_eval, perf,
-                    provenance, results (gates/comparison), render, runner
+  benchmark/        evaluation: manifest, matching, adversarial, llm_eval, perf, provenance,
+                    results, render, runner, context_eval, realworld (pointers), review
+                    (human ratings/kappa), compare (models/profiles)
 tests/              pytest; fixtures/vulnerable + fixtures/clean (sqlite3 CWE-89 pair),
                     fixtures/bench (6 findings, every rule branch)
 benchmarks/corpus/  benchmark corpus: manifest.json (ground truth), cases/ (never run),
                     adversarial/ (overclaim + secret suites)
 benchmarks/replays/ recorded raw model outputs (real runs) for deterministic replay
+benchmarks/realworld/ pointer-only manifest of upstream vulnerable locations (no code)
 docs/               architecture, rules, benchmark guide + results, report-schema.json
 ```
 
@@ -99,8 +102,10 @@ make bench-live         # opt-in: local Ollama quality + cold/warm perf + concur
 * **POC-003 (done)** — `tantular-cyber benchmark`: scanner detection (deterministic, gated)
   separate from LLM explanation quality (sample-based, never gated), adversarial suites,
   performance with honest cold/warm labels. Guide: docs/benchmark.md.
-* **POC-004 (this)** — CWE-78/22/79/798 rules (scoped, docs/rules.md), CVE-informed
+* **POC-004 (done)** — CWE-78/22/79/798 rules (scoped, docs/rules.md), CVE-informed
   synthetic fixtures with provenance, per-CWE gates, bounded AST-aware context.
+* **POC-005 (this)** — tantular-callgraph, chain patterns, real-world pointers, human-review
+  ingestion, controlled model/profile comparison (docs/evaluation.md).
 * Then — real-world sanitized evaluation, human-review score ingestion, then GATRA
   ingestion of `report.json` once detection quality is measured.
 * Application source code is licensed under Apache-2.0 (see LICENSE). Model weights are separate and retain their own applicable license.
@@ -123,6 +128,14 @@ make bench-live         # opt-in: local Ollama quality + cold/warm perf + concur
   (`tc-synthetic-…`), listed as `redaction_canaries`.
 * Context: parse the original text, display only redacted lines, keep budgets hard; never
   present dataflow hints as proof of taint.
+* Callgraph: resolve conservatively — an unresolved or ambiguous call must never create a
+  finding; every finding carries `call_path` and `uncertainty`. Semgrep keeps precedence.
+* Real-world data is pointer-only (hashes, no code text); fetching is an explicit command,
+  never part of CI or tests (tests use httpx.MockTransport). Mark `development_use` when a
+  pointer influenced rules — it is no longer held out.
+* Human reviews: pseudonyms only, no imputation, notes never published, never CI gates.
+* Model comparisons pin all sampling options and record weights/quantization provenance;
+  `tantular-cyber:latest` is a profile of `ghifidanukusumo/tantular` weights.
 
 ## Acceptance criteria (POC-002)
 

@@ -71,6 +71,8 @@ class BenchmarkOptions:
     baseline: Path | None = None
     semgrep_bin: str = "semgrep"
     record_replay: Path | None = None
+    real_world_manifest: Path | None = None
+    real_world_cache: Path | None = None
     context_strategy: Literal["ast", "window"] = "ast"
 
 
@@ -250,6 +252,14 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         llm=llm_bench,
         performance=perf,
     )
+    if opts.real_world_manifest is not None:
+        from .realworld import DEFAULT_CACHE, evaluate_pointers, load_realworld
+
+        result.real_world = evaluate_pointers(
+            load_realworld(opts.real_world_manifest),
+            opts.real_world_cache or DEFAULT_CACHE,
+            semgrep_bin=opts.semgrep_bin,
+        )
     if opts.baseline:
         result.comparison = compare(result, json.loads(opts.baseline.read_text()))
     result.provenance.finished_at = now()

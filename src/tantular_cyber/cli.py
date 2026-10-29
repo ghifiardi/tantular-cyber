@@ -75,6 +75,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="window radius (window strategy and AST fallback)",
     )
     scan.add_argument(
+        "--no-callgraph",
+        action="store_true",
+        help="disable the interprocedural tantular-callgraph scanner",
+    )
+    scan.add_argument(
+        "--callgraph-depth",
+        type=int,
+        default=3,
+        help="max call levels followed by tantular-callgraph",
+    )
+    scan.add_argument(
         "--context-strategy",
         choices=["ast", "window"],
         default="ast",
@@ -137,6 +148,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--baseline", type=Path, default=None, help="previous benchmark.json to compare against"
     )
     bench.add_argument(
+        "--real-world",
+        action="store_true",
+        help="also evaluate cached real-world pointers (no network; run 'realworld fetch' first)",
+    )
+    bench.add_argument("--real-world-cache", type=Path, default=None)
+    bench.add_argument(
         "--record-replay",
         type=Path,
         default=None,
@@ -147,6 +164,44 @@ def _build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--ollama-url", default=None)
     bench.add_argument("--ollama-timeout", type=float, default=None)
     bench.add_argument("--allow-remote-ollama", action="store_true")
+
+    rw = sub.add_parser("realworld", help="pointer-only real-world cases (opt-in fetch)")
+    rw.add_argument("action", choices=["fetch", "evaluate", "clean", "audit"])
+    rw.add_argument("--manifest", type=Path, default=Path("benchmarks/realworld/manifest.json"))
+    rw.add_argument(
+        "--cache",
+        type=Path,
+        default=None,
+        help="local cache (default ~/.cache/tantular-cyber/realworld)",
+    )
+    rw.add_argument("--semgrep-bin", default=None)
+
+    cmp = sub.add_parser("compare", help="opt-in local model / prompt-profile comparison")
+    cmp.add_argument("--models", default="tantular-cyber:latest")
+    cmp.add_argument("--profiles", default="baseline", help="comma-separated prompt profiles")
+    cmp.add_argument("--contexts", default="8192", help="comma-separated num_ctx values")
+    cmp.add_argument("--runs", type=int, default=3)
+    cmp.add_argument("--max-findings", type=int, default=40)
+    cmp.add_argument(
+        "--identity-pair",
+        default="",
+        help="two models that share weights, e.g. a profile and its base",
+    )
+    cmp.add_argument("--corpus", type=Path, default=Path("benchmarks/corpus"))
+    cmp.add_argument("--output", type=Path, required=True)
+    cmp.add_argument("--ollama-url", default=None)
+    cmp.add_argument("--ollama-timeout", type=float, default=None)
+    cmp.add_argument("--allow-remote-ollama", action="store_true")
+    cmp.add_argument("--model", default=None, help=argparse.SUPPRESS)
+
+    rev = sub.add_parser("review", help="human-review templates and agreement summaries")
+    rev.add_argument("action", choices=["template", "summarize"])
+    rev.add_argument("--queue", type=Path, required=True, help="human_review.json")
+    rev.add_argument("--reviewer", default=None, help="pseudonym for 'template'")
+    rev.add_argument("--role", choices=["primary", "adjudicator"], default="primary")
+    rev.add_argument("--reviews", type=Path, nargs="*", default=[])
+    rev.add_argument("--adjudication", type=Path, nargs="*", default=[])
+    rev.add_argument("--output", type=Path, required=True)
 
     sub.add_parser("schema", help="print the JSON schema of report.json")
     return parser
@@ -179,6 +234,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         max_llm_findings=args.max_llm_findings,
         context_lines=args.context_lines,
         context_strategy=args.context_strategy,
+        callgraph_enabled=not args.no_callgraph,
+        callgraph_max_depth=args.callgraph_depth,
         ollama=_ollama_settings(args),
     )
     for rule in settings.rules:
@@ -261,6 +318,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         concurrency=levels,
         baseline=args.baseline,
         record_replay=args.record_replay,
+        real_world_manifest=(
+            Path("benchmarks/realworld/manifest.json") if args.real_world else None
+        ),
+        real_world_cache=args.real_world_cache,
         context_strategy=args.context_strategy,
         semgrep_bin=_semgrep_bin(args),
     )
@@ -294,6 +355,134 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return EXIT_OK if result.status == "pass" else EXIT_GATES
 
 
+def cmd_realworld(args: argparse.Namespace) -> int:
+    from .benchmark.realworld import (
+        DEFAULT_CACHE,
+        clean_cache,
+        evaluate_pointers,
+        fetch_pointers,
+        license_audit,
+        load_realworld,
+        validate_realworld,
+    )
+
+    cache = args.cache or DEFAULT_CACHE
+    if args.action == "clean":
+        print(f"removed {cache}" if clean_cache(cache) else f"nothing to remove at {cache}")
+        return EXIT_OK
+    try:
+        manifest = load_realworld(args.manifest)
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot read manifest: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    problems = validate_realworld(manifest)
+    if problems:
+        print("error: invalid manifest:\n  " + "\n  ".join(problems), file=sys.stderr)
+        return EXIT_INPUT
+    if args.action == "audit":
+        print(json.dumps(license_audit(manifest), indent=2))
+        return EXIT_OK
+    if args.action == "fetch":
+        print(
+            f"fetching {len(manifest.entries)} pointed-to file(s) into {cache} "
+            "(network access, explicit opt-in)"
+        )
+        for pid, outcome in fetch_pointers(manifest, cache):
+            print(f"  {pid}: {outcome}")
+        return EXIT_OK
+    result = evaluate_pointers(manifest, cache, semgrep_bin=_semgrep_bin(args))
+    print(result.caveat)
+    for r in result.results:
+        print(f"  {r.id:32} {r.cwe:8} {r.state:16} {','.join(r.tools)}")
+    print(
+        f"detected {result.detected} / evaluated {result.evaluated} "
+        f"(of {result.entries}; fetched {result.fetched})"
+    )
+    return EXIT_OK
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    from .benchmark.compare import parse_arms, render_comparison, run_comparison
+
+    try:
+        arms = parse_arms(args.models, args.profiles, args.contexts)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    pair = [m.strip() for m in args.identity_pair.split(",") if m.strip()]
+    try:
+        result = run_comparison(
+            args.corpus,
+            arms,
+            runs=max(1, args.runs),
+            max_findings=max(1, args.max_findings),
+            ollama=_ollama_settings(args),
+            identity_pair=pair,
+            on_progress=lambda msg: logging.getLogger(__name__).info(msg),
+        )
+    except (OllamaError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "comparison.json").write_text(result.model_dump_json(indent=2) + "\n")
+    (args.output / "comparison.md").write_text(render_comparison(result))
+    for arm in result.arms:
+        rates = ", ".join(f"{k}={v['rate']}" for k, v in arm.checks.items())
+        print(f"{arm.arm}: n={arm.n} p50={arm.latency.get('p50_s')}s {rates}")
+    for a in result.adoption:
+        print(f"adopt {a.arm}: {a.adopt} ({'; '.join(a.reasons)})")
+    print(f"json: {args.output / 'comparison.json'}")
+    return EXIT_OK
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    from pydantic import ValidationError
+
+    from .benchmark.review import (
+        load_review,
+        render_review_summary,
+        sha256_file,
+        summarize_reviews,
+        template,
+    )
+
+    try:
+        queue = json.loads(args.queue.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot read queue: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    queue_sha = sha256_file(args.queue)
+    if args.action == "template":
+        if not args.reviewer:
+            print("error: --reviewer pseudonym required", file=sys.stderr)
+            return EXIT_INPUT
+        try:
+            form = template(queue, args.reviewer, queue_sha, args.role)
+        except ValidationError:
+            print("error: reviewer must be a pseudonym: letters, digits, _ or -", file=sys.stderr)
+            return EXIT_INPUT
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(form, indent=2) + "\n")
+        print(f"template for {args.reviewer}: {args.output} ({len(queue)} items)")
+        return EXIT_OK
+    try:
+        reviews = [load_review(p) for p in args.reviews]
+        adjudications = [load_review(p) for p in args.adjudication]
+    except (OSError, ValueError, ValidationError) as exc:
+        print(f"error: invalid review file: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    summary = summarize_reviews(queue, queue_sha, reviews, adjudications)
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "review-summary.json").write_text(summary.model_dump_json(indent=2) + "\n")
+    (args.output / "review-summary.md").write_text(render_review_summary(summary))
+    for w in summary.warnings:
+        print(f"warning: {w}")
+    for a in summary.pairwise:
+        print(f"{a.dimension}: n={a.n} agreement={a.raw_agreement} kappa={a.kappa}")
+    print(f"json: {args.output / 'review-summary.json'}")
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
@@ -307,6 +496,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.command == "benchmark":
         return cmd_benchmark(args)
+    if args.command == "realworld":
+        return cmd_realworld(args)
+    if args.command == "compare":
+        return cmd_compare(args)
+    if args.command == "review":
+        return cmd_review(args)
     print(json.dumps(ScanReport.model_json_schema(), indent=2))
     return EXIT_OK
 

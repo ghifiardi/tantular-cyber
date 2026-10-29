@@ -30,6 +30,24 @@ rules:
           - pattern: $CUR.$EXEC($X + "...", ...)
           - pattern: $CUR.$EXEC("..." % $X, ...)
           - pattern: $CUR.$EXEC("...".format(...), ...)
+          # Concatenation chains ending in a variable ("a" + x + "." + y), POC-005.
+          - patterns:
+              - pattern: $CUR.$EXEC($A + $B, ...)
+              - metavariable-pattern:
+                  metavariable: $A
+                  pattern-either:
+                    - pattern: '"..." + $Z'
+                    - pattern: '$Z + "..."'
+          - patterns:
+              - pattern-inside: |
+                  $Q = $A + $B
+                  ...
+              - metavariable-pattern:
+                  metavariable: $A
+                  pattern-either:
+                    - pattern: '"..." + $Z'
+                    - pattern: '$Z + "..."'
+              - pattern: $CUR.$EXEC($Q, ...)
           # Query built in a local variable first, then executed.
           - patterns:
               - pattern-either:

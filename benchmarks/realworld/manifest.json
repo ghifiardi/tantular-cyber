@@ -1,0 +1,183 @@
+{
+  "manifest_version": "1.0.0",
+  "kind": "pointer_only",
+  "policy": "Pointers only: no upstream source text is stored in this repository. Files are fetched only by 'tantular-cyber realworld fetch' into a local cache (default ~/.cache/tantular-cyber/realworld), verified by git blob SHA-1 at the pinned commit, and never executed or uploaded. Upstream licenses are recorded for transparency; copyleft or unknown-license sources are pointer-only. Upstream labels are hypotheses until independently verified.",
+  "entries": [
+    {
+      "id": "rw-wsgidav-mysql-select",
+      "cwe": "CWE-89",
+      "advisory": {
+        "id": "CVE-2026-55509",
+        "url": "https://github.com/advisories/GHSA-p6gw-4frg-j7jw"
+      },
+      "repository": "https://github.com/mar10/wsgidav",
+      "commit": "67abdbd7d622fcf29aefdfbd0c9910de9e0c8b3d",
+      "path": "wsgidav/samples/mysql_dav_provider.py",
+      "line": 230,
+      "end_line": 230,
+      "line_sha256": "f47991b9b5c2ee73201724bb9c977e2d0203c9306c6191631548de81084cb93d",
+      "git_blob_sha1": "60df2cfe21bc44e61903a1dfc2281610b6dd52ac",
+      "upstream_license": "MIT",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "concatenated table name in SELECT (sample provider)",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      },
+      "development_use": "POC-005: this miss prompted the concatenation-chain patterns in the bundled rules (validated on synthetic case chains-schema-browser); not an independent measurement afterwards"
+    },
+    {
+      "id": "rw-wsgidav-mysql-describe",
+      "cwe": "CWE-89",
+      "advisory": {
+        "id": "CVE-2026-55509",
+        "url": "https://github.com/advisories/GHSA-p6gw-4frg-j7jw"
+      },
+      "repository": "https://github.com/mar10/wsgidav",
+      "commit": "67abdbd7d622fcf29aefdfbd0c9910de9e0c8b3d",
+      "path": "wsgidav/samples/mysql_dav_provider.py",
+      "line": 339,
+      "end_line": 339,
+      "line_sha256": "a6f0e5694d2c115fde7d0ed2d0d2c672a2eeffe2b4c29a2368a5f76587fe1bf0",
+      "git_blob_sha1": "60df2cfe21bc44e61903a1dfc2281610b6dd52ac",
+      "upstream_license": "MIT",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "concatenated table name in DESCRIBE (sample provider)",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      }
+    },
+    {
+      "id": "rw-scitokens-keycache-delete",
+      "cwe": "CWE-89",
+      "advisory": {
+        "id": "CVE-2026-32714",
+        "url": "https://github.com/advisories/GHSA-rh5m-2482-966c"
+      },
+      "repository": "https://github.com/scitokens/scitokens",
+      "commit": "66b075c35da18f8364276553513a53c596b4b8e3",
+      "path": "src/scitokens/utils/keycache.py",
+      "line": 83,
+      "end_line": 83,
+      "line_sha256": "d2fedce3508384b5241d735624c96899c8bc294ef8adf52fa072f47961db9b33",
+      "git_blob_sha1": "e916615cfe7089ff045272bc29565b164eb3e30e",
+      "upstream_license": "Apache-2.0",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "str.format() into a DELETE statement on a sqlite cursor",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      }
+    },
+    {
+      "id": "rw-mem0-databricks-delete",
+      "cwe": "CWE-89",
+      "advisory": {
+        "id": "CVE-2026-115324",
+        "url": "https://github.com/advisories/GHSA-7587-9684-52r6"
+      },
+      "repository": "https://github.com/mem0ai/mem0",
+      "commit": "3a9fcdbec25febac83cdad423cce619a10ca0e69",
+      "path": "mem0/vector_stores/databricks.py",
+      "line": 497,
+      "end_line": 501,
+      "line_sha256": "1060d65559555c46e16de9885a3b76aad9576345d81e245fb3c31803859db55f",
+      "git_blob_sha1": "b8ec82efdcac7282b9f8a3ff8f9bca5f3c6aade3",
+      "upstream_license": "Apache-2.0",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "f-string SQL passed to a vendor client method (execute_statement), not DB-API",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      }
+    },
+    {
+      "id": "rw-djust-fixture-path",
+      "cwe": "CWE-22",
+      "advisory": {
+        "id": "CVE-2026-113731",
+        "url": "https://github.com/advisories/GHSA-r57g-mc79-8hj2"
+      },
+      "repository": "https://github.com/djust-org/djust",
+      "commit": "ce5b5151eb10658bf304468a31e6c6d338153258",
+      "path": "python/djust/mcp/server.py",
+      "line": 297,
+      "end_line": 297,
+      "line_sha256": "6db3ca0ab179090d0a2c87f55149778cc87005dc6a08c78c634f8cbd45e59c3e",
+      "git_blob_sha1": "f52bf1a5e871de9cbbe12130285540fc07ebfafa",
+      "upstream_license": "MIT",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "user-supplied fixture path joined to BASE_DIR; containment check follows",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      }
+    },
+    {
+      "id": "rw-setuptools-namespace-dir",
+      "cwe": "CWE-22",
+      "advisory": {
+        "id": "GHSA-xmj3-9gf7-h52w",
+        "url": "https://github.com/advisories/GHSA-xmj3-9gf7-h52w"
+      },
+      "repository": "https://github.com/pypa/setuptools",
+      "commit": "8419f006d4e34c4ecfc7a0bd1bc6993855adc3cc",
+      "path": "setuptools/wheel.py",
+      "line": 256,
+      "end_line": 259,
+      "line_sha256": "1e539ce56a27367ea6d921e9cb9e005fb76b035371e8b563f4169a7b3eeca206",
+      "git_blob_sha1": "24d8d1130ebf89a1af4b78cac3241fbd4e34eb67",
+      "upstream_license": "MIT",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "package metadata names joined into a directory path, then os.mkdir",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      }
+    },
+    {
+      "id": "rw-glances-action-command",
+      "cwe": "CWE-78",
+      "advisory": {
+        "id": "CVE-2026-68519",
+        "url": "https://github.com/advisories/GHSA-59fj-m2j6-hcxh"
+      },
+      "repository": "https://github.com/nicolargo/glances",
+      "commit": "65b27142f5237962985e933698111197233e07d0",
+      "path": "glances/actions.py",
+      "line": 122,
+      "end_line": 128,
+      "line_sha256": "36ce287e7262fb57e41e7b2aa9b7664b93c36fd20a09c5ddfcc9bdfb57811060",
+      "git_blob_sha1": "f9ff70e185d3ca92bf29f6264e061df36d0a5394",
+      "upstream_license": "NOASSERTION",
+      "license_source": "GitHub repository API (license.spdx_id), checked 2026-10-29",
+      "description": "templated action command executed via an in-repo popen wrapper",
+      "verification": {
+        "status": "upstream_label",
+        "independently_verified": false,
+        "verified_by": null,
+        "verified_at": null,
+        "notes": "Location taken from the advisory's fix commit (pre-fix parent). Treat as a hypothesis until independently reviewed."
+      }
+    }
+  ]
+}

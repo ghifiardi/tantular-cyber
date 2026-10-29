@@ -195,6 +195,16 @@ def render_markdown(report: ScanReport) -> str:
                 "</details>",
                 "",
             ]
+        if f.call_path:
+            out += ["**Jalur panggilan (scanner, sumber → sink):**", ""]
+            out += [
+                f"{i}. `{_inline(st.path)}:{st.line}` `{_inline(st.function)}` — "
+                f"{st.kind}: {_inline(st.detail)}" + (f" — `{_inline(st.code)}`" if st.code else "")
+                for i, st in enumerate(f.call_path, 1)
+            ]
+            out.append("")
+        if f.uncertainty:
+            out += ["**Ketidakpastian scanner:**", *_bullets(f.uncertainty), ""]
         if f.evidence.truncated:
             out += ["_Bukti dipotong; lihat file sumber untuk rentang lengkap._", ""]
         if f.evidence.redactions:

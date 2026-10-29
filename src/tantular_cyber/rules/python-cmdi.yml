@@ -38,6 +38,13 @@ rules:
                     - pattern: '$X + "..."'
                     - pattern: '"..." % $X'
                     - pattern: '"...".format(...)'
+                    - patterns:
+                        - pattern: $A + $B
+                        - metavariable-pattern:
+                            metavariable: $A
+                            pattern-either:
+                              - pattern: '"..." + $Z'
+                              - pattern: '$Z + "..."'
                 - pattern-not-regex: shlex\.quote
       - patterns:
           - pattern-inside: |
