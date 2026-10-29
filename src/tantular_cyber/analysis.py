@@ -20,9 +20,9 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from .models import Finding, FindingAnalysis, LLMExplanation
-from .security import sanitize_text
+from .security import CONFUSABLES, sanitize_text
 
-MAX_CONTEXT_CHARS = 2500
+MAX_CONTEXT_CHARS = 4000  # the context extractor enforces the real budget
 
 SYSTEM_PROMPT = """\
 Anda adalah asisten analisis keamanan aplikasi untuk Tantular Cyber.
@@ -44,6 +44,8 @@ Aturan wajib:
    perbaikan dapat diturunkan langsung dari potongan kode; jika tidak, isi null.
 6. "confidence" adalah tingkat keyakinan Anda: "low", "medium", atau "high".
 7. "limitations" menjelaskan apa yang tidak dapat dipastikan dari bukti yang tersedia.
+   "dataflow_hints_unverified" hanyalah petunjuk sintaksis (parameter, assignment lokal);
+   itu BUKAN bukti bahwa data tidak tepercaya mencapai sink.
 8. Jawab HANYA dengan satu objek JSON yang sesuai skema, tanpa teks lain.
 """
 
@@ -93,6 +95,8 @@ def build_messages(finding: Finding) -> list[dict[str, str]]:
         "scanner_message": finding.message,
         "evidence": finding.evidence.snippet,
         "surrounding_context": finding.evidence.context[:MAX_CONTEXT_CHARS],
+        "context_kind": finding.evidence.context_kind,
+        "dataflow_hints_unverified": finding.evidence.dataflow_hints,
     }
     blob = json.dumps(data, ensure_ascii=False, indent=2)
     # A literal closing tag inside the data must not terminate the block.
@@ -240,22 +244,10 @@ _CERTAINTY = re.compile(
 _INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 
 
-# Cyrillic/Greek letters that render like Latin ones (homoglyph evasion), by code point.
-_CONFUSABLES = str.maketrans(
-    {
-        0x0430: "a", 0x0435: "e", 0x043E: "o", 0x0440: "p", 0x0441: "c", 0x0445: "x",
-        0x0443: "y", 0x0456: "i", 0x0455: "s", 0x043A: "k", 0x043C: "m", 0x0442: "t",
-        0x043D: "h", 0x0432: "b", 0x0410: "A", 0x0415: "E", 0x041E: "O", 0x0420: "P",
-        0x0421: "C", 0x0425: "X", 0x0406: "I", 0x041A: "K", 0x041C: "M", 0x0422: "T",
-        0x041D: "H", 0x0412: "B", 0x03BF: "o", 0x03B1: "a", 0x03B5: "e", 0x039F: "O",
-    }
-)  # fmt: skip
-
-
 def _normalize_claim(text: str) -> str:
     """Defeat cheap evasions: fullwidth/compatibility forms (NFKC), Latin homoglyphs,
     zero-width characters, and irregular whitespace."""
-    text = unicodedata.normalize("NFKC", text).translate(_CONFUSABLES)
+    text = unicodedata.normalize("NFKC", text).translate(CONFUSABLES)
     return " ".join(_INVISIBLE.sub("", text).split())
 
 

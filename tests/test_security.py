@@ -129,7 +129,24 @@ def test_source_tree_contains_no_invisible_or_bidi_characters() -> None:
     """Guards against Trojan-Source style characters slipping into the code base."""
     root = Path(__file__).parents[1]
     bad = {*range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x206A), 0xFEFF}
-    for path in [*root.glob("src/**/*.py"), *root.glob("tests/**/*.py"), *root.glob("*.md")]:
+    # Deliberate Trojan-Source fixture; scanned by the benchmark, never edited by tools.
+    allowlisted = {"benchmarks/corpus/cases/unicode/bidi_comment.py"}
+    paths = [
+        *root.glob("src/**/*.py"),
+        *root.glob("src/**/*.yml"),
+        *root.glob("tests/**/*.py"),
+        *root.glob("tests/**/*.json"),
+        *root.glob("*.md"),
+        *root.glob("docs/**/*.md"),
+        *root.glob("benchmarks/**/*.py"),
+        *root.glob("benchmarks/**/*.json"),
+        *root.glob("benchmarks/**/*.html"),
+    ]
+    for path in paths:
+        rel = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8")
         hits = [hex(ord(ch)) for ch in text if ord(ch) in bad]
-        assert not hits, f"{path.relative_to(root)} contains {hits}"
+        if rel in allowlisted:
+            assert hits, f"{rel} should still contain its deliberate characters"
+        else:
+            assert not hits, f"{rel} contains {hits}"

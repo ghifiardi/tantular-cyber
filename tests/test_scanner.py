@@ -80,7 +80,8 @@ def test_extract_cwes_handles_strings_lists_and_duplicates() -> None:
 
 def test_rule_ids_are_declared_and_prefix_is_normalized() -> None:
     ids = declared_rule_ids(default_rules())
-    assert ids == [RULE_ID]
+    assert ids[0] == RULE_ID and len(ids) == len(set(ids))  # CWE-89 ruleset first, ids unique
+    assert all(i.startswith("tantular.") for i in ids)
     assert normalize_rule_id(f"src.tantular_cyber.rules.{RULE_ID}", ids) == RULE_ID
     assert normalize_rule_id("other.rule", ids) == "other.rule"
 

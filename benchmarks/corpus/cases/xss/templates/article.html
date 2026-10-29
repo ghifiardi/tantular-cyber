@@ -1,0 +1,6 @@
+<!-- Benchmark corpus case (synthetic). DO NOT RUN OR DEPLOY. Labels live in manifest.json. -->
+<article>
+  <h2>{{ article.title }}</h2>
+  {# body_html is produced server-side by an allow-list HTML sanitizer #}
+  <section>{{ article.body_html|safe }}</section>
+</article>

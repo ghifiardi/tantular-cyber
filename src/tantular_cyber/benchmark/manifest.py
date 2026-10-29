@@ -34,6 +34,9 @@ class Annotation(BaseModel):
     )
     preconditions: list[str] = Field(default_factory=list)
     note: str = ""
+    near_miss: bool = Field(
+        default=False, description="Safe code that resembles a vulnerable pattern (manifest 1.1)."
+    )
 
     @property
     def label(self) -> str:
@@ -43,6 +46,25 @@ class Annotation(BaseModel):
             ("safe", True): "known_false_positive",
             ("safe", False): "true_negative",
         }[(self.truth, self.expect_detected)]
+
+
+class Reference(BaseModel):
+    id: str = Field(description="Advisory identifier, e.g. CVE-2007-4559.")
+    url: str
+    summary: str = Field(description="One-line summary in our own words (no copied text).")
+
+
+class Provenance(BaseModel):
+    """Where a case comes from and under which terms it is redistributed (manifest 1.1)."""
+
+    kind: Literal["synthetic", "cve_informed"] = "synthetic"
+    author: str = "Tantular Cyber contributors (independently written)"
+    license: str = "Apache-2.0"
+    copied_third_party_code: bool = False
+    third_party_license: str | None = None
+    attribution: str | None = None
+    references: list[Reference] = Field(default_factory=list)
+    uncertainty: str = ""
 
 
 class Case(BaseModel):
@@ -58,6 +80,12 @@ class Case(BaseModel):
         default_factory=list, description="Values that must never appear in any output."
     )
     annotations: list[Annotation]
+    provenance: Provenance = Field(default_factory=Provenance)
+
+
+class CWEThreshold(BaseModel):
+    min_precision: float = Field(ge=0, le=1)
+    min_recall: float = Field(ge=0, le=1)
 
 
 class Thresholds(BaseModel):
@@ -65,6 +93,13 @@ class Thresholds(BaseModel):
     min_recall: float = Field(ge=0, le=1)
     require_expected_detections: bool = True
     max_unannotated_findings: int = Field(default=0, ge=0)
+    per_cwe: dict[str, CWEThreshold] = Field(
+        default_factory=dict, description="Per-CWE regression floors (manifest 1.1)."
+    )
+    require_cwe_category_coverage: bool = Field(
+        default=False,
+        description="Each annotated CWE needs a TP, a TN, a near miss and a known FP or FN.",
+    )
 
 
 class Manifest(BaseModel):
@@ -144,6 +179,10 @@ def validate_manifest(manifest: Manifest, cases_root: Path) -> list[str]:
             if canary not in text:
                 problems.append(f"{case.id}: redaction canary not present in case file")
 
+    problems += _provenance_problems(manifest)
+    if manifest.thresholds.require_cwe_category_coverage:
+        problems += _category_problems(manifest)
+
     on_disk = {
         p.relative_to(cases_root).as_posix()
         for p in cases_root.rglob("*")
@@ -151,6 +190,43 @@ def validate_manifest(manifest: Manifest, cases_root: Path) -> list[str]:
     }
     for extra in sorted(on_disk - listed):
         problems.append(f"unlisted corpus file: {extra}")
+    return problems
+
+
+def _provenance_problems(manifest: Manifest) -> list[str]:
+    problems = []
+    for case in manifest.cases:
+        prov = case.provenance
+        if prov.kind == "cve_informed" and not prov.references:
+            problems.append(f"{case.id}: cve_informed case needs at least one reference")
+        for ref in prov.references:
+            if not ref.url.startswith("https://"):
+                problems.append(f"{case.id}: reference {ref.id} needs an https URL")
+        if prov.copied_third_party_code and not (prov.third_party_license and prov.attribution):
+            problems.append(
+                f"{case.id}: copied third-party code requires third_party_license and attribution"
+            )
+        if prov.kind == "cve_informed" and not prov.uncertainty:
+            problems.append(f"{case.id}: cve_informed case must state its uncertainty")
+    return problems
+
+
+def _category_problems(manifest: Manifest) -> list[str]:
+    by_cwe: dict[str, set[str]] = {}
+    for _, a in manifest.annotations():
+        cats = by_cwe.setdefault(a.cwe, set())
+        cats.add(a.label)
+        if a.near_miss:
+            cats.add("near_miss")
+    problems = []
+    for cwe, cats in sorted(by_cwe.items()):
+        missing = [c for c in ("true_positive", "true_negative", "near_miss") if c not in cats]
+        if not cats & {"known_false_positive", "known_false_negative"}:
+            missing.append("known limitation (known FP or FN)")
+        if missing:
+            problems.append(f"{cwe}: missing {', '.join(missing)}")
+        if cwe not in manifest.thresholds.per_cwe:
+            problems.append(f"{cwe}: no per-CWE threshold")
     return problems
 
 

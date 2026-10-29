@@ -55,7 +55,8 @@ def scan(tmp_path: Path, runner) -> Any:
 
 
 def test_rule_languages_and_scope() -> None:
-    assert declared_languages(default_rules()) == ["python"]
+    assert declared_languages(default_rules()) == ["python", "generic"]
+    assert in_scope_targets(["t.html", "a.py", "x.md"], ["python", "generic"]) == ["t.html", "a.py"]
     targets = ["a.py", "b.PYI", "c.js", "README.md", "script"]
     assert in_scope_targets(targets, ["python"]) == ["a.py", "b.PYI"]
     assert in_scope_targets(targets, ["cobol"]) is None

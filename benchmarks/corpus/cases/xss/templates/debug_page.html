@@ -1,0 +1,11 @@
+<!-- Benchmark corpus case (synthetic). DO NOT RUN OR DEPLOY. Labels live in manifest.json. -->
+<html>
+<body>
+  <h1>Request failed</h1>
+  {% autoescape off %}
+  <pre>{{ request_path }}</pre>
+  {% endautoescape %}
+  <p>{{ message }}</p>
+  <div class="detail">{{ detail|safe }}</div>
+</body>
+</html>

@@ -103,6 +103,31 @@ def benchmark_markdown(r: BenchmarkResult) -> str:
             ]
         out.append("")
 
+    if ctx := r.context:
+        out += [
+            "## Evidence context (window vs AST, deterministic)",
+            "",
+            f"Budget: {ctx.budget}. A construct is covered when the context shows both "
+            "where the value is built (annotation start) and the sink (annotation end).",
+            "",
+            "| Strategy | n | Construct covered | Mean lines | Mean chars | Max chars | "
+            "Truncated | Over budget | Fallbacks |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for st in ctx.strategies:
+            fb = ", ".join(f"{k}: {v}" for k, v in st.fallbacks.items()) or "-"
+            out.append(
+                f"| {st.strategy} | {st.n} | {st.construct_covered} "
+                f"({_pct(st.coverage_rate)}) | {_fmt(st.mean_lines)} | "
+                f"{_fmt(st.mean_chars)} | {st.max_chars} | {st.truncated} | "
+                f"{st.over_budget} | {_inline(fb)} |"
+            )
+        if ctx.newly_covered:
+            out += ["", "Newly covered by AST context: " + ", ".join(ctx.newly_covered)]
+        if ctx.lost_coverage:
+            out += ["", "**Coverage lost vs window:** " + ", ".join(ctx.lost_coverage)]
+        out.append("")
+
     out += ["## Adversarial suites (regression, not proof of protection)", ""]
     for suite in r.adversarial:
         counts = ", ".join(f"{k}: {v}" for k, v in suite.counts.items())
@@ -215,7 +240,13 @@ def benchmark_markdown(r: BenchmarkResult) -> str:
             "## Comparison with baseline",
             "",
             f"Baseline {cmp.baseline_started_at}, commit `{(cmp.baseline_commit or 'n/a')[:12]}`, "
-            f"same corpus: {'yes' if cmp.same_corpus else '**no**'}.",
+            f"same corpus: {'yes' if cmp.same_corpus else '**no**'}."
+            + (
+                ""
+                if cmp.same_corpus
+                else " Corpora differ: absolute counts are shown but "
+                "not judged; compare rates (overall and per CWE)."
+            ),
             "",
         ]
         if changed:

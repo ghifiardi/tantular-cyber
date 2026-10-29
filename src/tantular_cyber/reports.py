@@ -170,6 +170,28 @@ def render_markdown(report: ScanReport) -> str:
                 "",
                 _code_block(f.evidence.context),
                 "",
+                *(
+                    [
+                        f"_Strategi konteks: `{f.evidence.context_kind}`"
+                        + (
+                            f" (fallback: {_inline(f.evidence.context_fallback)})"
+                            if f.evidence.context_fallback
+                            else ""
+                        )
+                        + (", dipangkas sesuai anggaran" if f.evidence.context_truncated else "")
+                        + "._",
+                        "",
+                    ]
+                ),
+                *(
+                    [
+                        "Petunjuk aliran data (sintaksis, belum diverifikasi):",
+                        *_bullets(f.evidence.dataflow_hints),
+                        "",
+                    ]
+                    if f.evidence.dataflow_hints
+                    else []
+                ),
                 "</details>",
                 "",
             ]

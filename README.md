@@ -1,4 +1,4 @@
-# Tantular Cyber — Local Repository Security Analyzer (POC-002)
+# Tantular Cyber — Local Repository Security Analyzer
 
 Read-only security analysis of an **authorized local repository**, entirely on your Mac:
 
@@ -12,8 +12,25 @@ repo (read-only) → Semgrep (local rules) → normalized findings → Ollama ta
   and no code is modified.
 * If Ollama is unavailable, you still get scanner findings, with an explicit **degraded** status.
 
+Supported weaknesses (Python; scoped — see [docs/rules.md](docs/rules.md) for exact sinks,
+sanitizer boundaries and known gaps):
+
+| CWE | Coverage |
+|---|---|
+| CWE-89 SQL injection | DB-API `execute*` with string-built queries |
+| CWE-78 OS command injection | `subprocess(..., shell=True)`, `os.system`/`popen` with formatted commands |
+| CWE-22 Path traversal | `open`/`send_file` with joined/formatted paths; unfiltered `tarfile` extraction |
+| CWE-79 Cross-site scripting | Flask/Jinja2 and Django sinks, `\|safe` / `autoescape off` in HTML templates |
+| CWE-798 Hard-coded credentials | credential-named literals, `password=` kwargs, Flask secret keys, AWS key ids |
+
+Evidence context is **AST-aware** (POC-004): the enclosing function, the assignments that
+build values used at the finding and same-file helpers, within strict line/char budgets,
+redacted before slicing; falls back to a fixed window for templates or unparsable files.
+
 Architecture and trust model: [docs/architecture.md](docs/architecture.md).
-Developer guide: [CLAUDE.md](CLAUDE.md).
+Rules: [docs/rules.md](docs/rules.md). Benchmark: [docs/benchmark.md](docs/benchmark.md).
+Developer guide: [CLAUDE.md](CLAUDE.md). License: Apache-2.0 (application code; model
+weights are licensed separately).
 
 ## Requirements
 
@@ -49,7 +66,8 @@ ollama list | grep tantular-cyber           # model must be present
 |---|---|---|
 | `--repo PATH` | required | existing directory to analyze (read-only) |
 | `--output DIR` | required | report directory; must be **outside** `--repo` unless `--allow-output-inside-repo` |
-| `--rules FILE` | bundled `python-sqli.yml` | local Semgrep rule file (repeatable) |
+| `--rules FILE` | bundled rulesets (CWE-89/78/22/79/798) | local Semgrep rule file (repeatable; replaces the defaults) |
+| `--context-strategy` | `ast` | `ast` (bounded AST-aware context) or `window` (fixed ±`--context-lines`) |
 | `--no-llm` | off | scanner-only report |
 | `--model NAME` | `tantular-cyber:latest` | Ollama model |
 | `--ollama-url URL` | `http://127.0.0.1:11434` | localhost only… |
@@ -167,9 +185,13 @@ without Ollama.
 
 ## Limitations
 
-* **One rule**: Python CWE-89 via DB-API `execute*` with string-built queries, same scope
-  only. No cross-function taint, no ORM raw-SQL APIs, no other languages or CWEs. Zero
-  findings ≠ secure. See "Ruleset limits" in docs/architecture.md.
+* **Small, scoped rulesets** for five CWEs, syntactic and same-scope only (no
+  cross-function taint), Python plus HTML templates. Each rule's sinks, boundaries and known
+  false positives/negatives are listed in docs/rules.md. Benchmark precision/recall come
+  from a small synthetic corpus and are regression floors, **not real-world rates**. Zero
+  findings ≠ secure.
+* AST context and its dataflow hints are explanatory and syntactic; they do not prove that
+  untrusted data reaches a sink.
 * All findings are `unverified` pattern matches; reachability and attacker control are
   not established.
 * The model can overstate impact or invent details. The overclaim guard uses Indonesian

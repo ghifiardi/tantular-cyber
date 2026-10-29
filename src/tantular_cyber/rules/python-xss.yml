@@ -1,0 +1,86 @@
+# Tantular Cyber local ruleset — cross-site scripting (CWE-79), Flask/Jinja2 and Django.
+#
+# Supported: flask.render_template_string() with a dynamically built template,
+# markupsafe.Markup()/django mark_safe() over dynamic strings, Django HttpResponse() over
+# dynamic strings, jinja2.Environment() without autoescaping, and in HTML templates the
+# |safe filter and {% autoescape off/false %} blocks (cf. CVE-2017-12794).
+# Not covered: Flask views returning formatted HTML strings directly, JavaScript sinks,
+# attribute/URL contexts, custom template tags. Templates are matched textually.
+rules:
+  - id: tantular.python.xss.unescaped-dynamic-html
+    languages: [python]
+    severity: ERROR
+    message: >-
+      HTML is built from dynamic string formatting and marked safe, rendered as a template,
+      or returned as an HTML response, bypassing autoescaping. If an interpolated value is
+      attacker-controlled this may allow cross-site scripting. Pass values as template
+      context, or use format_html()/escape().
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      category: security
+      confidence: MEDIUM
+      frameworks: [flask, jinja2, django]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+    pattern-either:
+      - patterns:
+          - pattern-either: &html_sinks
+              - pattern: flask.render_template_string($H, ...)
+              - pattern: markupsafe.Markup($H)
+              - pattern: django.utils.safestring.mark_safe($H)
+              - pattern: django.http.HttpResponse($H, ...)
+          - metavariable-pattern:
+              metavariable: $H
+              patterns: &dynamic_html
+                - pattern-either:
+                    - pattern: f"..."
+                    - pattern: '"..." + $X'
+                    - pattern: '$X + "..."'
+                    - pattern: '"..." % $X'
+                    - pattern: '"...".format(...)'
+      - patterns:
+          - pattern-inside: |
+              $H = $E
+              ...
+          - pattern-either: *html_sinks
+          - metavariable-pattern:
+              metavariable: $E
+              patterns: *dynamic_html
+  - id: tantular.python.xss.jinja2-autoescape-disabled
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A Jinja2 Environment is created without autoescaping (the default is off). Rendered
+      variables are not HTML-escaped. Use autoescape=select_autoescape() or True.
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      category: security
+      confidence: MEDIUM
+      frameworks: [jinja2]
+      references:
+        - https://jinja.palletsprojects.com/en/stable/api/#autoescaping
+    patterns:
+      - pattern: jinja2.Environment(...)
+      - pattern-not: jinja2.Environment(..., autoescape=True, ...)
+      - pattern-not: jinja2.Environment(..., autoescape=jinja2.select_autoescape(...), ...)
+  - id: tantular.template.xss.autoescape-bypass
+    languages: [generic]
+    severity: WARNING
+    message: >-
+      Template output bypasses autoescaping (|safe filter or an autoescape off/false block).
+      If the value can contain user input this may allow cross-site scripting.
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      category: security
+      confidence: LOW
+      frameworks: [jinja2, django]
+      references:
+        - https://nvd.nist.gov/vuln/detail/CVE-2017-12794
+    paths:
+      include: ["*.html", "*.jinja", "*.jinja2", "*.j2"]
+    pattern-either:
+      - pattern-regex: \{\{[^}]*\|\s*safe\b[^}]*\}\}
+      - pattern-regex: \{%-?\s*autoescape\s+(off|false)\s*-?%\}

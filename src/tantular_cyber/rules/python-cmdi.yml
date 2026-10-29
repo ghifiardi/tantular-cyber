@@ -1,0 +1,49 @@
+# Tantular Cyber local ruleset — Python OS command injection (CWE-78).
+#
+# Supported sinks: subprocess.* with shell=True, os.system, os.popen,
+# asyncio.create_subprocess_shell — when the command string is built with an f-string,
+# concatenation, %-formatting or .format() (inline, or in a local variable in the same
+# scope). shlex.quote() inside the command is treated as a sanitizer.
+# Not covered: argument lists that invoke a shell (["sh", "-c", ...]), commands built in
+# other functions, os.exec*/spawn*, pexpect, fabric. See docs/architecture.md.
+rules:
+  - id: tantular.python.cmdi.shell-dynamic-command
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A shell command is built from dynamic string formatting and executed through a shell.
+      If an interpolated value is attacker-controlled this may allow OS command injection.
+      Pass an argument list without shell=True, or quote values with shlex.quote().
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      category: security
+      confidence: MEDIUM
+      references:
+        - https://cwe.mitre.org/data/definitions/78.html
+        - https://docs.python.org/3/library/subprocess.html#security-considerations
+    pattern-either:
+      - patterns:
+          - pattern-either: &cmd_sinks
+              - pattern: subprocess.$F($CMD, ..., shell=True, ...)
+              - pattern: os.system($CMD)
+              - pattern: os.popen($CMD, ...)
+              - pattern: asyncio.create_subprocess_shell($CMD, ...)
+          - metavariable-pattern:
+              metavariable: $CMD
+              patterns: &dynamic_cmd
+                - pattern-either:
+                    - pattern: f"..."
+                    - pattern: '"..." + $X'
+                    - pattern: '$X + "..."'
+                    - pattern: '"..." % $X'
+                    - pattern: '"...".format(...)'
+                - pattern-not-regex: shlex\.quote
+      - patterns:
+          - pattern-inside: |
+              $CMD = $E
+              ...
+          - pattern-either: *cmd_sinks
+          - metavariable-pattern:
+              metavariable: $E
+              patterns: *dynamic_cmd

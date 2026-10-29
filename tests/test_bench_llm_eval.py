@@ -10,6 +10,7 @@ from tantular_cyber.benchmark.llm_eval import (
     check_injection,
     check_language,
     check_remediation,
+    check_shell_code,
     summarize,
     wilson,
 )
@@ -150,3 +151,55 @@ def test_dependency_wording_counts_as_hedged() -> None:
         ]
     )
     assert check_impact(hedged).passed
+
+
+def test_cwe_names_and_remediation_for_new_cwes() -> None:
+    cmd = finding(
+        summary="Ada potensi injeksi perintah OS karena perintah dibangun dari input.",
+        remediation=["Gunakan daftar argumen tanpa shell=True."],
+        corrected_code=None,
+    )
+    assert check_cwe(cmd, "CWE-78").passed and check_remediation(cmd, "CWE-78").passed
+    trav = finding(
+        summary="Potensi path traversal pada pembacaan file.",
+        remediation=["Gunakan os.path.basename() atau secure_filename()."],
+    )
+    assert check_cwe(trav, "CWE-22").passed and check_remediation(trav, "CWE-22").passed
+    xss = finding(
+        summary="Potensi XSS karena HTML tidak di-escape.",
+        remediation=["Gunakan format_html() atau autoescape template."],
+    )
+    assert check_cwe(xss, "CWE-79").passed and check_remediation(xss, "CWE-79").passed
+    cred = finding(
+        summary="Kredensial hard-coded di dalam kode.",
+        remediation=["Simpan di variabel lingkungan dan lakukan rotasi."],
+    )
+    assert check_cwe(cred, "CWE-798").passed and check_remediation(cred, "CWE-798").passed
+    vague = finding(remediation=["Perbaiki kodenya."])
+    assert not check_remediation(vague, "CWE-22").passed
+
+
+def test_shell_corrected_code_check() -> None:
+    assert check_shell_code('subprocess.run(["ping", "-c", "1", host])')[0]
+    assert not check_shell_code('subprocess.run(f"ping {host}", shell=True)')[0]
+    assert not check_shell_code('os.system("ping " + host)')[0]
+    assert check_shell_code('subprocess.run("df -h", shell=True)')[0]
+
+
+def test_live_run_regressions_poc004() -> None:
+    """Sentences from the 2026-10-29 live run that the evaluator misjudged."""
+    explicit = finding(
+        conditional_impact=[
+            "Dampak ini bersifat kondisional karena memerlukan bahwa parameter tersebut "
+            "benar-benar dikendalikan oleh penyerang."
+        ]
+    )
+    assert check_impact(explicit).passed
+    certain = finding(conditional_impact=["Kode berbahaya akan dieksekusi di browser pengunjung."])
+    assert not check_impact(certain).passed
+    quotes = finding(confirmed_evidence=["`username` dibaca dengan `cursor.execute(query)`."])
+    assert check_grounding(quotes).passed
+    paraphrase = finding(confirmed_evidence=["Query memakai `query + username` di baris 9."])
+    assert check_grounding(paraphrase).passed
+    fabricated = finding(confirmed_evidence=["Nilai melewati `sanitize_input(username)`."])
+    assert not check_grounding(fabricated).passed

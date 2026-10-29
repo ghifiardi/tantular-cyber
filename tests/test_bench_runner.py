@@ -48,8 +48,14 @@ def test_offline_benchmark_passes_with_expected_metrics(offline) -> None:
     result, out = offline
     assert result.status == "pass", [g for g in result.gates if not g.passed]
     m = result.scanner.metrics
-    assert (m.tp, m.fp, m.fn, m.tn) == (12, 3, 3, 5)
-    assert m.precision == 0.8 and m.recall == 0.8
+    assert (m.tp, m.fp, m.fn, m.tn) == (32, 7, 7, 20)
+    assert m.precision == 0.8205 and m.recall == 0.8205
+    ctx = {s.strategy: s for s in result.context.strategies}
+    assert ctx["ast"].construct_covered == ctx["ast"].n
+    assert ctx["window"].construct_covered < ctx["ast"].construct_covered
+    assert not result.context.lost_coverage
+    for cwe in ("CWE-89", "CWE-78", "CWE-22", "CWE-79", "CWE-798"):
+        assert cwe in result.scanner.by_cwe
     labels = {r.label for r in result.scanner.records if r.outcome in ("TP", "TN", "FP", "FN")}
     assert {
         "true_positive",
@@ -59,10 +65,10 @@ def test_offline_benchmark_passes_with_expected_metrics(offline) -> None:
     } <= labels
     assert result.llm is None and result.performance is None
     data = json.loads((out / "benchmark.json").read_text())
-    assert data["benchmark_schema_version"] == "1.0.0"
+    assert data["benchmark_schema_version"] == "1.1.0"
     assert data["result_type"] == "tantular-cyber.benchmark"
     assert data["provenance"]["corpus_sha256"] == corpus_digest(CORPUS)
-    assert json.loads((out / "scan-report.json").read_text())["schema_version"] == "1.1.0"
+    assert json.loads((out / "scan-report.json").read_text())["schema_version"] == "1.2.0"
 
 
 def test_outputs_contain_no_local_paths_or_secrets(offline, replay) -> None:
@@ -78,7 +84,7 @@ def test_replay_mode_exercises_every_check(replay) -> None:
     result, out = replay
     assert result.status == "pass"  # LLM quality never gates
     llm = result.llm
-    assert llm is not None and llm.mode == "replay" and llm.summary.n_explanations == 8
+    assert llm is not None and llm.mode == "replay" and llm.summary.n_explanations == 13
     by_case: dict[str, dict[str, bool | None]] = {}
     for ev in llm.evaluations:
         by_case.setdefault(ev.case_id, {}).update({c.id: c.passed for c in ev.checks})
@@ -102,8 +108,16 @@ def test_replay_mode_exercises_every_check(replay) -> None:
         if e.case_id == "admin-maintenance"
     )
     assert all(llm.injection_cases_detected.values())
+    assert by_case["cmdi-launcher"]["remediation_sound"] is True
+    assert by_case["cmdi-launcher"]["cwe_consistent"] is True
+    assert by_case["path-archives"]["cwe_consistent"] is True
+    assert by_case["creds-flask"]["remediation_sound"] is True
+    django = [
+        {c.id: c.passed for c in e.checks} for e in llm.evaluations if e.case_id == "xss-django"
+    ]
+    assert sorted(c["remediation_sound"] for c in django) == [False, True]
     queue = json.loads((out / "human_review.json").read_text())
-    assert len(queue) == 8 and all(set(q["reviewer"]) >= {"clarity_id", "notes"} for q in queue)
+    assert len(queue) == 13 and all(set(q["reviewer"]) >= {"clarity_id", "notes"} for q in queue)
     recorded = json.loads((out / "recorded.json").read_text())
     assert set(recorded["responses"]) == set(json.loads(REPLAY.read_text())["responses"])
 
@@ -164,6 +178,43 @@ def test_recorded_real_model_outputs_rescore_deterministically(tmp_path: Path) -
     )
     llm = result.llm
     assert llm is not None and llm.summary.n_explanations == 8
+    assert any("covers 6 of 10" in n for n in llm.notes)
     assert llm.summary.checks["schema_valid"].rate == 1.0
     assert llm.summary.checks["injection_resisted"].rate == 1.0
     assert llm.summary.checks["impact_separated"].rate == 1.0
+
+
+def test_recorded_poc004_outputs_cover_new_cwes(tmp_path: Path) -> None:
+    """Raw outputs from the 2026-10-29 live run (AST context), incl. CWE-78/22/79/798."""
+    replay_file = ROOT / "benchmarks" / "replays" / "tantular-cyber-latest-2026-10-29-ast.json"
+    result = run_benchmark(
+        BenchmarkOptions(corpus=CORPUS, output=tmp_path, llm="replay", replay_file=replay_file)
+    )
+    llm = result.llm
+    assert llm is not None and llm.summary.n_explanations == 13 and not llm.notes
+    checks = llm.summary.checks
+    for cid in (
+        "schema_valid",
+        "cwe_consistent",
+        "evidence_grounded",
+        "remediation_sound",
+        "injection_resisted",
+        "no_unsupported_assertions",
+    ):
+        assert checks[cid].rate == 1.0, cid
+    assert checks["impact_separated"].passed == 11  # two genuinely unhedged statements
+
+
+def test_comparison_across_different_corpora_does_not_judge_counts(offline) -> None:
+    from tantular_cyber.benchmark.results import compare
+
+    result, _ = offline
+    baseline = json.loads(result.model_dump_json())
+    baseline["provenance"]["corpus_sha256"] = "different"
+    baseline["scanner"]["metrics"].update(fp=0, fn=0, precision=0.99)
+    cmp = compare(result, baseline)
+    assert not cmp.same_corpus
+    deltas = {d.metric: d for d in cmp.deltas}
+    assert not deltas["scanner.fp"].worse and not deltas["scanner.fn"].worse
+    assert deltas["scanner.precision"].worse  # rates are still judged
+    assert "scanner.cwe.CWE-89.precision" in deltas

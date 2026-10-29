@@ -1,0 +1,80 @@
+# Tantular Cyber local ruleset — Python path traversal (CWE-22).
+#
+# Supported sinks: open(), io.open(), flask.send_file() whose path is built with
+# os.path.join() containing a lower-case (non-constant) name, an f-string, or
+# concatenation — inline or via a local variable; and tarfile extract()/extractall()
+# without a filter= argument (cf. CVE-2007-4559). os.path.basename() and
+# werkzeug secure_filename() inside the path expression are treated as sanitizers.
+# Not covered: pathlib operators, validation in a separate statement (realpath/commonpath
+# checks are invisible and produce known false positives), zipfile, shutil.
+rules:
+  - id: tantular.python.path.dynamic-file-path
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A file path is built from a non-constant value and opened or sent. If the value is
+      attacker-controlled it may contain '../' and reach files outside the intended
+      directory. Reduce it to a basename / secure_filename(), or resolve it and verify it
+      stays under the base directory.
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      category: security
+      confidence: LOW
+      references:
+        - https://cwe.mitre.org/data/definitions/22.html
+    pattern-either:
+      - patterns:
+          - pattern-either: &path_sinks
+              - pattern: open($P, ...)
+              - pattern: io.open($P, ...)
+              - pattern: flask.send_file($P, ...)
+          - metavariable-pattern:
+              metavariable: $P
+              patterns: &dynamic_path
+                - pattern-either:
+                    - patterns:
+                        - pattern: os.path.join(..., $SEG, ...)
+                        - metavariable-regex:
+                            metavariable: $SEG
+                            regex: ^[a-z_][a-z0-9_.]*(\[.*\]|\(.*\))?$
+                    - pattern: f"..."
+                    - pattern: '"..." + $X'
+                    - pattern: '$X + "..."'
+                - pattern-not-regex: (os\.path\.basename|secure_filename)\(
+      - patterns:
+          - pattern-inside: |
+              $P = $E
+              ...
+          - pattern-either: *path_sinks
+          - metavariable-pattern:
+              metavariable: $E
+              patterns: *dynamic_path
+  - id: tantular.python.path.tarfile-unfiltered-extract
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A tar archive is extracted without an extraction filter. Member names containing
+      '..' or absolute paths can write outside the destination (cf. CVE-2007-4559). Pass
+      filter="data" (Python 3.12+, backported to recent 3.8+ releases) or validate members.
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      category: security
+      confidence: MEDIUM
+      references:
+        - https://nvd.nist.gov/vuln/detail/CVE-2007-4559
+        - https://docs.python.org/3/library/tarfile.html#extraction-filters
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              with tarfile.open(...) as $T:
+                ...
+          - pattern-inside: |
+              $T = tarfile.open(...)
+              ...
+      - pattern-either:
+          - pattern: $T.extractall(...)
+          - pattern: $T.extract(...)
+      - pattern-not: $T.extractall(..., filter=$FLT, ...)
+      - pattern-not: $T.extract(..., filter=$FLT, ...)
