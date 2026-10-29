@@ -29,6 +29,11 @@ tantular-cyber realworld clean                 # deletes the cache
   `upstream_label` until a reviewer (pseudonym) independently confirms the location.
   Results are descriptive counts — never precision/recall or real-world performance.
 
+Missed pointers carry a `coverage_candidate` note describing the sink our scanners do not
+model (vendor SDK SQL methods, directory creation, in-repo command wrappers, helper-based
+path use). These are candidates for future milestones, not commitments, and POC-005 does
+not add coverage for them.
+
 To add a pointer: pick the pre-fix parent of an advisory's fix commit, record the exact
 lines, compute `git_blob_sha1` (GitHub contents API `sha`) and the line hash, record the
 license, and keep it pointer-only. Do not add code excerpts; if one is ever unavoidable it
@@ -85,7 +90,13 @@ tantular-cyber -v compare --models tantular-cyber:latest --profiles baseline,con
 * Output: per-arm rates (Wilson 95%), latency p50/p95, prompt / cached / output tokens,
   paired wins/losses vs the reference arm with an exact McNemar test.
 * Quantization confound: Tantular weights are Q8_0, `qwen3.5:9b`/`qwen3:8b` are Q4_K_M —
-  differences mix weights and quantization.
+  differences mix weights, tuning and quantization; no single "winner" is declared.
+* `--modes profile` sends **no system message and no sampling options** (only the per-run
+  seed): each model's own Modelfile SYSTEM prompt and PARAMETERs apply, and our instructions
+  travel at the top of the user message, so inputs stay identical. Comparing
+  `tantular-cyber:latest` with `ghifidanukusumo/tantular:latest` in this mode isolates the
+  Tantular Cyber prompt/parameter profile on **identical weights**; `--modes pinned`
+  (default) neutralizes the profile and should make the two indistinguishable.
 
 ### Optimization rule
 

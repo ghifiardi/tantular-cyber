@@ -127,3 +127,14 @@ def test_evaluation_detects_from_cache_and_cleans(tmp_path: Path) -> None:
     assert evaluate_pointers(moved, tmp_path).results[0].state == "anchor_moved"
     assert clean_cache(tmp_path) and not tmp_path.exists()
     assert json.loads(result.model_dump_json())["caveat"].startswith("Pointer-only")
+
+
+def test_missed_sinks_are_recorded_as_coverage_candidates() -> None:
+    manifest = load_realworld(MANIFEST)
+    candidates = {e.id for e in manifest.entries if e.coverage_candidate}
+    assert candidates == {
+        "rw-mem0-databricks-delete",
+        "rw-djust-fixture-path",
+        "rw-setuptools-namespace-dir",
+        "rw-glances-action-command",
+    }

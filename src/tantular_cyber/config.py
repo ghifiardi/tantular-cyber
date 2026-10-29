@@ -46,6 +46,9 @@ class OllamaSettings:
     presence_penalty: float | None = None
     num_predict: int | None = None
     seed: int | None = None
+    # False = send no temperature/num_ctx either, so the Modelfile's PARAMETERs apply
+    # (used by the "profile" comparison mode).
+    pin_core_options: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, **overrides: object) -> OllamaSettings:

@@ -101,7 +101,11 @@ def system_prompt(profile: str = "baseline") -> str:
     return SYSTEM_PROMPT + PROMPT_PROFILES[profile]
 
 
-def build_messages(finding: Finding, profile: str = "baseline") -> list[dict[str, str]]:
+def build_messages(
+    finding: Finding, profile: str = "baseline", system_role: bool = True
+) -> list[dict[str, str]]:
+    """``system_role=False`` puts our instructions at the top of the user message instead,
+    so a model's own Modelfile SYSTEM prompt applies (comparison "profile" mode)."""
     """System prompt is constant; all repository-derived text goes into an escaped JSON blob."""
     data = {
         "finding_id": finding.id,
@@ -129,6 +133,8 @@ def build_messages(finding: Finding, profile: str = "baseline") -> list[dict[str
         "Jelaskan temuan berikut sesuai aturan sistem.\n"
         f"<untrusted_data>\n{blob}\n</untrusted_data>"
     )
+    if not system_role:
+        return [{"role": "user", "content": system_prompt(profile) + "\n" + user}]
     return [
         {"role": "system", "content": system_prompt(profile)},
         {"role": "user", "content": user},
@@ -368,15 +374,20 @@ def sanitize_explanation(expl: LLMExplanation) -> LLMExplanation:
 
 
 class FindingAnalyzer:
-    def __init__(self, client: LLMClient, profile: str = "baseline") -> None:
+    def __init__(
+        self, client: LLMClient, profile: str = "baseline", system_role: bool = True
+    ) -> None:
         self.profile = profile
+        self.system_role = system_role
         self.client = client
 
     def analyze(self, finding: Finding) -> FindingAnalysis:
         """Analyze one finding. Transport errors propagate so the caller can stop early."""
         started = time.monotonic()
         base: dict[str, Any] = {"provider": self.client.provider, "model": self.client.model}
-        raw = self.client.chat(build_messages(finding, self.profile), EXPLANATION_JSON_SCHEMA)
+        raw = self.client.chat(
+            build_messages(finding, self.profile, self.system_role), EXPLANATION_JSON_SCHEMA
+        )
         duration = round(time.monotonic() - started, 3)
         # Optional: clients may expose per-call metrics (OllamaClient.last_metrics).
         base["metrics"] = getattr(self.client, "last_metrics", None)

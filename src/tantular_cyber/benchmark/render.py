@@ -128,6 +128,31 @@ def benchmark_markdown(r: BenchmarkResult) -> str:
             out += ["", "**Coverage lost vs window:** " + ", ".join(ctx.lost_coverage)]
         out.append("")
 
+    if ab := r.ablation:
+        out += [
+            "## Scanner attribution (ablation)",
+            "",
+            "Same corpus and matching rules; the combined run is the one that gates.",
+            "",
+            "| Scanners | TP | FP | FN | TN | Precision | Recall |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for arm in ab.arms:
+            m = arm.metrics
+            out.append(
+                f"| {arm.scanners} | {m.tp} | {m.fp} | {m.fn} | {m.tn} | "
+                f"{_fmt(m.precision)} | {_fmt(m.recall)} |"
+            )
+        out += [
+            "",
+            f"Detected only by Semgrep: {', '.join(ab.semgrep_unique) or '-'}  ",
+            f"Detected only by tantular-callgraph: {', '.join(ab.callgraph_unique) or '-'}  ",
+            f"Detected by both: {len(ab.both)}  ",
+            f"Callgraph detections on safe code that Semgrep did not flag: "
+            f"{', '.join(ab.callgraph_new_fp) or 'none'}",
+            "",
+        ]
+
     out += ["## Adversarial suites (regression, not proof of protection)", ""]
     for suite in r.adversarial:
         counts = ", ".join(f"{k}: {v}" for k, v in suite.counts.items())

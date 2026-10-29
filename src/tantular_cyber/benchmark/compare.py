@@ -55,9 +55,15 @@ class Arm:
     model: str
     profile: str = "baseline"
     num_ctx: int = 8192
+    # "pinned": our system prompt + pinned options. "profile": the model's own Modelfile
+    # SYSTEM prompt and PARAMETERs apply (only the seed is sent; our instructions travel in
+    # the user message) — isolates a Modelfile profile on identical weights.
+    mode: str = "pinned"
 
     @property
     def label(self) -> str:
+        if self.mode == "profile":
+            return f"{self.model}|{self.profile}~modelfile-profile"
         extra = "" if self.num_ctx == 8192 else f"@ctx{self.num_ctx}"
         return f"{self.model}|{self.profile}{extra}"
 
@@ -222,23 +228,29 @@ def run_arm(
     records = lookup["records"]
     cases = lookup["cases"]
     for run in range(1, runs + 1):
-        settings = OllamaSettings(
-            base_url=base.base_url,
-            model=arm.model,
-            timeout_s=base.timeout_s,
-            max_retries=base.max_retries,
-            allow_remote=base.allow_remote,
-            temperature=float(PINNED_OPTIONS["temperature"]),
-            num_ctx=arm.num_ctx,
-            top_p=float(PINNED_OPTIONS["top_p"]),
-            top_k=int(PINNED_OPTIONS["top_k"]),
-            repeat_penalty=float(PINNED_OPTIONS["repeat_penalty"]),
-            presence_penalty=float(PINNED_OPTIONS["presence_penalty"]),
-            num_predict=int(PINNED_OPTIONS["num_predict"]),
-            seed=run,
+        settings = (
+            _settings(arm, base, run)
+            if arm.mode == "profile"
+            else OllamaSettings(
+                base_url=base.base_url,
+                model=arm.model,
+                timeout_s=base.timeout_s,
+                max_retries=base.max_retries,
+                allow_remote=base.allow_remote,
+                temperature=float(PINNED_OPTIONS["temperature"]),
+                num_ctx=arm.num_ctx,
+                top_p=float(PINNED_OPTIONS["top_p"]),
+                top_k=int(PINNED_OPTIONS["top_k"]),
+                repeat_penalty=float(PINNED_OPTIONS["repeat_penalty"]),
+                presence_penalty=float(PINNED_OPTIONS["presence_penalty"]),
+                num_predict=int(PINNED_OPTIONS["num_predict"]),
+                seed=run,
+            )
         )
         with OllamaClient(settings) as client:
-            analyzer = FindingAnalyzer(client, profile=arm.profile)
+            analyzer = FindingAnalyzer(
+                client, profile=arm.profile, system_role=arm.mode != "profile"
+            )
             for f in findings:
                 copy = f.model_copy(deep=True)
                 try:
@@ -252,6 +264,18 @@ def run_arm(
                 if on_progress:
                     on_progress(f"{arm.label} run {run}: {len(samples)} done")
     return samples
+
+
+def _settings(arm: Arm, base: OllamaSettings, run: int) -> OllamaSettings:
+    return OllamaSettings(
+        base_url=base.base_url,
+        model=arm.model,
+        timeout_s=base.timeout_s,
+        max_retries=base.max_retries,
+        allow_remote=base.allow_remote,
+        seed=run,
+        pin_core_options=False,
+    )
 
 
 def summarize_arm(arm: Arm, samples: Sequence[_Sample]) -> ArmSummary:
@@ -532,11 +556,23 @@ def render_comparison(r: ComparisonResult) -> str:
     return "\n".join(out) + "\n"
 
 
-def parse_arms(models: str, profiles: str, contexts: str) -> list[Arm]:
+def parse_arms(models: str, profiles: str, contexts: str, modes: str = "pinned") -> list[Arm]:
     ms = [m.strip() for m in models.split(",") if m.strip()]
     ps = [p.strip() for p in profiles.split(",") if p.strip()] or ["baseline"]
     cs = [int(c) for c in contexts.split(",") if c.strip()] or [8192]
+    md = [m.strip() for m in modes.split(",") if m.strip()] or ["pinned"]
+    for m in md:
+        if m not in ("pinned", "profile"):
+            raise ValueError(f"unknown mode {m}; choose pinned or profile")
     for p in ps:
         if p not in PROMPT_PROFILES:
             raise ValueError(f"unknown profile {p}; choose from {sorted(PROMPT_PROFILES)}")
-    return [Arm(m, p, c) for m in ms for p in ps for c in cs]
+    arms: list[Arm] = []
+    for mode in md:
+        for m in ms:
+            for p in ps:
+                for c in cs if mode == "pinned" else [8192]:
+                    arm = Arm(m, p, c, mode)
+                    if arm not in arms:
+                        arms.append(arm)
+    return arms

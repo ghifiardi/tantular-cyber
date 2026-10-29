@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from . import BENCHMARK_RESULT_TYPE, BENCHMARK_SCHEMA_VERSION
+from .ablation import Ablation
 from .adversarial import SuiteResult
 from .context_eval import ContextEval
 from .llm_eval import ExplanationEval, LLMEvalSummary
@@ -86,6 +87,7 @@ class BenchmarkResult(BaseModel):
     scanner: ScannerBench | None
     adversarial: list[SuiteResult]
     context: ContextEval | None = None
+    ablation: Ablation | None = None
     llm: LLMBench | None = None
     performance: PerfSummary | None = None
     comparison: Comparison | None = None

@@ -39,13 +39,6 @@ rules:
                     - pattern: '$X + "..."'
                     - pattern: '"..." % $X'
                     - pattern: '"...".format(...)'
-                    - patterns:
-                        - pattern: $A + $B
-                        - metavariable-pattern:
-                            metavariable: $A
-                            pattern-either:
-                              - pattern: '"..." + $Z'
-                              - pattern: '$Z + "..."'
       - patterns:
           - pattern-inside: |
               $H = $E

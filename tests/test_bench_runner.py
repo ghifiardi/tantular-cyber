@@ -220,3 +220,26 @@ def test_comparison_across_different_corpora_does_not_judge_counts(offline) -> N
     assert not deltas["scanner.fp"].worse and not deltas["scanner.fn"].worse
     assert deltas["scanner.precision"].worse  # rates are still judged
     assert "scanner.cwe.CWE-89.precision" in deltas
+
+
+def test_ablation_attributes_detections_and_pins_known_limits(offline) -> None:
+    result, _ = offline
+    ab = result.ablation
+    assert ab is not None and [a.scanners for a in ab.arms] == [
+        "semgrep",
+        "callgraph",
+        "semgrep+callgraph",
+    ]
+    former_gaps = {
+        "known-fn-cross-function",
+        "known-fn-sqlalchemy-text",
+        "known-fn-join",
+        "cmdi-known-fn-sh-c",
+        "path-known-fn-pathlib",
+    }
+    assert former_gaps <= set(ab.callgraph_unique)
+    assert ab.callgraph_new_fp == []  # no false positive that Semgrep did not already raise
+    combined = {r.annotation_id: r for r in result.scanner.records}
+    # Documented limitations stay undetected at the default depth budget (regression pin).
+    for limit in ("interproc-known-fn-depth", "interproc-known-fn-dynamic-dispatch"):
+        assert not combined[limit].detected and combined[limit].expectation_met

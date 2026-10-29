@@ -141,3 +141,31 @@ def test_run_comparison_offline_with_pinned_options(monkeypatch) -> None:
     assert all(a.n == 10 for a in result.arms)
     assert [a.arm for a in result.adoption] == ["m:a|concise"]  # same model only
     assert "Paired comparison" in render_comparison(result)
+
+
+def test_modelfile_profile_mode_sends_no_system_role_or_pinned_options() -> None:
+    import httpx
+    from test_analysis import make_finding
+
+    from tantular_cyber.analysis import build_messages
+    from tantular_cyber.benchmark.compare import _settings
+    from tantular_cyber.config import OllamaSettings
+    from tantular_cyber.ollama_client import OllamaClient
+
+    arms = parse_arms("a,b", "baseline", "8192,4096", "pinned,profile")
+    assert [x.label for x in arms if x.mode == "profile"] == [
+        "a|baseline~modelfile-profile",
+        "b|baseline~modelfile-profile",
+    ]
+    msgs = build_messages(make_finding(), system_role=False)
+    assert [m["role"] for m in msgs] == ["user"] and "untrusted_data" in msgs[0]["content"]
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(__import__("json").loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "{}"}, "done_reason": "stop"})
+
+    settings = _settings(arms[-1], OllamaSettings(), run=2)
+    OllamaClient(settings, transport=httpx.MockTransport(handler)).chat(msgs)
+    assert sent[0]["options"] == {"seed": 2}  # Modelfile temperature/num_ctx/etc. apply
+    assert sent[0]["think"] is False and sent[0]["stream"] is False

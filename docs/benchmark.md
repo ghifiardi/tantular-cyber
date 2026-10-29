@@ -127,6 +127,14 @@ With `require_cwe_category_coverage`, `manifest_valid` also fails unless every a
 CWE has a true positive, a true negative, a near miss, a known FP or FN, and a `per_cwe`
 threshold.
 
+## Scanner attribution (ablation, POC-005)
+
+The benchmark scans the corpus three times — Semgrep only, tantular-callgraph only, both —
+with the same matching rules and lists the true positives unique to each scanner and any
+callgraph detection on safe code that Semgrep did not already flag. Only the combined run
+gates. Rule changes are attributed separately by scanning with the previous release's
+rules (see benchmark-results.md).
+
 ## Evidence context metrics (POC-004)
 
 For every detected location the benchmark extracts context with **both** strategies

@@ -68,6 +68,11 @@ class Pointer(BaseModel):
     license_source: str
     description: str
     verification: Verification
+    coverage_candidate: str | None = Field(
+        default=None,
+        description="Why the bundled scanners miss this location; a candidate for future "
+        "coverage work (not a commitment).",
+    )
     development_use: str | None = Field(
         default=None,
         description="Set when this pointer influenced rules/code; it is then not an "

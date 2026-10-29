@@ -17,9 +17,11 @@ synthetic corpus says nothing about real-world recall.
 | 79 XSS | `tantular.template.xss.autoescape-bypass` (HTML templates) | WARNING / LOW |
 | 798 Hard-coded credentials | `tantular.python.secrets.hardcoded-credential` | WARNING / MEDIUM |
 
-"Dynamic string" below means an f-string, `+` concatenation (including chains whose last
-operand is a variable, `"a" + x + "." + y`, since POC-005), `%`-formatting or `.format()` —
-inline in the call, or assigned to a local variable earlier in the same scope.
+"Dynamic string" below means an f-string, `+` concatenation, `%`-formatting or `.format()` —
+inline in the call, or assigned to a local variable earlier in the same scope. Concatenation
+chains whose last operand is a variable (`"a" + x + "." + y`) are matched by the CWE-78/22/79
+rules through `metavariable-pattern` (sub-expression search) and, since POC-005, by an
+explicit chain pattern in the CWE-89 rule.
 
 Since POC-005 a second scanner, `tantular-callgraph` (rule ids `tantular.callgraph.*`,
 CWE-89/78/22), follows values through same-repository function calls and through

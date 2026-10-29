@@ -180,6 +180,12 @@ def _build_parser() -> argparse.ArgumentParser:
     cmp.add_argument("--models", default="tantular-cyber:latest")
     cmp.add_argument("--profiles", default="baseline", help="comma-separated prompt profiles")
     cmp.add_argument("--contexts", default="8192", help="comma-separated num_ctx values")
+    cmp.add_argument(
+        "--modes",
+        default="pinned",
+        help="pinned (our system prompt + pinned options) and/or profile "
+        "(the Modelfile's SYSTEM and PARAMETERs apply; same inputs and seeds)",
+    )
     cmp.add_argument("--runs", type=int, default=3)
     cmp.add_argument("--max-findings", type=int, default=40)
     cmp.add_argument(
@@ -405,7 +411,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     from .benchmark.compare import parse_arms, render_comparison, run_comparison
 
     try:
-        arms = parse_arms(args.models, args.profiles, args.contexts)
+        arms = parse_arms(args.models, args.profiles, args.contexts, args.modes)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_INPUT

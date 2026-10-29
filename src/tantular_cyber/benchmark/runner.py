@@ -22,6 +22,7 @@ from ..ollama_client import OllamaClient
 from ..pipeline import run_scan
 from ..reports import render_json, render_markdown
 from . import render
+from .ablation import run_ablation
 from .adversarial import run_adversarial
 from .context_eval import evaluate_context
 from .llm_eval import (
@@ -197,6 +198,7 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         scanner = _scanner_bench(manifest, scan)
         adversarial = run_adversarial(corpus)
         context = evaluate_context(manifest, cases_root, scanner.records)
+        ablation = run_ablation(manifest, cases_root, tmp, opts.semgrep_bin, opts.context_strategy)
 
         llm_bench = perf = None
         if opts.llm != "off":
@@ -249,6 +251,7 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         scanner=scanner,
         adversarial=adversarial,
         context=context,
+        ablation=ablation,
         llm=llm_bench,
         performance=perf,
     )

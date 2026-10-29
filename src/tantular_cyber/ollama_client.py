@@ -153,8 +153,11 @@ class OllamaClient:
             "think": False,
             "stream": False,
             "options": {
-                "temperature": self.settings.temperature,
-                "num_ctx": self.settings.num_ctx,
+                **(
+                    {"temperature": self.settings.temperature, "num_ctx": self.settings.num_ctx}
+                    if self.settings.pin_core_options
+                    else {}
+                ),
                 **{
                     k: v
                     for k in (
