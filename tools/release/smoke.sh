@@ -46,9 +46,11 @@ DOCTOR=$?
 SCAN_CMD=("$V/tantular-cyber" scan --repo "$WORK/demo" --output "$WORK/reports"
   --semgrep-bin "$SEMGREP")
 if [ "${NO_NETWORK:-0}" = "1" ] && [ "$(uname -s)" = "Linux" ]; then
-  sudo -E unshare --net -- bash -c 'ip link set lo up 2>/dev/null; exec "$@"' _ "${SCAN_CMD[@]}"
+  # Root is needed only to create the namespace; the scan itself runs as the invoking user
+  # (same HOME, no root-owned files left behind for later Semgrep runs).
+  sudo -E unshare --net -- bash -c 'ip link set lo up 2>/dev/null; user=$1; shift;
+    exec sudo -E -u "$user" -- "$@"' _ "$(id -un)" "${SCAN_CMD[@]}"
   SCAN=$?
-  sudo chown -R "$(id -u):$(id -g)" "$WORK/reports" || true
 else
   "${SCAN_CMD[@]}"
   SCAN=$?
@@ -71,6 +73,15 @@ print(f"doctor={d['scan_capability']} scan={r['status']} findings={r['totals']['
 EOF
 
 if [ "$MODE" = "semgrep" ]; then
-  "$V/tantular-cyber" benchmark --output "$WORK/bench"
+  if ! "$V/tantular-cyber" benchmark --output "$WORK/bench"; then
+    "$V/python" - "$WORK/bench/scan-report.json" <<'EOF'
+import json, sys
+r = json.load(open(sys.argv[1]))
+print("benchmark scan status:", r["status"], r["status_reasons"])
+for e in r["errors"]:
+    print("  error:", e["stage"], e["message"][:400])
+EOF
+    exit 1
+  fi
 fi
 echo "smoke OK ($MODE)"
