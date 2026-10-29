@@ -170,6 +170,18 @@ def collect_files(repo: Path, *, max_file_bytes: int) -> FileInventory:
     return inventory
 
 
+# Cyrillic/Greek letters that render like Latin ones (homoglyph evasion), by code point.
+CONFUSABLES = str.maketrans(
+    {
+        0x0430: "a", 0x0435: "e", 0x043E: "o", 0x0440: "p", 0x0441: "c", 0x0445: "x",
+        0x0443: "y", 0x0456: "i", 0x0455: "s", 0x043A: "k", 0x043C: "m", 0x0442: "t",
+        0x043D: "h", 0x0432: "b", 0x0410: "A", 0x0415: "E", 0x041E: "O", 0x0420: "P",
+        0x0421: "C", 0x0425: "X", 0x0406: "I", 0x041A: "K", 0x041C: "M", 0x0422: "T",
+        0x041D: "H", 0x0412: "B", 0x03BF: "o", 0x03B1: "a", 0x03B5: "e", 0x039F: "O",
+    }
+)  # fmt: skip
+
+
 # --- Redaction ---------------------------------------------------------------
 #
 # Redaction is heuristic and errs toward masking. Every rule preserves the number of
@@ -255,7 +267,7 @@ _KNOWN_FORMATS: tuple[tuple[re.Pattern[str], Replacement], ...] = (
     ),
 )
 
-_CONTEXTUAL: tuple[tuple[re.Pattern[str], Replacement], ...] = (
+_CONTEXTUAL_ALL: tuple[tuple[re.Pattern[str], Replacement], ...] = (
     # HTTP Basic credentials (base64 "user:pass").
     (re.compile(r"(?i)\b(basic)\s+([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])"), _basic_auth),
     # Base64 blobs whose decoded content is a known credential format.
@@ -320,6 +332,62 @@ def _redact_known(text: str) -> tuple[str, int]:
     return _apply(_KNOWN_FORMATS, text)
 
 
+# Name-based rules (the last regex group is the secret value); they also run on a skeleton
+# copy of texts that contain invisible or lookalike characters (see _redact_obfuscated).
+_NAME_RULES = _CONTEXTUAL_ALL[2:]
+_CONTEXTUAL = _CONTEXTUAL_ALL
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u2060\ufeff\u202a-\u202e\u2066-\u2069]")
+_MARKER = re.compile(r"\[REDACTED:[a-z_]+\]")
+
+
+def _skeleton(text: str) -> tuple[str, list[int]]:
+    """Text with invisible characters removed and lookalikes mapped to Latin, plus a map
+    from each skeleton position to its original index."""
+    chars: list[str] = []
+    index: list[int] = []
+    for i, ch in enumerate(text):
+        if _INVISIBLE.match(ch):
+            continue
+        chars.append(ch.translate(CONFUSABLES))
+        index.append(i)
+    return "".join(chars), index
+
+
+def _redact_obfuscated(text: str) -> tuple[str, int]:
+    """Catch credential names hidden with zero-width/bidi characters or homoglyphs.
+
+    Matches are found on the skeleton; only the value span is replaced in the original,
+    so displayed evidence keeps its real characters and line count.
+    """
+    if not (_INVISIBLE.search(text) or text != text.translate(CONFUSABLES)):
+        return text, 0
+    skeleton, index = _skeleton(text)
+    markers = [m.span() for m in _MARKER.finditer(text)]
+    spans: list[tuple[int, int]] = []
+    for pattern, _ in _NAME_RULES:
+        for match in pattern.finditer(skeleton):
+            group = match.lastindex
+            if not group:
+                continue
+            start, end = match.span(group)
+            if end <= start:
+                continue
+            o_start, o_end = index[start], index[end - 1] + 1
+            if not any(o_start < m_end and o_end > m_start for m_start, m_end in markers):
+                spans.append((o_start, o_end))
+    if not spans:
+        return text, 0
+    merged: list[tuple[int, int]] = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    for a, b in reversed(merged):
+        text = text[:a] + "[REDACTED:secret]" + "\n" * text[a:b].count("\n") + text[b:]
+    return text, len(merged)
+
+
 def redact(text: str) -> tuple[str, int]:
     """Mask likely credentials. Returns the redacted text and the number of replacements.
 
@@ -327,7 +395,8 @@ def redact(text: str) -> tuple[str, int]:
     """
     text, known = _redact_known(text)
     text, contextual = _apply(_CONTEXTUAL, text)
-    return text, known + contextual
+    text, obfuscated = _redact_obfuscated(text)
+    return text, known + contextual + obfuscated
 
 
 _CONTROL_CHARS = re.compile(

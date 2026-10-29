@@ -21,6 +21,7 @@ from typing import Any
 from . import __version__
 from .analysis import FindingAnalyzer, LLMClient
 from .config import ScanSettings
+from .context import ContextBudget, Strategy, extract_context
 from .models import (
     SEVERITY_ORDER,
     Evidence,
@@ -91,17 +92,14 @@ def split_lines(text: str) -> list[str]:
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
-def read_redacted_lines(path: Path) -> list[str]:
-    """Redact the whole file first so multiline secrets cannot leak line by line.
-
-    Redaction preserves newlines, so scanner line numbers remain valid.
-    """
-    text, _ = redact(path.read_text(encoding="utf-8", errors="replace"))
-    return split_lines(text)
+def read_source(path: Path) -> tuple[str, list[str]]:
+    """Return (original text for AST structure only, redacted lines for display)."""
+    original = path.read_text(encoding="utf-8", errors="replace")
+    return original, split_lines(redact(original)[0])
 
 
 def build_evidence(lines: list[str], start: int, end: int) -> Evidence:
-    """``lines`` must already be redacted (see ``read_redacted_lines``)."""
+    """``lines`` must already be redacted (see ``read_source``)."""
     start = max(1, start)
     end = max(start, min(end, len(lines)))
     shown_end = min(end, start + MAX_EVIDENCE_LINES - 1)
@@ -122,12 +120,6 @@ def build_evidence(lines: list[str], start: int, end: int) -> Evidence:
     )
 
 
-def build_context(lines: list[str], start: int, end: int, radius: int) -> str:
-    lo, hi = max(1, start - radius), min(len(lines), end + radius)
-    width = len(str(hi))
-    return "\n".join(f"{n:>{width}} | {lines[n - 1]}" for n in range(lo, hi + 1))
-
-
 def finding_id(raw: RawFinding, evidence: Evidence) -> str:
     material = "|".join(
         [
@@ -143,11 +135,18 @@ def finding_id(raw: RawFinding, evidence: Evidence) -> str:
 
 
 def normalize_findings(
-    repo: Path, raws: Sequence[RawFinding], eligible: set[str], context_lines: int
+    repo: Path,
+    raws: Sequence[RawFinding],
+    eligible: set[str],
+    context_lines: int,
+    *,
+    context_strategy: Strategy = "window",
+    context_budget: ContextBudget | None = None,
 ) -> tuple[list[Finding], list[ReportError]]:
     findings: dict[str, Finding] = {}
     errors: list[ReportError] = []
-    cache: dict[str, list[str]] = {}
+    cache: dict[str, tuple[str, list[str]]] = {}
+    budget = context_budget or ContextBudget(window=context_lines)
     for raw in raws:
         if raw.path not in eligible:
             errors.append(
@@ -157,15 +156,27 @@ def normalize_findings(
             )
             continue
         if raw.path not in cache:
-            cache[raw.path] = read_redacted_lines(repo / raw.path)
-        lines = cache[raw.path]
+            cache[raw.path] = read_source(repo / raw.path)
+        original, lines = cache[raw.path]
         evidence = build_evidence(lines, raw.start_line, raw.end_line)
         fid = finding_id(raw, evidence)
         if fid in findings:
             continue
-        evidence.context = build_context(
-            lines, evidence.start_line, evidence.end_line, context_lines
+        ctx = extract_context(
+            original,
+            lines,
+            evidence.start_line,
+            evidence.end_line,
+            path=raw.path,
+            strategy=context_strategy,
+            budget=budget,
         )
+        evidence.context = ctx.text
+        evidence.context_kind = ctx.kind
+        evidence.context_lines = ctx.line_numbers
+        evidence.context_truncated = ctx.truncated
+        evidence.context_fallback = ctx.fallback_reason
+        evidence.dataflow_hints = ctx.hints
         findings[fid] = Finding(
             id=fid,
             tool=raw.tool,
@@ -389,7 +400,16 @@ def run_scan(
 
     raws = [f for run in runs for f in run.findings]
     findings, norm_errors = normalize_findings(
-        repo, raws, set(inventory.files), settings.context_lines
+        repo,
+        raws,
+        set(inventory.files),
+        settings.context_lines,
+        context_strategy="window" if settings.context_strategy == "window" else "ast",
+        context_budget=ContextBudget(
+            max_lines=settings.context_max_lines,
+            max_chars=settings.context_max_chars,
+            window=settings.context_lines,
+        ),
     )
     errors.extend(norm_errors)
 

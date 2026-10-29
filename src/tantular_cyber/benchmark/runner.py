@@ -23,6 +23,7 @@ from ..pipeline import run_scan
 from ..reports import render_json, render_markdown
 from . import render
 from .adversarial import run_adversarial
+from .context_eval import evaluate_context
 from .llm_eval import (
     ExplanationEval,
     evaluate_run,
@@ -70,6 +71,7 @@ class BenchmarkOptions:
     baseline: Path | None = None
     semgrep_bin: str = "semgrep"
     record_replay: Path | None = None
+    context_strategy: Literal["ast", "window"] = "ast"
 
 
 class ReplayLLM:
@@ -185,12 +187,14 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
                 output=tmp / "scan",
                 llm_enabled=False,
                 semgrep_bin=opts.semgrep_bin,
+                context_strategy=opts.context_strategy,
             )
         ).report
         (opts.output / "scan-report.json").write_text(render_json(scan), encoding="utf-8")
         texts_to_check += [render_json(scan), render_markdown(scan)]
         scanner = _scanner_bench(manifest, scan)
         adversarial = run_adversarial(corpus)
+        context = evaluate_context(manifest, cases_root, scanner.records)
 
         llm_bench = perf = None
         if opts.llm != "off":
@@ -220,11 +224,12 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
             "stream": False,
             "temperature": opts.ollama.temperature,
             "num_ctx": opts.ollama.num_ctx,
+            "context_strategy": opts.context_strategy,
         },
         **model_meta,  # type: ignore[arg-type]
     )
 
-    gates = compute_gates(manifest.thresholds, problems, scanner, adversarial)
+    gates = compute_gates(manifest.thresholds, problems, scanner, adversarial, context)
     leaks = _leaked_canaries(manifest, texts_to_check)
     gates.append(
         Gate(
@@ -241,6 +246,7 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         manifest_problems=problems,
         scanner=scanner,
         adversarial=adversarial,
+        context=context,
         llm=llm_bench,
         performance=perf,
     )
@@ -255,6 +261,16 @@ def _run_llm(
     opts: BenchmarkOptions, manifest: Manifest, cases_root: Path, tmp: Path
 ) -> tuple[LLMBench, PerfSummary | None, list[str]]:
     subset = _subset(manifest)
+    notes: list[str] = []
+    if opts.llm == "replay" and opts.replay_file is not None:
+        recorded_paths = {k.rsplit(":", 1)[0] for k in ReplayLLM(opts.replay_file).responses}
+        covered = [c for c in subset.cases if c.path in recorded_paths]
+        if len(covered) < len(subset.cases):
+            notes.append(
+                f"replay file covers {len(covered)} of {len(subset.cases)} llm_eval "
+                "cases; uncovered cases were not evaluated"
+            )
+        subset = subset.model_copy(update={"cases": covered})
     repo = tmp / "llm-cases"
     _copy_cases(subset, cases_root, repo)
 
@@ -278,7 +294,6 @@ def _run_llm(
     texts: list[str] = []
     first_records: list[MatchRecord] = []
     first_findings: list[Finding] = []
-    notes: list[str] = []
 
     for run in range(1, max(1, opts.llm_runs) + 1):
         kind: RunKind = "warm"
@@ -295,6 +310,7 @@ def _run_llm(
                 output=tmp / f"llm-{run}",
                 llm_enabled=True,
                 max_llm_findings=10_000,
+                context_strategy=opts.context_strategy,
                 ollama=opts.ollama,
                 semgrep_bin=opts.semgrep_bin,
             ),
@@ -361,6 +377,7 @@ def _run_llm(
         evaluations=evals,
         injection_cases_detected=injection_scanner_check(subset, first_records),
         review_queue_items=len(queue),
+        notes=notes,
     )
     return bench, perf, texts
 

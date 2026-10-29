@@ -52,6 +52,9 @@ LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "rust": (".rs",),
     "scala": (".scala",),
     "swift": (".swift",),
+    # Semgrep's "generic" (text) mode. The bundled generic rules only target HTML/Jinja
+    # templates via paths.include, so coverage is verified for these extensions.
+    "generic": (".html", ".htm", ".jinja", ".jinja2", ".j2"),
 }
 _LANGUAGE_ALIASES = {
     "py": "python",

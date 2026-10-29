@@ -68,7 +68,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="allow a non-localhost Ollama endpoint (sends code excerpts off-host)",
     )
     scan.add_argument("--max-llm-findings", type=int, default=25)
-    scan.add_argument("--context-lines", type=int, default=3)
+    scan.add_argument(
+        "--context-lines",
+        type=int,
+        default=3,
+        help="window radius (window strategy and AST fallback)",
+    )
+    scan.add_argument(
+        "--context-strategy",
+        choices=["ast", "window"],
+        default="ast",
+        help="evidence context: bounded AST-aware (default) or fixed window",
+    )
     scan.add_argument(
         "--keep-raw",
         action="store_true",
@@ -117,6 +128,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "1..4 (ollama only), e.g. 1,2",
     )
     bench.add_argument(
+        "--context-strategy",
+        choices=["ast", "window"],
+        default="ast",
+        help="evidence context strategy used for the scans",
+    )
+    bench.add_argument(
         "--baseline", type=Path, default=None, help="previous benchmark.json to compare against"
     )
     bench.add_argument(
@@ -161,6 +178,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         llm_enabled=not args.no_llm,
         max_llm_findings=args.max_llm_findings,
         context_lines=args.context_lines,
+        context_strategy=args.context_strategy,
         ollama=_ollama_settings(args),
     )
     for rule in settings.rules:
@@ -243,6 +261,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         concurrency=levels,
         baseline=args.baseline,
         record_replay=args.record_replay,
+        context_strategy=args.context_strategy,
         semgrep_bin=_semgrep_bin(args),
     )
     try:

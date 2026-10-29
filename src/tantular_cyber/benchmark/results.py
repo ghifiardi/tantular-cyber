@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from . import BENCHMARK_RESULT_TYPE, BENCHMARK_SCHEMA_VERSION
 from .adversarial import SuiteResult
+from .context_eval import ContextEval
 from .llm_eval import ExplanationEval, LLMEvalSummary
 from .manifest import Thresholds
 from .matching import MatchRecord, Metrics, UnmatchedFinding
@@ -54,6 +55,7 @@ class LLMBench(BaseModel):
     evaluations: list[ExplanationEval]
     injection_cases_detected: dict[str, bool]
     review_queue_items: int
+    notes: list[str] = []
 
 
 class MetricDelta(BaseModel):
@@ -82,6 +84,7 @@ class BenchmarkResult(BaseModel):
     manifest_problems: list[str]
     scanner: ScannerBench | None
     adversarial: list[SuiteResult]
+    context: ContextEval | None = None
     llm: LLMBench | None = None
     performance: PerfSummary | None = None
     comparison: Comparison | None = None
@@ -93,6 +96,7 @@ def compute_gates(
     manifest_problems: list[str],
     scanner: ScannerBench | None,
     adversarial: list[SuiteResult],
+    context: ContextEval | None = None,
 ) -> list[Gate]:
     """Deterministic gates only. LLM and performance results never gate."""
     gates = [
@@ -129,12 +133,47 @@ def compute_gates(
             detail=f"{len(scanner.unmatched_findings)} unmatched finding(s)",
         ),
     ]
+    for cwe, floor in sorted(thresholds.per_cwe.items()):
+        cm = scanner.by_cwe.get(cwe)
+        ok = (
+            cm is not None
+            and (cm.precision or 0) >= floor.min_precision
+            and (cm.recall or 0) >= floor.min_recall
+        )
+        gates.append(
+            Gate(
+                id=f"per_cwe:{cwe}",
+                passed=ok,
+                detail=(
+                    f"precision {cm.precision} >= {floor.min_precision}, recall {cm.recall} >= "
+                    f"{floor.min_recall}"
+                    if cm
+                    else "no annotations or findings for this CWE"
+                ),
+            )
+        )
     if thresholds.require_expected_detections:
         gates.append(
             Gate(
                 id="expected_detections",
                 passed=not scanner.expectation_mismatches,
                 detail="; ".join(scanner.expectation_mismatches[:5]),
+            )
+        )
+    if context is not None:
+        over = sum(st.over_budget for st in context.strategies)
+        gates.append(
+            Gate(
+                id="context_budget",
+                passed=over == 0,
+                detail=f"{over} context(s) over budget {context.budget}",
+            )
+        )
+        gates.append(
+            Gate(
+                id="context_no_coverage_loss",
+                passed=not context.lost_coverage,
+                detail=", ".join(context.lost_coverage[:5]),
             )
         )
     for suite in adversarial:
@@ -156,6 +195,9 @@ def _flatten(result: dict[str, object]) -> dict[str, float | None]:
     scanner = result.get("scanner") or {}
     for k, v in (scanner.get("metrics") or {}).items():  # type: ignore[union-attr]
         out[f"scanner.{k}"] = v
+    for cwe, metrics in (scanner.get("by_cwe") or {}).items():  # type: ignore[union-attr]
+        for k in ("precision", "recall"):
+            out[f"scanner.cwe.{cwe}.{k}"] = metrics.get(k)
     for suite in result.get("adversarial") or []:  # type: ignore[union-attr]
         counts = suite.get("counts", {})
         out[f"adversarial.{suite['suite']}.passed"] = counts.get("passed", 0)
@@ -166,6 +208,9 @@ def _flatten(result: dict[str, object]) -> dict[str, float | None]:
     llm = result.get("llm") or {}
     for cid, rs in ((llm.get("summary") or {}).get("checks") or {}).items():  # type: ignore[union-attr]
         out[f"llm.{cid}.rate"] = rs.get("rate")
+    for st in (result.get("context") or {}).get("strategies") or []:  # type: ignore[union-attr]
+        out[f"context.{st['strategy']}.coverage_rate"] = st.get("coverage_rate")
+        out[f"context.{st['strategy']}.mean_chars"] = st.get("mean_chars")
     perf = result.get("performance") or {}
     warm = perf.get("warm_per_finding") or {}  # type: ignore[union-attr]
     for k in ("p50_s", "p95_s"):
@@ -176,6 +221,8 @@ def _flatten(result: dict[str, object]) -> dict[str, float | None]:
 def compare(current: BenchmarkResult, baseline: dict[str, object]) -> Comparison:
     cur = _flatten(current.model_dump())
     base = _flatten(baseline)
+    prov = baseline.get("provenance") or {}
+    same_corpus = prov.get("corpus_sha256") == current.provenance.corpus_sha256  # type: ignore[union-attr]
     deltas = []
     for key in sorted(set(cur) | set(base)):
         b, c = base.get(key), cur.get(key)
@@ -183,7 +230,13 @@ def compare(current: BenchmarkResult, baseline: dict[str, object]) -> Comparison
             round(c - b, 4) if isinstance(b, int | float) and isinstance(c, int | float) else None
         )
         leaf = key.rsplit(".", 1)[-1]
-        if delta is None:
+        if delta is None or (
+            not same_corpus
+            and leaf in ("tp", "fp", "fn", "tn", "passed", "known_gap", "unexpected_failure")
+        ):
+            # Absolute counts are not comparable across different corpora; rates are.
+            worse = False
+        elif delta is None:
             worse = False
         elif key.startswith("perf.") or leaf in ("unexpected_failure", "known_gap", "fp", "fn"):
             worse = delta > 0
@@ -192,11 +245,10 @@ def compare(current: BenchmarkResult, baseline: dict[str, object]) -> Comparison
         else:
             worse = False
         deltas.append(MetricDelta(metric=key, baseline=b, current=c, delta=delta, worse=worse))
-    prov = baseline.get("provenance") or {}
     return Comparison(
         baseline_started_at=prov.get("started_at"),  # type: ignore[union-attr]
         baseline_commit=prov.get("code_commit"),  # type: ignore[union-attr]
         baseline_corpus_sha256=prov.get("corpus_sha256"),  # type: ignore[union-attr]
-        same_corpus=prov.get("corpus_sha256") == current.provenance.corpus_sha256,  # type: ignore[union-attr]
+        same_corpus=same_corpus,
         deltas=deltas,
     )

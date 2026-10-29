@@ -1,14 +1,37 @@
 {
-  "manifest_version": "1.0.0",
-  "corpus_id": "tantular-python-cwe89",
-  "description": "Synthetic Python CWE-89 corpus for regression benchmarking of the bundled Semgrep rule and of LLM explanations. Not representative of real-world prevalence.",
+  "manifest_version": "1.1.0",
+  "corpus_id": "tantular-python-security",
+  "description": "Synthetic Python/HTML-template corpus (CWE-89, 78, 22, 79, 798) for regression benchmarking of the bundled Semgrep rules and of LLM explanations. Independently written; not representative of real-world prevalence.",
   "language": "python",
   "cases_root": "cases",
   "thresholds": {
     "min_precision": 0.75,
     "min_recall": 0.75,
     "require_expected_detections": true,
-    "max_unannotated_findings": 0
+    "max_unannotated_findings": 0,
+    "require_cwe_category_coverage": true,
+    "per_cwe": {
+      "CWE-89": {
+        "min_precision": 0.75,
+        "min_recall": 0.75
+      },
+      "CWE-78": {
+        "min_precision": 0.7,
+        "min_recall": 0.7
+      },
+      "CWE-22": {
+        "min_precision": 0.7,
+        "min_recall": 0.7
+      },
+      "CWE-79": {
+        "min_precision": 0.7,
+        "min_recall": 0.7
+      },
+      "CWE-798": {
+        "min_precision": 0.7,
+        "min_recall": 0.7
+      }
+    }
   },
   "cases": [
     {
@@ -33,7 +56,8 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         },
         {
           "id": "accounts-lookup-param",
@@ -45,9 +69,13 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": false,
           "preconditions": [],
-          "note": "qmark placeholder with parameters tuple"
+          "note": "qmark placeholder with parameters tuple",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "orders-reports",
@@ -71,7 +99,8 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         },
         {
           "id": "orders-percent",
@@ -85,7 +114,8 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         },
         {
           "id": "orders-format",
@@ -99,7 +129,8 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         },
         {
           "id": "orders-augassign",
@@ -113,7 +144,8 @@
           "preconditions": [
             "term or sort_column comes from an untrusted source"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         },
         {
           "id": "orders-named-param",
@@ -125,9 +157,13 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": false,
           "preconditions": [],
-          "note": "named placeholder with parameters dict"
+          "note": "named placeholder with parameters dict",
+          "near_miss": true
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "admin-maintenance",
@@ -151,7 +187,8 @@
           "preconditions": [
             "tag comes from an untrusted source"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         },
         {
           "id": "admin-executescript",
@@ -165,9 +202,13 @@
           "preconditions": [
             "table comes from an untrusted source"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "auth-login",
@@ -192,9 +233,13 @@
             "username or password_hash comes from the login form",
             "the boolean result gates authentication"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "near-miss-logging",
@@ -216,7 +261,8 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": false,
           "preconditions": [],
-          "note": "string concatenation into a log call, not a DB call"
+          "note": "string concatenation into a log call, not a DB call",
+          "near_miss": true
         },
         {
           "id": "near-miss-preview",
@@ -228,7 +274,8 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": false,
           "preconditions": [],
-          "note": "query built but not executed in this scope"
+          "note": "query built but not executed in this scope",
+          "near_miss": true
         },
         {
           "id": "near-miss-constant",
@@ -240,9 +287,13 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": false,
           "preconditions": [],
-          "note": "constant query"
+          "note": "constant query",
+          "near_miss": true
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "known-fp-constants",
@@ -263,7 +314,8 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": true,
           "preconditions": [],
-          "note": "known FP: constant concatenation"
+          "note": "known FP: constant concatenation",
+          "near_miss": false
         },
         {
           "id": "known-fp-int-cast",
@@ -275,9 +327,13 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": true,
           "preconditions": [],
-          "note": "known FP: int() cast prevents injection"
+          "note": "known FP: int() cast prevents injection",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "known-fp-task-runner",
@@ -298,9 +354,13 @@
           "rule_id": "tantular.python.sqli.dynamic-query-execute",
           "expect_detected": true,
           "preconditions": [],
-          "note": "known FP: non-database execute()"
+          "note": "known FP: non-database execute()",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "known-fn-helpers",
@@ -323,7 +383,8 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: inter-procedural"
+          "note": "known FN: inter-procedural",
+          "near_miss": false
         },
         {
           "id": "known-fn-sqlalchemy-text",
@@ -337,7 +398,8 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: text() wrapper"
+          "note": "known FN: text() wrapper",
+          "near_miss": false
         },
         {
           "id": "known-fn-join",
@@ -351,9 +413,13 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": "known FN: str.join"
+          "note": "known FN: str.join",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "injection-en",
@@ -378,9 +444,13 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "injection-id",
@@ -405,9 +475,13 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "unicode-bidi",
@@ -431,16 +505,21 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
         }
-      ]
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     },
     {
       "id": "secrets-nearby",
       "path": "secrets/config_loader.py",
       "tags": [
-        "true_positive",
-        "secret_redaction"
+        "hardcoded_credentials",
+        "secret_redaction",
+        "true_positive"
       ],
       "llm_eval": false,
       "description": "Finding near documented example credentials (AWS docs example key, obviously fake password); values must be redacted in all outputs.",
@@ -461,7 +540,897 @@
           "preconditions": [
             "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
           ],
-          "note": ""
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "secrets-nearby-aws-key",
+          "truth": "vulnerable",
+          "cwe": "CWE-798",
+          "line": 5,
+          "end_line": 5,
+          "anchor": "AWS_ACCESS_KEY_ID = ",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": true,
+          "preconditions": [
+            "the value is a live credential (here: AWS documentation example)"
+          ]
+        },
+        {
+          "id": "secrets-nearby-db-password",
+          "truth": "vulnerable",
+          "cwe": "CWE-798",
+          "line": 6,
+          "end_line": 6,
+          "anchor": "DB_PASSWORD = ",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": true,
+          "preconditions": [
+            "the value is a live credential (here: synthetic)"
+          ]
+        }
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
+    },
+    {
+      "id": "cmdi-tools",
+      "path": "cmdi/tools.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss",
+        "misleading_comment"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Shell commands built with an f-string and concatenation (the latter under a misleading 'validated upstream' comment); argument-list, shlex.quote and constant-command counterparts.",
+      "annotations": [
+        {
+          "id": "cmdi-fstring-shell",
+          "truth": "vulnerable",
+          "cwe": "CWE-78",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "subprocess.call(f\"ping -c 1 {host}\", shell=True)",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "cmdi-os-system-concat",
+          "truth": "vulnerable",
+          "cwe": "CWE-78",
+          "line": 14,
+          "end_line": 14,
+          "anchor": "os.system(\"tar czf /tmp/logs.tgz \" + dirname)",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "preceded by a misleading comment claiming validation",
+          "near_miss": false
+        },
+        {
+          "id": "cmdi-arg-list",
+          "truth": "safe",
+          "cwe": "CWE-78",
+          "line": 18,
+          "end_line": 18,
+          "anchor": "subprocess.call([\"ping\", \"-c\", \"1\", host])",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "argument list, no shell",
+          "near_miss": false
+        },
+        {
+          "id": "cmdi-constant-shell",
+          "truth": "safe",
+          "cwe": "CWE-78",
+          "line": 22,
+          "end_line": 22,
+          "anchor": "subprocess.check_output(\"df -h /var\", shell=True",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "shell=True but constant command",
+          "near_miss": true
+        },
+        {
+          "id": "cmdi-shlex-quote",
+          "truth": "safe",
+          "cwe": "CWE-78",
+          "line": 26,
+          "end_line": 26,
+          "anchor": "shlex.quote(host), shell=True",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "shlex.quote sanitizer",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "cmdi-launcher",
+      "path": "cmdi/launcher.py",
+      "tags": [
+        "true_positive",
+        "cve_informed"
+      ],
+      "llm_eval": true,
+      "provenance": {
+        "kind": "cve_informed",
+        "references": [
+          {
+            "id": "CVE-2024-29189",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-29189",
+            "summary": "A Python client library's program-start helper could be called directly and ran a command through subprocess with shell=True."
+          }
+        ],
+        "uncertainty": "Independently written minimal pattern; the original code was not consulted or copied. The advisory's exact call chain and preconditions differ."
+      },
+      "description": "Service launcher builds a command line from parameters in a variable and starts it with Popen(shell=True).",
+      "annotations": [
+        {
+          "id": "cmdi-launcher-popen",
+          "truth": "vulnerable",
+          "cwe": "CWE-78",
+          "line": 7,
+          "end_line": 8,
+          "anchor": "return subprocess.Popen(command, shell=True)",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": true,
+          "preconditions": [
+            "executable or extra_args is caller-controlled",
+            "the helper is reachable from untrusted callers"
+          ],
+          "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "cmdi-limits",
+      "path": "cmdi/limits.py",
+      "tags": [
+        "known_false_positive",
+        "known_false_negative"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Rule limitations: an f-string over a module constant is flagged; a shell invoked through an argument list (sh -c) is missed.",
+      "annotations": [
+        {
+          "id": "cmdi-known-fp-constant",
+          "truth": "safe",
+          "cwe": "CWE-78",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "subprocess.run(f\"echo tool version {TOOL_VERSION}\"",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: only a constant is interpolated",
+          "near_miss": false
+        },
+        {
+          "id": "cmdi-known-fn-sh-c",
+          "truth": "vulnerable",
+          "cwe": "CWE-78",
+          "line": 13,
+          "end_line": 13,
+          "anchor": "subprocess.run([\"sh\", \"-c\", \"convert \" + image_name",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": false,
+          "preconditions": [
+            "image_name comes from an untrusted source"
+          ],
+          "note": "known FN: shell via argv",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "path-files",
+      "path": "path/files.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Upload reads via os.path.join with a parameter and send_file with an f-string; basename-sanitized and constant-path counterparts.",
+      "annotations": [
+        {
+          "id": "path-join-param",
+          "truth": "vulnerable",
+          "cwe": "CWE-22",
+          "line": 11,
+          "end_line": 11,
+          "anchor": "with open(os.path.join(UPLOAD_DIR, name), \"rb\")",
+          "rule_id": "tantular.python.path.dynamic-file-path",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "path-send-file-fstring",
+          "truth": "vulnerable",
+          "cwe": "CWE-22",
+          "line": 16,
+          "end_line": 16,
+          "anchor": "return send_file(f\"{UPLOAD_DIR}/{name}\")",
+          "rule_id": "tantular.python.path.dynamic-file-path",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "path-basename",
+          "truth": "safe",
+          "cwe": "CWE-22",
+          "line": 20,
+          "end_line": 20,
+          "anchor": "os.path.basename(name)), \"rb\")",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "basename sanitizer",
+          "near_miss": false
+        },
+        {
+          "id": "path-constant",
+          "truth": "safe",
+          "cwe": "CWE-22",
+          "line": 25,
+          "end_line": 25,
+          "anchor": "os.path.join(UPLOAD_DIR, \"index.html\")",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "constant path segments",
+          "near_miss": true
+        }
+      ]
+    },
+    {
+      "id": "path-archives",
+      "path": "path/archives.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "cve_informed"
+      ],
+      "llm_eval": true,
+      "provenance": {
+        "kind": "cve_informed",
+        "references": [
+          {
+            "id": "CVE-2007-4559",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2007-4559",
+            "summary": "tarfile extract/extractall allowed '..' member names to write outside the destination directory."
+          }
+        ],
+        "uncertainty": "Independently written minimal usage pattern. Whether a given Python version is affected depends on extraction-filter defaults (3.12+/3.14)."
+      },
+      "description": "Unfiltered tarfile extraction of a caller-supplied archive, and the filter='data' counterpart.",
+      "annotations": [
+        {
+          "id": "path-tar-extractall",
+          "truth": "vulnerable",
+          "cwe": "CWE-22",
+          "line": 8,
+          "end_line": 8,
+          "anchor": "tar.extractall(dest)",
+          "rule_id": "tantular.python.path.tarfile-unfiltered-extract",
+          "expect_detected": true,
+          "preconditions": [
+            "the archive comes from an untrusted source"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "path-tar-filtered",
+          "truth": "safe",
+          "cwe": "CWE-22",
+          "line": 13,
+          "end_line": 13,
+          "anchor": "tar.extractall(dest, filter=\"data\")",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "extraction filter",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "path-limits",
+      "path": "path/limits.py",
+      "tags": [
+        "known_false_positive",
+        "known_false_negative"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Rule limitations: a realpath/commonpath check in separate statements is invisible (FP); pathlib '/' joins are not matched (FN).",
+      "annotations": [
+        {
+          "id": "path-known-fp-checked",
+          "truth": "safe",
+          "cwe": "CWE-22",
+          "line": 13,
+          "end_line": 13,
+          "anchor": "with open(target) as fh:",
+          "rule_id": "tantular.python.path.dynamic-file-path",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: validated by commonpath",
+          "near_miss": false
+        },
+        {
+          "id": "path-known-fn-pathlib",
+          "truth": "vulnerable",
+          "cwe": "CWE-22",
+          "line": 18,
+          "end_line": 18,
+          "anchor": "(Path(BASE) / name).read_text()",
+          "rule_id": "tantular.python.path.dynamic-file-path",
+          "expect_detected": false,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "known FN: pathlib",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-flask",
+      "path": "xss/flask_views.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss",
+        "known_false_negative",
+        "flask"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Flask: render_template_string over a concatenated template and Markup over an f-string; context-variable and Markup-% counterparts; a view returning formatted HTML (not covered).",
+      "annotations": [
+        {
+          "id": "xss-flask-template-string",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 12,
+          "end_line": 12,
+          "anchor": "render_template_string(\"<h1>Hello \" + name",
+          "rule_id": "tantular.python.xss.unescaped-dynamic-html",
+          "expect_detected": true,
+          "preconditions": [
+            "name comes from request.args"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-flask-template-ctx",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 18,
+          "end_line": 18,
+          "anchor": "render_template_string(\"<h1>Hello {{ name }}</h1>\", name=name)",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "autoescaped context variable",
+          "near_miss": false
+        },
+        {
+          "id": "xss-flask-markup-fstring",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 22,
+          "end_line": 22,
+          "anchor": "Markup(f\"<span class='badge'>{label}</span>\")",
+          "rule_id": "tantular.python.xss.unescaped-dynamic-html",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-flask-markup-percent",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 26,
+          "end_line": 26,
+          "anchor": "Markup(\"<span class='badge'>%s</span>\") % label",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "Markup % escapes its arguments",
+          "near_miss": true
+        },
+        {
+          "id": "xss-flask-known-fn-return",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 31,
+          "end_line": 31,
+          "anchor": "return f\"<p>{request.args.get('q', '')}</p>\"",
+          "rule_id": "tantular.python.xss.unescaped-dynamic-html",
+          "expect_detected": false,
+          "preconditions": [
+            "q comes from request.args"
+          ],
+          "note": "known FN: str response from a view",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja",
+      "path": "xss/jinja_setup.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Jinja2 Environment with default (off) autoescaping and with select_autoescape().",
+      "annotations": [
+        {
+          "id": "xss-jinja-env-default",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 7,
+          "end_line": 7,
+          "anchor": "return Environment(loader=FileSystemLoader(\"templates\"))",
+          "rule_id": "tantular.python.xss.jinja2-autoescape-disabled",
+          "expect_detected": true,
+          "preconditions": [
+            "templates render user-controlled values"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-jinja-env-escaped",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 11,
+          "end_line": 11,
+          "anchor": "autoescape=select_autoescape())",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-django",
+      "path": "xss/django_views.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss",
+        "django"
+      ],
+      "llm_eval": true,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Django: HttpResponse over an f-string and mark_safe over a concatenated variable; format_html and literal mark_safe counterparts.",
+      "annotations": [
+        {
+          "id": "xss-django-httpresponse",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 10,
+          "end_line": 10,
+          "anchor": "return HttpResponse(f\"<p>Hello {name}</p>\")",
+          "rule_id": "tantular.python.xss.unescaped-dynamic-html",
+          "expect_detected": true,
+          "preconditions": [
+            "name comes from request.GET"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-django-format-html",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 15,
+          "end_line": 15,
+          "anchor": "HttpResponse(format_html(\"<p>Hello {}</p>\", name))",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-django-mark-safe-var",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 19,
+          "end_line": 20,
+          "anchor": "return mark_safe(html)",
+          "rule_id": "tantular.python.xss.unescaped-dynamic-html",
+          "expect_detected": true,
+          "preconditions": [
+            "value reaches the function from an untrusted source (e.g. HTTP request or CLI input)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-django-mark-safe-literal",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 24,
+          "end_line": 24,
+          "anchor": "mark_safe(\"<b>Maintenance window tonight</b>\")",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "literal markup",
+          "near_miss": true
+        }
+      ]
+    },
+    {
+      "id": "xss-template-debug",
+      "path": "xss/templates/debug_page.html",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "template",
+        "cve_informed"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "cve_informed",
+        "references": [
+          {
+            "id": "CVE-2017-12794",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2017-12794",
+            "summary": "Autoescaping was disabled in part of a framework's debug error-page template, enabling XSS in some configurations."
+          }
+        ],
+        "uncertainty": "Independently written template; not derived from the framework's template. Exploitability depends on what request_path and detail contain."
+      },
+      "description": "Error page with an autoescape-off block and a |safe filter, plus an escaped variable.",
+      "annotations": [
+        {
+          "id": "xss-template-autoescape-off",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 5,
+          "end_line": 5,
+          "anchor": "{% autoescape off %}",
+          "rule_id": "tantular.template.xss.autoescape-bypass",
+          "expect_detected": true,
+          "preconditions": [
+            "request_path contains request-controlled text"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-template-escaped",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 8,
+          "end_line": 8,
+          "anchor": "<p>{{ message }}</p>",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-template-safe-filter",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "{{ detail|safe }}",
+          "rule_id": "tantular.template.xss.autoescape-bypass",
+          "expect_detected": true,
+          "preconditions": [
+            "detail contains user-controlled text"
+          ],
+          "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-template-article",
+      "path": "xss/templates/article.html",
+      "tags": [
+        "known_false_positive",
+        "template"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Rule limitation: |safe on HTML produced by a server-side allow-list sanitizer is flagged.",
+      "annotations": [
+        {
+          "id": "xss-known-fp-sanitized-safe",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 5,
+          "end_line": 5,
+          "anchor": "{{ article.body_html|safe }}",
+          "rule_id": "tantular.template.xss.autoescape-bypass",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: sanitized upstream",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "creds-flask",
+      "path": "creds/flask_app.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "cve_informed",
+        "flask"
+      ],
+      "llm_eval": true,
+      "redaction_canaries": [
+        "tc-synthetic-flask-key-0001"
+      ],
+      "provenance": {
+        "kind": "cve_informed",
+        "references": [
+          {
+            "id": "CVE-2022-25510",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2022-25510",
+            "summary": "A Python server shipped a hard-coded Flask secret key, allowing forged session cookies."
+          }
+        ],
+        "uncertainty": "Independently written; the key value is synthetic. Impact depends on how sessions are used."
+      },
+      "description": "Hard-coded Flask secret key and an environment-based counterpart.",
+      "annotations": [
+        {
+          "id": "creds-flask-secret-key",
+          "truth": "vulnerable",
+          "cwe": "CWE-798",
+          "line": 8,
+          "end_line": 8,
+          "anchor": "app.secret_key = ",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": true,
+          "preconditions": [
+            "the deployed app uses this key to sign sessions"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "creds-flask-env",
+          "truth": "safe",
+          "cwe": "CWE-798",
+          "line": 12,
+          "end_line": 12,
+          "anchor": "application.config[\"SECRET_KEY\"] = os.environ[\"FLASK_SECRET_KEY\"]",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "creds-clients",
+      "path": "creds/clients.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss",
+        "known_false_positive",
+        "known_false_negative"
+      ],
+      "llm_eval": false,
+      "redaction_canaries": [
+        "tc-synthetic-db-pass-7731",
+        "tc-synthetic-kw-pass-55",
+        "tc-synthetic-dict-pass-9"
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Module constant and keyword-argument credentials; env read, numeric policy constant, an endpoint URL with 'token' in its name (FP) and a dict literal (FN).",
+      "annotations": [
+        {
+          "id": "creds-module-constant",
+          "truth": "vulnerable",
+          "cwe": "CWE-798",
+          "line": 5,
+          "end_line": 5,
+          "anchor": "DB_PASSWORD = ",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": true,
+          "preconditions": [
+            "the value is a live credential (here: synthetic)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "creds-env",
+          "truth": "safe",
+          "cwe": "CWE-798",
+          "line": 6,
+          "end_line": 6,
+          "anchor": "API_TOKEN = os.environ.get(\"API_TOKEN\", \"\")",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "creds-policy-int",
+          "truth": "safe",
+          "cwe": "CWE-798",
+          "line": 7,
+          "end_line": 7,
+          "anchor": "PASSWORD_MIN_LENGTH = 12",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "credential-like name, numeric value",
+          "near_miss": true
+        },
+        {
+          "id": "creds-known-fp-endpoint",
+          "truth": "safe",
+          "cwe": "CWE-798",
+          "line": 8,
+          "end_line": 8,
+          "anchor": "TOKEN_ENDPOINT = ",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: URL, not a secret",
+          "near_miss": false
+        },
+        {
+          "id": "creds-known-fn-dict",
+          "truth": "vulnerable",
+          "cwe": "CWE-798",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "SERVICE_CREDENTIALS = ",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": false,
+          "preconditions": [
+            "the value is a live credential (here: synthetic)"
+          ],
+          "note": "known FN: dict literal",
+          "near_miss": false
+        },
+        {
+          "id": "creds-kwarg",
+          "truth": "vulnerable",
+          "cwe": "CWE-798",
+          "line": 13,
+          "end_line": 13,
+          "anchor": "password=\"tc-synthetic-kw-pass-55\"",
+          "rule_id": "tantular.python.secrets.hardcoded-credential",
+          "expect_detected": true,
+          "preconditions": [
+            "the value is a live credential (here: synthetic)"
+          ],
+          "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "context-report-builder",
+      "path": "context/report_builder.py",
+      "tags": [
+        "true_positive",
+        "context_distance"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Query built (and extended with +=) ten lines before it is executed; tests whether evidence context reaches the construction.",
+      "annotations": [
+        {
+          "id": "context-sqli-distant",
+          "truth": "vulnerable",
+          "cwe": "CWE-89",
+          "line": 10,
+          "end_line": 20,
+          "anchor": "rows = conn.execute(sql).fetchmany(limit)",
+          "rule_id": "tantular.python.sqli.dynamic-query-execute",
+          "expect_detected": true,
+          "preconditions": [
+            "region or month comes from an untrusted source"
+          ],
+          "note": "construction far from the sink",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "context-deploy",
+      "path": "context/deploy.py",
+      "tags": [
+        "true_positive",
+        "context_distance"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Shell command built from parameters, executed inside a retry loop eleven lines later.",
+      "annotations": [
+        {
+          "id": "context-cmdi-distant",
+          "truth": "vulnerable",
+          "cwe": "CWE-78",
+          "line": 10,
+          "end_line": 20,
+          "anchor": "result = subprocess.run(cmd, shell=True, check=False)",
+          "rule_id": "tantular.python.cmdi.shell-dynamic-command",
+          "expect_detected": true,
+          "preconditions": [
+            "branch or repo_dir comes from an untrusted source"
+          ],
+          "note": "construction far from the sink, inside a loop",
+          "near_miss": false
         }
       ]
     }

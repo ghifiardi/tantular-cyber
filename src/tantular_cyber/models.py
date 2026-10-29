@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 REPORT_TYPE = "tantular-cyber.repository-scan"
 
 Severity = Literal["critical", "high", "medium", "low", "info"]
@@ -47,6 +47,23 @@ class Evidence(BaseModel):
         default="",
         description="Surrounding lines (+/- context_lines) with line numbers, redacted. "
         "Reader aid only; the match is defined by start_line..end_line.",
+    )
+    context_kind: Literal["ast_function", "ast_module", "window"] = Field(
+        default="window",
+        description="How context was selected (schema 1.2): enclosing function via AST, "
+        "module-level statement via AST, or a fixed line window.",
+    )
+    context_lines: list[int] = Field(
+        default_factory=list, description="Source line numbers included in ``context``."
+    )
+    context_truncated: bool = False
+    context_fallback: str | None = Field(
+        default=None, description="Why AST context was not used (e.g. syntax error)."
+    )
+    dataflow_hints: list[str] = Field(
+        default_factory=list,
+        description="Syntactic hints (parameters, local assignments, same-file helpers). "
+        "Explanatory only; not proof that untrusted data reaches the sink.",
     )
 
 

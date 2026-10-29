@@ -37,6 +37,51 @@
           "description": "Surrounding lines (+/- context_lines) with line numbers, redacted. Reader aid only; the match is defined by start_line..end_line.",
           "title": "Context",
           "type": "string"
+        },
+        "context_kind": {
+          "default": "window",
+          "description": "How context was selected (schema 1.2): enclosing function via AST, module-level statement via AST, or a fixed line window.",
+          "enum": [
+            "ast_function",
+            "ast_module",
+            "window"
+          ],
+          "title": "Context Kind",
+          "type": "string"
+        },
+        "context_lines": {
+          "description": "Source line numbers included in ``context``.",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Context Lines",
+          "type": "array"
+        },
+        "context_truncated": {
+          "default": false,
+          "title": "Context Truncated",
+          "type": "boolean"
+        },
+        "context_fallback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why AST context was not used (e.g. syntax error).",
+          "title": "Context Fallback"
+        },
+        "dataflow_hints": {
+          "description": "Syntactic hints (parameters, local assignments, same-file helpers). Explanatory only; not proof that untrusted data reaches the sink.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Dataflow Hints",
+          "type": "array"
         }
       },
       "required": [
@@ -913,7 +958,7 @@
   },
   "properties": {
     "schema_version": {
-      "default": "1.1.0",
+      "default": "1.2.0",
       "title": "Schema Version",
       "type": "string"
     },

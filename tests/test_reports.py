@@ -27,7 +27,7 @@ def test_json_report_round_trips_and_is_versioned(tmp_path: Path) -> None:
     report, repo = make_report(tmp_path)
     written = write_reports(report, tmp_path / "out", repo=repo)
     data = json.loads(written["json"].read_text())
-    assert data["schema_version"] == "1.1.0"
+    assert data["schema_version"] == "1.2.0"
     assert data["report_type"] == "tantular-cyber.repository-scan"
     parsed = ScanReport.model_validate(data)
     assert parsed.totals.findings == 2

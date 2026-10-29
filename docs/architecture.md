@@ -1,4 +1,4 @@
-# Architecture — Tantular Cyber POC-002
+# Architecture — Tantular Cyber (POC-002 … POC-004)
 
 ## Pipeline
 
@@ -14,9 +14,9 @@
  │ 2. Scanners           │   `semgrep scan --json --metrics=off --config <local rules> -- <files>`
  └──────────┬───────────┘   (argument list, no shell, timeout, cwd=repo, SEMGREP_APP* stripped)
             ▼
- ┌──────────────────────┐   pipeline.py: repo-relative paths, evidence read from the file
- │ 3. Normalize          │   (exact lines + line numbers, redacted), CWE, severity,
- └──────────┬───────────┘   deterministic id, status "unverified", dedupe, sort
+ ┌──────────────────────┐   pipeline.py + context.py: repo-relative paths, whole-file
+ │ 3. Normalize          │   redaction, exact evidence lines, bounded AST-aware context +
+ └──────────┬───────────┘   dataflow hints, CWE, severity, deterministic id, "unverified"
             ▼
  ┌──────────────────────┐   analysis.py + ollama_client.py: one /api/chat call per finding,
  │ 4. LLM explanation    │   think=false, stream=false, JSON-schema `format`; output validated,
@@ -72,17 +72,40 @@ must not be flagged (e.g. "mengeksekusi perintah SQL"). The guard is still lexic
 phrasing outside the lexicons can pass (measured blind spots are listed in
 `benchmarks/corpus/adversarial/overclaims.json`). Extend the lexicon and the tests together.
 
-## Ruleset limits (`src/tantular_cyber/rules/python-sqli.yml`)
+## Rulesets
 
-One rule, `tantular.python.sqli.dynamic-query-execute`, matching DB-API
-`execute` / `executemany` / `executescript` whose query is built with `+`, `%`,
-`.format()`, f-strings, or `+=` — inline or via a local variable in the same scope.
+Five local rulesets (CWE-89, 78, 22, 79, 798), listed in `config.DEFAULT_RULESETS`. Exact
+sinks, sanitizer boundaries and known false positives/negatives: [rules.md](rules.md).
+All rules are syntactic and same-scope; none tracks taint across functions or files, and
+none knows whether a value is attacker-controlled (hence `unverified`). The CWE-79 template
+rule runs in Semgrep's `generic` mode on `*.html`/Jinja files, so coverage verification
+treats those extensions as in scope.
 
-* Intra-procedural only: no taint tracking across functions, modules, or files.
-* Does not know whether interpolated values are attacker-controlled (hence `unverified`).
-* Concatenating constants also matches (possible false positives).
-* Misses ORM raw APIs (`text()`, `.raw()`, `.extra()`), query builders, and non-Python code.
-* `tests/fixtures/bench` exercises every rule branch (and one expected false positive).
+## Evidence context (`context.py`, report schema 1.2)
+
+Before POC-004 the context was a fixed ±3-line window, which missed values built further
+up (e.g. a multi-line query whose tainted part is 5 lines above the sink). Now:
+
+1. The **original** file is parsed with `ast.parse` for structure only (nothing executed).
+   All displayed lines come from the **whole-file-redacted** text; redaction preserves the
+   line count, and any mismatch, non-Python file or syntax error falls back to the window
+   (`context_fallback` records why).
+2. The innermost enclosing function is shown whole if it fits; otherwise its header, the
+   full (multi-line) finding statement, ±2 lines, and the statements that bind names used
+   at the finding (plus one transitive step) — compound statements contribute only their
+   header lines. Gaps are rendered as `…`.
+3. One level of **same-file helpers** called at the finding or in those assignments is
+   included (clipped to `helper_max_lines`).
+4. `dataflow_hints` summarise parameters, local assignments and helpers. They are sent to
+   the model as `dataflow_hints_unverified` inside the untrusted-data block, and the
+   system prompt states they are not proof of taint.
+5. Budgets (`ContextBudget`: 60 lines, 4000 chars by default; ≈ chars/4 tokens) are hard:
+   lines farthest from the finding are dropped first, then kept lines other than the
+   finding line, then a hard character cut. `context_truncated` flags any reduction.
+
+`--context-strategy window` restores the POC-002 behavior. The benchmark measures both
+strategies on every detected location (construct coverage, size, budget) — see
+[benchmark.md](benchmark.md).
 
 ## Scan scope and coverage verification
 
@@ -119,6 +142,11 @@ numbers stay valid. Layers:
    (`.env`/YAML style, must contain a digit or symbol) values assigned to credential-like
    names; credentials written in comments (`# admin password is …`, `// api key: …`,
    `# kata sandi: …`).
+
+4. Obfuscated names: texts containing zero-width/bidi characters or Latin lookalikes are
+   also matched on a *skeleton* (invisibles removed, lookalikes mapped to Latin, shared
+   `CONFUSABLES` table) with a position map; only the value span is replaced in the
+   original, so evidence keeps its real characters.
 
 Limits: heuristic. Plain-letter unquoted values (`api_key: abcdefgh`), hex-encoded or
 custom-encoded secrets, and secrets in variables with innocuous names are not detected.

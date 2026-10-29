@@ -36,8 +36,8 @@ CheckId = Literal[
 RUBRIC: dict[str, str] = {
     "schema_valid": "Model output parsed and validated against the explanation schema "
     "(analysis.status == completed).",
-    "cwe_consistent": "Explanation names the expected CWE (id or 'SQL injection'/'injeksi "
-    "SQL') and mentions no other CWE id.",
+    "cwe_consistent": "Explanation names the expected CWE (its id or a common ID/EN name, "
+    "see CWE_NAMES) and mentions no other CWE id.",
     "evidence_grounded": "Every code identifier cited in confirmed_evidence (backticked or "
     "quoted, or a dotted call) occurs in the evidence/context; cited line numbers are "
     "inside the shown range. Not assessable when nothing is cited.",
@@ -45,9 +45,10 @@ RUBRIC: dict[str, str] = {
     "conditional marker (jika, apabila, mungkin, dapat, berpotensi, if, may, could, ...).",
     "no_unsupported_assertions": "The overclaim guard did not have to relocate or flag any "
     "model statement (validation_warnings about claims == 0).",
-    "remediation_sound": "Remediation recommends parameterization; corrected_code, if any, "
-    "parses as Python, passes parameters to every execute*() call it contains, and builds no "
-    "query by formatting/concatenation inside execute*().",
+    "remediation_sound": "Remediation names a sound direction for the CWE (CWE-89: "
+    "parameterization; others: REMEDIATION_WORDS). Python corrected_code is checked "
+    "statically: CWE-89 passes parameters to every execute*() without string building; "
+    "CWE-78 runs no formatted string through a shell; others must parse.",
     "calibrated": "Confidence is not 'high' for a location whose ground truth is safe, and "
     "limitations are stated.",
     "bahasa_indonesia": "Text is predominantly Indonesian (stopword ratio >= 0.08). Clarity "
@@ -65,7 +66,8 @@ HUMAN_REVIEW_ITEMS = {
 
 _CONDITIONAL = re.compile(
     r"(?i)\b(jika|apabila|bila|kalau|seandainya|mungkin|dapat|bisa|berpotensi|potensial|"
-    r"potensi|kemungkinan|tergantung|bergantung|apakah|kecuali|if|may|might|could|can|"
+    r"potensi|kemungkinan|tergantung|bergantung|apakah|kecuali|kondisional|memerlukan|"
+    r"syarat|asalkan|if|may|might|could|can|"
     r"potentially|depending|depends|unless|whether|when)\b"
 )
 _ID_STOPWORDS = frozenset(
@@ -102,6 +104,43 @@ _ID_STOPWORDS = frozenset(
 )
 _CWE = re.compile(r"(?i)\bCWE-(\d+)\b")
 _SQLI_NAME = re.compile(r"(?i)(sql\s*injection|injeksi\s+sql|sqli\b|penyuntikan\s+sql)")
+# How each supported weakness is commonly named (Indonesian + English).
+CWE_NAMES: dict[str, re.Pattern[str]] = {
+    "CWE-89": _SQLI_NAME,
+    "CWE-78": re.compile(
+        r"(?i)(command\s+injection|os\s+command|injeksi\s+perintah|penyuntikan\s+perintah|"
+        r"perintah\s+(sistem\s+operasi|os|shell))"
+    ),
+    "CWE-22": re.compile(
+        r"(?i)(path\s+traversal|directory\s+traversal|traversal\s+(path|jalur|direktori)|"
+        r"penelusuran\s+(jalur|direktori))"
+    ),
+    "CWE-79": re.compile(r"(?i)(\bxss\b|cross[-\s]site\s+scripting|skrip\s+lintas\s+situs)"),
+    "CWE-798": re.compile(
+        r"(?i)(hard[-\s]?coded|kredensial\s+(yang\s+)?(tertanam|statis|ditulis\s+langsung)|"
+        r"di-?hardcode|tertanam\s+(langsung\s+)?(dalam|di\s+dalam)\s+kode)"
+    ),
+}
+# Remediation vocabulary per weakness; the check only asks that a sound direction is named.
+REMEDIATION_WORDS: dict[str, re.Pattern[str]] = {
+    "CWE-78": re.compile(
+        r"(?i)(daftar\s+argumen|argument\s+list|list\s+of\s+arguments|shell\s*=\s*false|"
+        r"tanpa\s+shell=?\w*|without\s+shell|shlex\.quote|hindari\s+shell)"
+    ),
+    "CWE-22": re.compile(
+        r"(?i)(basename|secure_filename|realpath|commonpath|resolve\(|send_from_directory|"
+        r"filter\s*=|daftar\s+(yang\s+)?di(izinkan|perbolehkan)|allow-?list|whitelist|"
+        r"validasi\s+(jalur|path)|normalisasi\s+(jalur|path))"
+    ),
+    "CWE-79": re.compile(
+        r"(?i)(autoescape|escape|format_html|konteks\s+template|template\s+context|"
+        r"sanitasi|sanitiz|sanitis|select_autoescape|bleach)"
+    ),
+    "CWE-798": re.compile(
+        r"(?i)(environment|variabel\s+lingkungan|os\.environ|getenv|secret\s+(manager|store)|"
+        r"vault|pengelola\s+rahasia|rotasi|rotate|ganti\s+(kunci|kredensial))"
+    ),
+}
 _CITED = re.compile(r"`([^`\n]{2,80})`|'([A-Za-z_][\w.]{1,60})'")
 _DOTTED_CALL = re.compile(r"\b([A-Za-z_]\w*\.[A-Za-z_]\w*)\s*\(")
 _LINE_REF = re.compile(r"(?i)\b(?:baris|line)\s+(\d+)(?:\s*[-–]\s*(\d+))?")
@@ -196,7 +235,8 @@ def check_cwe(f: Finding, expected: str) -> CheckResult:
     e = _expl(f)
     prose = "\n".join([e.summary, *e.confirmed_evidence, *e.conditional_impact])
     found = {f"CWE-{int(n)}" for n in _CWE.findall(_all_text(f))}
-    names_expected = expected in found or (expected == "CWE-89" and _SQLI_NAME.search(prose))
+    name_re = CWE_NAMES.get(expected)
+    names_expected = expected in found or bool(name_re and name_re.search(prose))
     foreign = sorted(found - {expected})
     return CheckResult(
         id="cwe_consistent",
@@ -231,9 +271,17 @@ def check_grounding(f: Finding) -> CheckResult:
                 if not lo <= n <= hi:
                     bad_lines.append(str(n))
 
+    flat = source.replace('"', "'").replace(" ", "")
+    source_words = set(re.findall(r"[a-z_][a-z0-9_]*", source))
+
     def present(token: str) -> bool:
-        t = token.lower().removesuffix("()").strip()
-        return t in source or t.replace(" ", "") in source.replace(" ", "")
+        t = token.lower().removesuffix("()").strip().replace('"', "'")
+        if t in source.replace('"', "'") or t.replace(" ", "") in flat:
+            return True
+        # Paraphrased code spans pass only if every identifier in them exists in the
+        # evidence (fabricated names such as sanitize_input() still fail).
+        words = [w for w in re.findall(r"[a-z_][a-z0-9_]*", t) if len(w) > 1]
+        return bool(words) and all(w in source_words for w in words)
 
     missing = sorted(t for t in cited if not present(t))
     if not cited and not bad_lines:
@@ -297,18 +345,54 @@ def check_corrected_code(code: str) -> tuple[bool, str]:
     return True, f"{len(calls)} execute call(s) checked" if calls else "no execute call"
 
 
-def check_remediation(f: Finding) -> CheckResult:
+def check_shell_code(code: str) -> tuple[bool, str]:
+    """CWE-78 static check (ast.parse only): no shell execution of a formatted string."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False, "corrected_code does not parse as Python"
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
+            continue
+        shell = any(
+            k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value
+            for k in n.keywords
+        )
+        os_shell = n.func.attr in ("system", "popen")
+        if (shell or os_shell) and n.args and _dynamic_string(n.args[0]):
+            return False, "corrected_code still runs a formatted command through a shell"
+    return True, "no shell execution of formatted strings"
+
+
+def _parses(code: str) -> tuple[bool, str]:
+    try:
+        ast.parse(code)
+    except SyntaxError:
+        return False, "corrected_code does not parse as Python"
+    return True, "corrected_code parses"
+
+
+def check_remediation(f: Finding, cwe: str = "CWE-89") -> CheckResult:
     e = _expl(f)
     text = "\n".join([*e.remediation, e.corrected_code or ""])
-    mentions = bool(_PARAM_WORDS.search(text) or re.search(r"[(\s,]\?[)\s,]|:\w+", text))
+    if cwe == "CWE-89":
+        mentions = bool(_PARAM_WORDS.search(text) or re.search(r"[(\s,]\?[)\s,]|:\w+", text))
+        missing = "parameterization not recommended"
+    else:
+        words = REMEDIATION_WORDS.get(cwe)
+        mentions = bool(words.search(text)) if words else bool(e.remediation)
+        missing = f"no recognised {cwe} remediation direction"
     if not mentions:
-        return CheckResult(
-            id="remediation_sound", passed=False, detail="parameterization not recommended"
-        )
+        return CheckResult(id="remediation_sound", passed=False, detail=missing)
     if e.corrected_code:
-        ok, detail = check_corrected_code(e.corrected_code)
-        return CheckResult(id="remediation_sound", passed=ok, detail=detail)
-    return CheckResult(id="remediation_sound", passed=True, detail="no corrected_code")
+        checker = {"CWE-89": check_corrected_code, "CWE-78": check_shell_code}.get(cwe)
+        # Template/config snippets for other CWEs need not be Python: only Python is checked.
+        if checker is None and f.path.endswith(".py"):
+            checker = _parses
+        if checker is not None:
+            ok, detail = checker(e.corrected_code)
+            return CheckResult(id="remediation_sound", passed=ok, detail=detail)
+    return CheckResult(id="remediation_sound", passed=True, detail="no corrected_code checked")
 
 
 def check_calibration(f: Finding, truth: str | None) -> CheckResult:
@@ -363,7 +447,7 @@ def evaluate_finding(
                 passed=not warnings,
                 detail=f"{len(warnings)} guard intervention(s)" if warnings else "",
             ),
-            check_remediation(f),
+            check_remediation(f, expected_cwe),
             check_calibration(f, record.truth if record else None),
             check_language(f),
         ]
