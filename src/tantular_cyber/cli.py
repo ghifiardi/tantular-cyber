@@ -195,6 +195,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cmp.add_argument("--corpus", type=Path, default=Path("benchmarks/corpus"))
     cmp.add_argument("--output", type=Path, required=True)
+    cmp.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore and replace the samples.jsonl checkpoint in --output",
+    )
     cmp.add_argument("--ollama-url", default=None)
     cmp.add_argument("--ollama-timeout", type=float, default=None)
     cmp.add_argument("--allow-remote-ollama", action="store_true")
@@ -425,6 +430,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
             ollama=_ollama_settings(args),
             identity_pair=pair,
             on_progress=lambda msg: logging.getLogger(__name__).info(msg),
+            checkpoint_path=args.output / "samples.jsonl",
+            fresh=args.fresh,
         )
     except (OllamaError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

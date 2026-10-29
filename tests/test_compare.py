@@ -169,3 +169,49 @@ def test_modelfile_profile_mode_sends_no_system_role_or_pinned_options() -> None
     OllamaClient(settings, transport=httpx.MockTransport(handler)).chat(msgs)
     assert sent[0]["options"] == {"seed": 2}  # Modelfile temperature/num_ctx/etc. apply
     assert sent[0]["think"] is False and sent[0]["stream"] is False
+
+
+@requires_semgrep
+@pytest.mark.semgrep
+def test_checkpoint_resumes_without_repeating_calls(monkeypatch, tmp_path: Path) -> None:
+    calls = {"n": 0}
+
+    class Client:
+        provider = "ollama"
+
+        def __init__(self, settings) -> None:
+            self.model = settings.model
+            self.last_metrics = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            pass
+
+        def chat(self, messages, format_schema=None) -> str:
+            calls["n"] += 1
+            if calls["n"] > limit["n"]:
+                raise compare.OllamaError("interrupted")
+            return GOOD_EXPLANATION
+
+    limit = {"n": 10**6}
+    monkeypatch.setattr(compare, "OllamaClient", Client)
+    monkeypatch.setattr(
+        compare,
+        "model_provenance",
+        lambda url, names: [ModelProvenance(name=n, installed=True) for n in names],
+    )
+    ckpt = tmp_path / "samples.jsonl"
+    arms = parse_arms("m:a", "baseline", "8192")
+    first = run_comparison(CORPUS, arms, runs=2, max_findings=3, checkpoint_path=ckpt)
+    assert calls["n"] == 6 and first.arms[0].n == 6
+    calls["n"], limit["n"] = 0, 0  # any new call would now fail
+    again = run_comparison(CORPUS, arms, runs=2, max_findings=3, checkpoint_path=ckpt)
+    assert calls["n"] == 0 and again.arms[0].n == 6
+    assert any("resumed from checkpoint: 6" in n for n in again.notes)
+    with pytest.raises(ValueError, match="different settings"):
+        run_comparison(CORPUS, arms, runs=3, max_findings=3, checkpoint_path=ckpt)
+    limit["n"] = 10**6
+    fresh = run_comparison(CORPUS, arms, runs=1, max_findings=3, checkpoint_path=ckpt, fresh=True)
+    assert fresh.arms[0].n == 3

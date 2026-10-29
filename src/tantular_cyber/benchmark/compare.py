@@ -13,6 +13,8 @@ prompt/parameter profile. Never used in CI.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import tempfile
@@ -27,7 +29,7 @@ from pydantic import BaseModel, Field
 
 from ..analysis import PROMPT_PROFILES, FindingAnalyzer
 from ..config import OllamaSettings, ScanSettings
-from ..models import Finding
+from ..models import Finding, FindingAnalysis
 from ..ollama_client import OllamaClient, OllamaError, validate_base_url
 from ..pipeline import run_scan
 from .llm_eval import RUBRIC, ExplanationEval, evaluate_finding, wilson
@@ -78,6 +80,9 @@ class ModelProvenance(BaseModel):
     parameter_size: str | None = None
     quantization: str | None = None
     modelfile_has_system: bool | None = None
+    system_sha256: str | None = Field(
+        default=None, description="Hash of the Modelfile SYSTEM prompt (text not stored)."
+    )
     modelfile_parameters: dict[str, str] = Field(default_factory=dict)
     shares_weights_with: list[str] = Field(default_factory=list)
 
@@ -184,6 +189,11 @@ def model_provenance(base_url: str, names: Sequence[str]) -> list[ModelProvenanc
                     parameter_size=details.get("parameter_size"),
                     quantization=details.get("quantization_level"),
                     modelfile_has_system="\nSYSTEM " in f"\n{modelfile}",
+                    system_sha256=(
+                        hashlib.sha256(str(show.get("system", "")).encode()).hexdigest()[:16]
+                        if show.get("system")
+                        else None
+                    ),
                     modelfile_parameters=params,
                 )
             )
@@ -216,6 +226,52 @@ def select_findings(
     return chosen, {"records": by_finding, "cases": {c.path: c for c in manifest.cases}}
 
 
+class Checkpoint:
+    """Append-only JSONL of completed calls so long comparisons can resume.
+
+    Each line holds the arm label, seed, finding id and the validated analysis (no prompts).
+    A header line records the run parameters; a checkpoint written with different
+    parameters is refused rather than silently mixed.
+    """
+
+    def __init__(self, path: Path | None, header: dict[str, object], fresh: bool = False):
+        self.path = path
+        self.done: dict[tuple[str, int, str], dict[str, object]] = {}
+        if path is None:
+            return
+        if fresh and path.exists():
+            path.unlink()
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if lines and json.loads(lines[0]).get("header") != header:
+                raise ValueError(
+                    f"checkpoint {path} was written with different settings; "
+                    "use --fresh or another --output"
+                )
+            for line in lines[1:]:
+                row = json.loads(line)
+                self.done[(row["arm"], row["run"], row["finding_id"])] = row
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"header": header}) + "\n", encoding="utf-8")
+
+    def get(self, arm: Arm, run: int, finding_id: str) -> dict[str, object] | None:
+        return self.done.get((arm.label, run, finding_id))
+
+    def add(self, arm: Arm, run: int, finding: Finding, error: str | None) -> None:
+        if self.path is None:
+            return
+        row = {
+            "arm": arm.label,
+            "run": run,
+            "finding_id": finding.id,
+            "error": error,
+            "analysis": None if error else finding.analysis.model_dump(mode="json"),
+        }
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def run_arm(
     arm: Arm,
     findings: Sequence[Finding],
@@ -223,11 +279,29 @@ def run_arm(
     runs: int,
     base: OllamaSettings,
     on_progress: Callable[[str], None] | None = None,
+    checkpoint: Checkpoint | None = None,
 ) -> list[_Sample]:
     samples: list[_Sample] = []
     records = lookup["records"]
     cases = lookup["cases"]
+    checkpoint = checkpoint or Checkpoint(None, {})
     for run in range(1, runs + 1):
+        pending = []
+        for f in findings:
+            saved = checkpoint.get(arm, run, f.id)
+            if saved is None:
+                pending.append(f)
+                continue
+            copy = f.model_copy(deep=True)
+            if saved["error"]:
+                samples.append(_Sample(run, copy, None, error=str(saved["error"])))
+                continue
+            copy.analysis = FindingAnalysis.model_validate(saved["analysis"])
+            m = copy.analysis.metrics
+            ev = evaluate_finding(copy, cases[copy.path], records.get(copy.id), run)
+            samples.append(_Sample(run, copy, ev, metrics=m.model_dump() if m else {}))
+        if not pending:
+            continue
         settings = (
             _settings(arm, base, run)
             if arm.mode == "profile"
@@ -251,13 +325,15 @@ def run_arm(
             analyzer = FindingAnalyzer(
                 client, profile=arm.profile, system_role=arm.mode != "profile"
             )
-            for f in findings:
+            for f in pending:
                 copy = f.model_copy(deep=True)
                 try:
                     copy.analysis = analyzer.analyze(copy)
                 except OllamaError as exc:
                     samples.append(_Sample(run, copy, None, error=type(exc).__name__))
+                    checkpoint.add(arm, run, copy, type(exc).__name__)
                     continue
+                checkpoint.add(arm, run, copy, None)
                 m = copy.analysis.metrics
                 ev = evaluate_finding(copy, cases[copy.path], records.get(copy.id), run)
                 samples.append(_Sample(run, copy, ev, metrics=m.model_dump() if m else {}))
@@ -425,6 +501,8 @@ def run_comparison(
     ollama: OllamaSettings | None = None,
     identity_pair: Sequence[str] = (),
     on_progress: Callable[[str], None] | None = None,
+    checkpoint_path: Path | None = None,
+    fresh: bool = False,
 ) -> ComparisonResult:
     ollama = ollama or OllamaSettings()
     validate_base_url(ollama.base_url, allow_remote=ollama.allow_remote)
@@ -439,10 +517,20 @@ def run_comparison(
         raise ValueError("none of the requested models is installed")
     with tempfile.TemporaryDirectory(prefix="tantular-cmp-") as tmp:
         findings, lookup = select_findings(manifest, cases_root, max_findings, Path(tmp))
+    header = {
+        "corpus": manifest.corpus_id,
+        "manifest_version": manifest.manifest_version,
+        "findings": sorted(f.id for f in findings),
+        "runs": runs,
+        "pinned_options": PINNED_OPTIONS,
+    }
+    checkpoint = Checkpoint(checkpoint_path, header, fresh=fresh)
+    if checkpoint.done:
+        notes.append(f"resumed from checkpoint: {len(checkpoint.done)} completed call(s) reused")
     samples: dict[str, list[_Sample]] = {}
     for arm in arms:
         t0 = time.monotonic()
-        samples[arm.label] = run_arm(arm, findings, lookup, runs, ollama, on_progress)
+        samples[arm.label] = run_arm(arm, findings, lookup, runs, ollama, on_progress, checkpoint)
         notes.append(f"{arm.label}: {time.monotonic() - t0:.0f} s wall")
     summaries = [summarize_arm(a, samples[a.label]) for a in arms]
     reference = arms[0]
@@ -501,6 +589,31 @@ def render_comparison(r: ComparisonResult) -> str:
             f"{m.quantization or '-'} | {m.parameter_size or '-'} | "
             f"{m.modelfile_has_system} | {', '.join(m.shares_weights_with) or '-'} |"
         )
+    same = [
+        (a, b)
+        for i, a in enumerate(r.models)
+        for b in r.models[i + 1 :]
+        if a.installed and a.weights_blob and a.weights_blob == b.weights_blob
+    ]
+    for a, b in same:
+        diffs = [
+            f"SYSTEM prompt (hash `{a.system_sha256}` vs `{b.system_sha256}`)"
+            if a.system_sha256 != b.system_sha256
+            else ""
+        ]
+        for key in sorted(set(a.modelfile_parameters) | set(b.modelfile_parameters)):
+            va, vb = a.modelfile_parameters.get(key), b.modelfile_parameters.get(key)
+            if va != vb:
+                diffs.append(f"`{key}` {va} vs {vb}")
+        diffs = [d for d in diffs if d]
+        out += [
+            "",
+            f"**Same weights:** `{a.name}` and `{b.name}` share weights blob "
+            f"`{a.weights_blob}`. Their Modelfile profiles differ in: "
+            + ("; ".join(diffs) or "nothing detected")
+            + ". In `~modelfile-profile` arms any difference is the **combined** profile "
+            "effect of all of these, not of the SYSTEM prompt alone.",
+        ]
     if r.profile_identity:
         pi = r.profile_identity
         out += [
