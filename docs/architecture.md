@@ -1,5 +1,13 @@
 # Architecture — Tantular Cyber (POC-002 … POC-005)
 
+## Run modes (POC-006)
+
+* `scan` (default): deterministic — Semgrep (external, user-installed) + tantular-callgraph.
+  Missing Semgrep or an unsupported platform (native Windows) → `degraded`, never
+  `complete`. No model or Ollama involved.
+* `scan --ai`: adds the advisory LLM stage below against a loopback Ollama endpoint.
+* `doctor`: read-only capability report (`full` / `partial` / `unavailable`).
+
 ## Pipeline
 
 ```
@@ -45,6 +53,8 @@ Status semantics (`report.status`, mirrored in the CLI exit code):
 | Repository file content | untrusted | read-only; redacted before leaving the process; sent to the LLM only as an escaped JSON blob inside `<untrusted_data>` |
 | Scanner messages | untrusted | sanitized (control/bidi chars stripped, secrets redacted, length-bounded) |
 | LLM output | untrusted, advisory | JSON-schema validated, sanitized, overclaim guard, `verified: false` always |
+| Ollama model list | untrusted metadata | models with `remote_host` (cloud) are refused for `--ai` unless `allow_remote`; never sent `/api/show` |
+| Third-party plugin manifests/output | untrusted | validated and normalized only; plugin code is never executed (docs/plugin-api.md) |
 
 Prompt-injection resistance does **not** rely on the model obeying the system prompt.
 The structural guarantees are: (1) the system prompt is a constant; (2) repo text cannot
@@ -192,6 +202,10 @@ and U+2028, which would let a crafted file shift the displayed evidence line.
 * **New scanner** — implement `scanner.Scanner` (`name`, `version()`, `scan(repo, targets)`
   returning `ScannerRun` with `RawFinding`s) and pass it in `run_scan(scanners=[...])` /
   wire it in `pipeline.run_scan`. Normalization, evidence, LLM and reports are reused.
+  In-tree scanners are trusted code. External scanners follow the plugin API 1.0 contract
+  ([plugin-api.md](plugin-api.md)): a declarative manifest, `plugin.<id>.` rule namespace and
+  `normalize_plugin_output`; their execution stays disabled until an enforceable sandbox
+  exists.
 * **New LLM / cybersecurity model** — implement `analysis.LLMClient` (`provider`, `model`,
   `chat(messages, format_schema)`), optionally `health_check()` and `close()`, and pass a
   factory via `run_scan(llm_client_factory=...)`.

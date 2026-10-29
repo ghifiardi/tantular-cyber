@@ -48,6 +48,11 @@ def validate_base_url(url: str, *, allow_remote: bool) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
+def is_remote_model(tag: dict[str, Any]) -> bool:
+    """True for Ollama entries that execute remotely (cloud models) instead of locally."""
+    return bool(tag.get("remote_host") or tag.get("remote_model"))
+
+
 def model_matches(requested: str, available: str) -> bool:
     def norm(name: str) -> str:
         return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
@@ -132,10 +137,19 @@ class OllamaClient:
 
     def ensure_model(self) -> None:
         data = self._request("GET", "/api/tags").json()
-        names = [m.get("name", "") for m in (data.get("models") or []) if isinstance(m, dict)]
-        if not any(model_matches(self.model, n) for n in names):
+        models = [m for m in (data.get("models") or []) if isinstance(m, dict)]
+        match = next((m for m in models if model_matches(self.model, m.get("name", ""))), None)
+        if match is None:
             raise OllamaError(
                 f"model '{self.model}' is not available in Ollama; run `ollama list` to check"
+            )
+        # Cloud-backed models ("*:cloud") are proxied by the local server to a remote host:
+        # a loopback URL would still send source excerpts off this machine.
+        if is_remote_model(match) and not self.settings.allow_remote:
+            raise OllamaError(
+                f"model '{self.model}' runs on a remote host ({match.get('remote_host')}); "
+                "source excerpts would leave this machine. Use a local model, or pass "
+                "--allow-remote-ollama to accept that explicitly."
             )
 
     def health_check(self) -> str | None:

@@ -29,6 +29,31 @@ def default_rules() -> tuple[Path, ...]:
     return tuple(Path(str(base / name)) for name in DEFAULT_RULESETS)
 
 
+# Data that a wheel ships under ``tantular_cyber/_data`` (see pyproject force-include) and
+# that a source checkout keeps at the repository root.
+_CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _bundled(wheel_path: str, checkout_path: str) -> Path:
+    bundled = Path(str(resources.files("tantular_cyber") / "_data" / wheel_path))
+    return bundled if bundled.exists() else _CHECKOUT_ROOT / checkout_path
+
+
+def default_corpus() -> Path:
+    """Synthetic benchmark corpus (manifest.json + cases)."""
+    return _bundled("corpus", "benchmarks/corpus")
+
+
+def default_realworld_manifest() -> Path:
+    """Pointer-only real-world manifest (no upstream code)."""
+    return _bundled("realworld/manifest.json", "benchmarks/realworld/manifest.json")
+
+
+def sample_project() -> Path:
+    """Small synthetic vulnerable project used by ``tantular-cyber sample``."""
+    return _bundled("sample", "tests/fixtures/vulnerable")
+
+
 @dataclass(frozen=True)
 class OllamaSettings:
     base_url: str = DEFAULT_OLLAMA_URL

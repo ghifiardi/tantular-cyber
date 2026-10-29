@@ -23,6 +23,7 @@ from .analysis import FindingAnalyzer, LLMClient
 from .callgraph import CallgraphBudget, CallgraphScanner
 from .config import ScanSettings
 from .context import ContextBudget, Strategy, extract_context
+from .doctor import unsupported_platform_reason
 from .models import (
     SEVERITY_ORDER,
     CallStep,
@@ -496,6 +497,9 @@ def run_scan(
         if Path(path).name in IGNORE_FILE_NAMES
     )
 
+    if platform_reason := unsupported_platform_reason():
+        reasons.append(platform_reason)
+
     factory = llm_client_factory or (lambda: OllamaClient(settings.ollama))
     llm_info = _analyze(findings, settings, factory, errors, reasons)
 
@@ -508,7 +512,9 @@ def run_scan(
 
     limitations = list(BASE_LIMITATIONS)
     if not settings.llm_enabled:
-        limitations.append("LLM explanations were disabled for this run (--no-llm).")
+        limitations.append(
+            "Deterministic-only scan: AI explanations were not requested (enable with --ai)."
+        )
 
     report = ScanReport(
         generator=Generator(version=__version__),

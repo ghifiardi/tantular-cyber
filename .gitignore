@@ -19,3 +19,4 @@ reports/
 .DS_Store
 # Real-world pointer cache, if placed inside the repo
 .realworld-cache/
+.build-venv/

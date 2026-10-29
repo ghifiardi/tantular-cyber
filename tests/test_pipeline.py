@@ -157,14 +157,18 @@ def test_cli_end_to_end_with_ollama_down_is_explicitly_degraded(
             str(VULNERABLE),
             "--output",
             str(out),
+            "--ai",
             "--ollama-url",
             f"http://127.0.0.1:{closed_port()}",
             "--ollama-timeout",
             "2",
         ]
     )
+    captured = capsys.readouterr()
     assert code == EXIT_DEGRADED
-    assert "DEGRADED" in capsys.readouterr().err
+    assert "DEGRADED" in captured.err
+    # Scanner coverage is still full: only the optional AI stage degraded the report.
+    assert "coverage: full" in captured.out and "ai explanations: requested" in captured.out
     data = json.loads((out / "report.json").read_text())
     assert data["status"] == "degraded"
     assert data["llm"]["available"] is False
@@ -207,7 +211,6 @@ def test_cli_scanner_missing_is_failed(tmp_path: Path) -> None:
             str(VULNERABLE),
             "--output",
             str(out),
-            "--no-llm",
             "--semgrep-bin",
             str(tmp_path / "no-such-semgrep"),
             "--no-callgraph",
@@ -227,7 +230,6 @@ def test_cli_semgrep_missing_with_callgraph_is_degraded(tmp_path: Path) -> None:
             str(VULNERABLE),
             "--output",
             str(out),
-            "--no-llm",
             "--semgrep-bin",
             str(tmp_path / "no-such-semgrep"),
         ]
@@ -236,6 +238,61 @@ def test_cli_semgrep_missing_with_callgraph_is_degraded(tmp_path: Path) -> None:
     assert code == EXIT_DEGRADED and data["status"] == "degraded"
     assert any("scanners failed" in r for r in data["status_reasons"])
     assert {f["tool"] for f in data["findings"]} == {"tantular-callgraph"}
+
+
+@requires_semgrep
+@pytest.mark.semgrep
+def test_cli_default_scan_is_deterministic_and_needs_no_ollama(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A new user without Ollama gets a complete deterministic scan (POC-006)."""
+    out = tmp_path / "out"
+    code = main(
+        [
+            "scan",
+            "--repo",
+            str(VULNERABLE),
+            "--output",
+            str(out),
+            "--ollama-url",
+            f"http://127.0.0.1:{closed_port()}",
+        ]
+    )
+    data = json.loads((out / "report.json").read_text())
+    stdout = capsys.readouterr().out
+    assert code == EXIT_OK and data["status"] == "complete"
+    assert data["llm"]["enabled"] is False and data["totals"]["findings"] > 0
+    assert any("Deterministic-only scan" in x for x in data["limitations"])
+    assert "coverage: full" in stdout and "ai explanations: not requested" in stdout
+
+
+def test_cli_no_llm_is_deprecated_and_conflicts_with_ai(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["scan", "--repo", str(VULNERABLE), "--output", str(tmp_path / "o")]
+    assert main([*args, "--ai", "--no-llm"]) == EXIT_INPUT
+    assert "mutually exclusive" in capsys.readouterr().err
+    code = main([*args, "--no-llm", "--semgrep-bin", str(tmp_path / "missing")])
+    captured = capsys.readouterr()
+    assert code == EXIT_DEGRADED and "--no-llm is deprecated" in captured.err
+    assert "coverage: PARTIAL" in captured.out
+
+
+def test_unsupported_platform_is_never_reported_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tantular_cyber import pipeline
+    from tantular_cyber.doctor import unsupported_platform_reason
+
+    monkeypatch.setattr(
+        pipeline, "unsupported_platform_reason", lambda: unsupported_platform_reason("windows")
+    )
+    result = run_scan(
+        ScanSettings(repo=VULNERABLE, output=tmp_path / "out", llm_enabled=False),
+        scanners=[FakeScanner([])],
+    )
+    assert result.report.status == "degraded"
+    assert any("WSL2" in r for r in result.report.status_reasons)
 
 
 def test_llm_performance_is_aggregated(tmp_path: Path) -> None:

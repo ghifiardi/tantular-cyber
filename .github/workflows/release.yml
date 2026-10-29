@@ -1,0 +1,120 @@
+name: Release
+
+# Tag vX.Y.Z (matching pyproject version) → reproducible build, license audit, SBOM,
+# checksums, fresh-install smoke tests, build provenance attestation and a DRAFT GitHub
+# release. A maintainer reviews and publishes the draft; nothing is uploaded to PyPI.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+env:
+  SEMGREP_SEND_METRICS: "off"
+  SEMGREP_ENABLE_VERSION_CHECK: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Build tooling (hash-locked)
+        run: python -m pip install --require-hashes -r requirements/build.lock.txt
+      - name: Tag must match the package version
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v${version}" = "${GITHUB_REF_NAME}"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - name: Build twice and require identical artifacts
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          python -m build --no-isolation --outdir dist .
+          python -m build --no-isolation --outdir rebuild .
+          (cd dist && sha256sum -- *) > first.txt
+          (cd rebuild && sha256sum -- *) > second.txt
+          diff first.txt second.txt
+      - name: License audit and SBOM (runtime lock installed in a clean venv)
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          python -m venv rt
+          rt/bin/python -m pip install --require-hashes -r requirements/runtime.lock.txt
+          rt/bin/python tools/release/license_audit.py requirements/runtime.lock.txt \
+            --markdown "dist/tantular-cyber-${VERSION}-licenses.md"
+          rt/bin/python tools/release/sbom.py --wheel dist/tantular_cyber-${VERSION}-py3-none-any.whl \
+            --lock requirements/runtime.lock.txt --output "dist/tantular-cyber-${VERSION}.cdx.json"
+          cp requirements/runtime.lock.txt "dist/tantular-cyber-${VERSION}-runtime.lock.txt"
+          cp THIRD_PARTY_NOTICES.md "dist/THIRD_PARTY_NOTICES.md"
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+        semgrep: [none, semgrep]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/release
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Verify checksums
+        run: cd dist && shasum -a 256 -c SHA256SUMS
+      - name: Fresh install from release artifacts (no source checkout of the package)
+        env:
+          PYTHON: python
+          NO_NETWORK: ${{ runner.os == 'Linux' && '1' || '0' }}
+        run: |
+          wheel=$(ls dist/tantular_cyber-*-py3-none-any.whl)
+          lock=$(ls dist/tantular-cyber-*-runtime.lock.txt)
+          bash tools/release/smoke.sh "$wheel" "$lock" "${{ matrix.semgrep }}"
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+      - name: Build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Create DRAFT release (maintainer publishes after review)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* --draft --verify-tag \
+            --title "Tantular Cyber ${GITHUB_REF_NAME}" \
+            --notes "Local-first security analyzer. Verify before installing: docs/release.md (SHA256SUMS, gh attestation verify). Semgrep (LGPL-2.1) and Ollama are external, user-installed dependencies and are not included. See CHANGELOG.md and THIRD_PARTY_NOTICES.md."
