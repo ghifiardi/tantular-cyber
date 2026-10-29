@@ -121,19 +121,37 @@ in the raw report are not comparable.
   server completion − duration, Ollama log): 21/80 baseline samples overlap. All are kept;
   latency is reported with and without them and no decision changes.
 
-### Same-weights Modelfile-profile comparison — **PARTIAL, in progress**
+### Same-weights Modelfile-profile comparison (n = 120 per arm, complete)
 
 `--modes profile` (no system message, no pinned options; each Modelfile's SYSTEM and
-PARAMETERs apply) on `tantular-cyber:latest` vs `ghifidanukusumo/tantular:latest` — identical
-weights blob `4da76d43…`, profiles differ in SYSTEM prompt (hash) and `num_ctx` 8192 vs
-32768. Any difference is the **combined** profile effect, not the SYSTEM prompt alone.
-Resumable run (`out/sameweights`, checkpointed). At PR time only ~20 of 240 planned samples
-were complete, so **no results are reported yet**; this section will be updated on the PR
-when the run finishes, with any `provenance_changed` arm flagged rather than aggregated.
-Latency from this run is not comparable: the machine ran on battery and slept between
-17:00 and 18:57 WIB, and the offline tests and benchmark ran concurrently (19:00:32–
-19:04:50 and 19:27:49–19:28:21 WIB); samples overlapping those intervals will be labelled
-by full request interval, not dropped.
+PARAMETERs apply, our instructions travel in the user message) on `tantular-cyber:latest`
+(digest `e79106b3b1ebcc77`) vs `ghifidanukusumo/tantular:latest` (digest
+`2df730ac1bdaafc1`): identical weights blob `4da76d43e612c0aa` (Q8_0); the profiles differ in
+SYSTEM prompt (hash `449c9a4f…` vs `c32dc580…`) and `num_ctx` 8192 vs 32768. 40 findings ×
+3 seeds, 0 errors, **no provenance change** before vs after (no arm flagged). Started
+2026-10-29T09:45Z, code `76a9318` + drift check.
+
+| Arm | evidence_grounded | impact_separated | remediation_sound | cwe_consistent | calibrated | other checks |
+|---|---|---|---|---|---|---|
+| `tantular-cyber:latest` profile | 78% (0.70–0.85) | 89% (0.82–0.94) | 98% (0.94–1.00) | 98% (0.93–0.99) | 97% (0.92–0.99) | 100% |
+| `ghifidanukusumo/tantular:latest` profile | 76% (0.68–0.83) | 90% (0.83–0.94) | 99% (0.95–1.00) | 100% (0.97–1.00) | 98% (0.93–0.99) | 100% |
+
+Paired (exact McNemar): evidence 16 vs 14 discordant (p = 0.86), impact 11 vs 12 (p = 1.0),
+remediation 1 vs 2, cwe 0 vs 3 (p = 0.25), calibrated 0 vs 1 — **no detectable difference
+between the two profiles at n = 120**. The result is the **combined** effect of SYSTEM prompt
+and `num_ctx` (and Modelfile sampling defaults, which are equal here), not of the SYSTEM
+prompt alone. `injection_resisted` 6/6 for both (n too small to compare).
+
+* **Latency is not comparable** and is not interpreted: the machine ran on battery, slept
+  17:00–18:57 WIB and the offline tests/benchmark ran during the `tantular-cyber` arm.
+  Classified by full request interval: 16/120 `tantular-cyber` samples overlap those
+  windows (p50/p95 26.8/43.5 s all vs 27.0/40.2 s uncontended, n = 104); 0/120 for
+  `ghifidanukusumo/tantular` (23.4/36.9 s). All samples kept.
+* **Observation for the next milestone (not a finding):** in profile mode both profiles
+  score `evidence_grounded` ~77% vs ~57% for the same weights under our pinned request and
+  system prompt. The modes differ in several ways at once (system-prompt placement,
+  temperature 0.2 vs 0.1, presence/repeat penalties, num_predict), so this is a hypothesis
+  for the evidence-grounding investigation, not a recommendation to change defaults.
 
 ### Limitations and follow-ups
 
@@ -142,6 +160,7 @@ by full request interval, not dropped.
 * `evidence_grounded` is ~57% for Tantular Cyber despite AST context and call paths. Whether
   the cause is the evidence supplied, the model's use of it, the prompt or the rubric is the
   next model-quality milestone — not POC-005.
+* Same-weights profile comparison: complete; no detectable profile effect at n = 120.
 * `qwen3.5:9b` and `tantular-office:0.5-9b` results are exploratory (mixed files /
   non-independent); a clean rerun would need pre-warmed (migrated) models.
 * Real-world sample: 7 pointers, labels unverified; descriptive only.
