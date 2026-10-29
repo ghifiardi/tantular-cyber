@@ -128,6 +128,31 @@ def benchmark_markdown(r: BenchmarkResult) -> str:
             out += ["", "**Coverage lost vs window:** " + ", ".join(ctx.lost_coverage)]
         out.append("")
 
+    if ab := r.ablation:
+        out += [
+            "## Scanner attribution (ablation)",
+            "",
+            "Same corpus and matching rules; the combined run is the one that gates.",
+            "",
+            "| Scanners | TP | FP | FN | TN | Precision | Recall |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for arm in ab.arms:
+            m = arm.metrics
+            out.append(
+                f"| {arm.scanners} | {m.tp} | {m.fp} | {m.fn} | {m.tn} | "
+                f"{_fmt(m.precision)} | {_fmt(m.recall)} |"
+            )
+        out += [
+            "",
+            f"Detected only by Semgrep: {', '.join(ab.semgrep_unique) or '-'}  ",
+            f"Detected only by tantular-callgraph: {', '.join(ab.callgraph_unique) or '-'}  ",
+            f"Detected by both: {len(ab.both)}  ",
+            f"Callgraph detections on safe code that Semgrep did not flag: "
+            f"{', '.join(ab.callgraph_new_fp) or 'none'}",
+            "",
+        ]
+
     out += ["## Adversarial suites (regression, not proof of protection)", ""]
     for suite in r.adversarial:
         counts = ", ".join(f"{k}: {v}" for k, v in suite.counts.items())
@@ -232,6 +257,28 @@ def benchmark_markdown(r: BenchmarkResult) -> str:
             ]
         if perf.notes:
             out += [""] + [f"- {_inline(n)}" for n in perf.notes]
+        out.append("")
+
+    if rw := r.real_world:
+        out += [
+            "## Real-world pointers (separate from the synthetic corpus)",
+            "",
+            f"> {_inline(rw.caveat)}",
+            "",
+            f"Entries {rw.entries}, fetched {rw.fetched}, evaluated {rw.evaluated}: "
+            f"detected {rw.detected}, missed {rw.missed}. Verification: "
+            + ", ".join(f"{k} {v}" for k, v in rw.by_verification.items())
+            + ".",
+            "",
+            "| Pointer | CWE | Advisory | Verification | Held out | Result | Tools |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        out += [
+            f"| {x.id} | {x.cwe} | {x.advisory_id} | {x.verification_status} | "
+            f"{'yes' if x.held_out else '**no** (informed development)'} | {x.state} | "
+            f"{', '.join(x.tools) or '-'} |"
+            for x in rw.results
+        ]
         out.append("")
 
     if cmp := r.comparison:

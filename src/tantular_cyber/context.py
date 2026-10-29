@@ -283,23 +283,34 @@ def extract_context(
         center = start
 
     # One level of same-module helpers called at the finding (e.g. a query builder).
-    called = {
-        n.func.id
-        for stmt in [*stmts, *def_stmts]
-        for n in ast.walk(stmt)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.lineno in _shown_range(stmt)
-    }
-    for name in sorted(called):
-        helper = module_funcs.get(name)
+    # Same-class methods called via ``self.<name>()`` (same resolution as tantular-callgraph).
+    class_methods: dict[str, ast.AST] = {}
+    if func is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and func in node.body:
+                class_methods = {m.name: m for m in node.body if isinstance(m, _FUNC)}
+    called: set[tuple[str, str]] = set()
+    for stmt in [*stmts, *def_stmts]:
+        for n in ast.walk(stmt):
+            if not isinstance(n, ast.Call) or n.lineno not in _shown_range(stmt):
+                continue
+            if isinstance(n.func, ast.Name):
+                called.add(("", n.func.id))
+            elif (
+                isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id == "self"
+            ):
+                called.add(("self.", n.func.attr))
+    for prefix, name in sorted(called):
+        helper = class_methods.get(name) if prefix else module_funcs.get(name)
         if helper is None or helper is func:
             continue
         h_lo, h_hi = _span(helper)
         shown = list(range(h_lo, min(h_hi, h_lo + budget.helper_max_lines - 1) + 1))
         numbers.update(shown)
         clipped = " (clipped)" if h_hi > shown[-1] else ""
-        hints.append(f"`{name}()` is defined in this file at lines {h_lo}-{h_hi}{clipped}")
+        hints.append(f"`{prefix}{name}()` is defined in this file at lines {h_lo}-{h_hi}{clipped}")
 
     for name in sorted(names - {h.split("`")[1] for h in hints if h.startswith("`")}):
         if (

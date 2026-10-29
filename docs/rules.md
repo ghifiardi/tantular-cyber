@@ -17,16 +17,26 @@ synthetic corpus says nothing about real-world recall.
 | 79 XSS | `tantular.template.xss.autoescape-bypass` (HTML templates) | WARNING / LOW |
 | 798 Hard-coded credentials | `tantular.python.secrets.hardcoded-credential` | WARNING / MEDIUM |
 
-"Dynamic string" below means an f-string, `+` concatenation, `%`-formatting or
-`.format()` — inline in the call, or assigned to a local variable earlier in the same scope.
+"Dynamic string" below means an f-string, `+` concatenation, `%`-formatting or `.format()` —
+inline in the call, or assigned to a local variable earlier in the same scope. Concatenation
+chains whose last operand is a variable (`"a" + x + "." + y`) are matched by the CWE-78/22/79
+rules through `metavariable-pattern` (sub-expression search) and, since POC-005, by an
+explicit chain pattern in the CWE-89 rule.
+
+Since POC-005 a second scanner, `tantular-callgraph` (rule ids `tantular.callgraph.*`,
+CWE-89/78/22), follows values through same-repository function calls and through
+`text()`, `str.join`, `["sh", "-c", ...]` and `pathlib` composition — closing the five
+Semgrep known gaps marked below as *(callgraph)*. It is conservative (unresolved calls never
+produce findings) and reports a call path plus uncertainty; see architecture.md.
 
 ## CWE-89 — SQL injection
 
 - **Sinks:** `execute`, `executemany`, `executescript` on any object (DB-API style).
 - **Flagged:** dynamic query string (incl. `+=` accumulation).
 - **Boundary:** placeholders with a parameters tuple/dict are not flagged.
-- **Known gaps:** query built in another function (FN), `sqlalchemy.text()` wrapper (FN),
-  `str.join` (FN); constant concatenation and `int()`-cast `%d` (FP); non-DB objects with an
+- **Known gaps (Semgrep rule):** query built in another function, `sqlalchemy.text()`
+  wrapper and `str.join` *(all three caught by callgraph)*; callee chosen at runtime or more
+  than 3 calls deep (FN for both scanners); constant concatenation and `int()`-cast `%d` (FP); non-DB objects with an
   `.execute()` method (FP).
 
 ## CWE-78 — OS command injection
@@ -36,7 +46,7 @@ synthetic corpus says nothing about real-world recall.
 - **Flagged:** dynamic command string.
 - **Sanitizer boundary:** `shlex.quote()` anywhere in the command expression suppresses the
   finding. Argument lists without `shell=True` are not flagged.
-- **Known gaps:** a shell invoked via argv (`["sh", "-c", cmd]`) (FN); commands built in
+- **Known gaps:** a shell invoked via argv (`["sh", "-c", cmd]`) *(callgraph)*; commands built in
   other functions, `os.exec*`/`spawn*`, `pexpect`, `fabric` (FN); f-strings that only
   interpolate constants (FP).
 - Informed by CVE-2024-29189 (program launch helper via `shell=True`).
@@ -49,7 +59,7 @@ synthetic corpus says nothing about real-world recall.
 - **Sanitizer boundary:** `os.path.basename()` or `secure_filename()` inside the path
   expression; `filter=` on extraction; `send_from_directory` is not a sink.
 - **Known gaps:** validation in a separate statement (realpath + commonpath) is invisible
-  (FP); `pathlib` `/` joins and `Path.read_*` (FN); `zipfile`, `shutil` (not covered).
+  (FP); `pathlib` `/` joins and `Path.read_*` *(callgraph)*; `zipfile`, `shutil` (not covered).
   Confidence is LOW: many joins use trusted values.
 
 ## CWE-79 — Cross-site scripting (scoped: Flask/Jinja2, Django, HTML templates)

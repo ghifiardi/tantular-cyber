@@ -210,10 +210,32 @@ def test_cli_scanner_missing_is_failed(tmp_path: Path) -> None:
             "--no-llm",
             "--semgrep-bin",
             str(tmp_path / "no-such-semgrep"),
+            "--no-callgraph",
         ]
     )
     assert code == EXIT_FAILED
     assert json.loads((out / "report.json").read_text())["status"] == "failed"
+
+
+def test_cli_semgrep_missing_with_callgraph_is_degraded(tmp_path: Path) -> None:
+    """One of two scanners failing gives a partial (degraded) report, not a failed one."""
+    out = tmp_path / "out"
+    code = main(
+        [
+            "scan",
+            "--repo",
+            str(VULNERABLE),
+            "--output",
+            str(out),
+            "--no-llm",
+            "--semgrep-bin",
+            str(tmp_path / "no-such-semgrep"),
+        ]
+    )
+    data = json.loads((out / "report.json").read_text())
+    assert code == EXIT_DEGRADED and data["status"] == "degraded"
+    assert any("scanners failed" in r for r in data["status_reasons"])
+    assert {f["tool"] for f in data["findings"]} == {"tantular-callgraph"}
 
 
 def test_llm_performance_is_aggregated(tmp_path: Path) -> None:
@@ -248,3 +270,25 @@ def test_llm_performance_is_aggregated(tmp_path: Path) -> None:
     assert perf.first_call_load_s == 30.0 and perf.total_load_s == 30.1
     assert (perf.prompt_tokens, perf.output_tokens) == (1600, 800)
     assert all(f.analysis.metrics is not None for f in report.findings)
+
+
+@requires_semgrep
+@pytest.mark.semgrep
+def test_callgraph_findings_carry_call_path_into_report_and_prompt(tmp_path: Path) -> None:
+    from tantular_cyber.analysis import build_messages
+    from tantular_cyber.reports import render_markdown
+
+    repo = Path(__file__).parents[1] / "benchmarks" / "corpus" / "cases" / "interproc"
+    report = run_scan(ScanSettings(repo=repo, output=tmp_path / "out", llm_enabled=False)).report
+    cross = next(
+        f for f in report.findings if f.tool == "tantular-callgraph" and f.path == "app/service.py"
+    )
+    assert {s.path for s in cross.call_path} == {"app/service.py", "app/queries.py"}
+    assert cross.call_path[0].kind == "source" and cross.call_path[-1].kind == "sink"
+    assert any("customer" in s.code for s in cross.call_path)
+    assert cross.uncertainty and cross.confidence == "low"
+    callgraph = next(s for s in report.scanners if s.name == "tantular-callgraph")
+    assert callgraph.stats["resolved_calls"] >= 1 and callgraph.suppressed_duplicates >= 1
+    assert "Jalur panggilan" in render_markdown(report)
+    user = build_messages(cross)[1]["content"]
+    assert "app/queries.py" in user and "scanner_uncertainty" in user

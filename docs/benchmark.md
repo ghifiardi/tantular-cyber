@@ -34,7 +34,7 @@ Outputs in `--output`:
 
 | File | Content |
 |---|---|
-| `benchmark.json` | Versioned result (`result_type: tantular-cyber.benchmark`, `benchmark_schema_version`). Separate from the POC-002 `report.json` schema (unchanged at 1.1.0). |
+| `benchmark.json` | Versioned result (`result_type: tantular-cyber.benchmark`, `benchmark_schema_version`). Versioned independently of the `report.json` scan-report schema. |
 | `benchmark.md` | Human-readable: gates, metrics, per-annotation outcomes, adversarial gaps, LLM checks, performance, comparison, limitations. |
 | `scan-report.json` | The POC-002 scan report of the corpus (traceability of finding ids). |
 | `human_review.json` / `.md` | LLM runs only: one item per explanation with evidence, explanation, automated signals and blank rubric fields. |
@@ -126,6 +126,14 @@ until the manifest is updated — deliberate, so changes are reviewed, never sil
 With `require_cwe_category_coverage`, `manifest_valid` also fails unless every annotated
 CWE has a true positive, a true negative, a near miss, a known FP or FN, and a `per_cwe`
 threshold.
+
+## Scanner attribution (ablation, POC-005)
+
+The benchmark scans the corpus three times — Semgrep only, tantular-callgraph only, both —
+with the same matching rules and lists the true positives unique to each scanner and any
+callgraph detection on safe code that Semgrep did not already flag. Only the combined run
+gates. Rule changes are attributed separately by scanning with the previous release's
+rules (see benchmark-results.md).
 
 ## Evidence context metrics (POC-004)
 
@@ -226,7 +234,10 @@ corpus.
 
 | Contract | Before | Now | Compatibility |
 |---|---|---|---|
-| `report.json` | 1.1.0 | **1.2.0** | Additive: `evidence.context_kind`, `context_lines`, `context_truncated`, `context_fallback`, `dataflow_hints`. `context` may now be non-contiguous (`…` gaps). |
+| `report.json` | 1.2.0 | **1.3.0** | Additive (POC-005): `findings[].call_path`, `findings[].uncertainty`, `scanners[].stats`, `scanners[].suppressed_duplicates`; second default scanner `tantular-callgraph`. |
+| `benchmark.json` | 1.1.0 | **1.2.0** | Additive (POC-005): `real_world`, `llm.notes`; callgraph rules in `by_rule`. |
+| manifest | 1.1.0 | **1.2.0** | Five former known FNs now `expect_detected: true` (tantular-callgraph); `interproc/*`, `chains/*` cases. |
+| `report.json` (POC-004) | 1.1.0 | 1.2.0 | Additive: `evidence.context_kind`, `context_lines`, `context_truncated`, `context_fallback`, `dataflow_hints`. `context` may now be non-contiguous (`…` gaps). |
 | `benchmark.json` | 1.0.0 | **1.1.0** | Additive: `context`, `per_cwe:*`/`context_*` gates, `llm.notes`. |
 | manifest | 1.0.0 | **1.1.0** | Additive: `provenance`, `near_miss`, `thresholds.per_cwe`, `require_cwe_category_coverage`. 1.0.0 manifests still load. |
 | default rules | CWE-89 only | CWE-89/78/22/79/798 | Scans may report new findings; `--rules src/tantular_cyber/rules/python-sqli.yml` reproduces POC-002 scope. CWE-89 rule unchanged. |

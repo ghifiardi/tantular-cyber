@@ -23,6 +23,11 @@ sanitizer boundaries and known gaps):
 | CWE-79 Cross-site scripting | Flask/Jinja2 and Django sinks, `\|safe` / `autoescape off` in HTML templates |
 | CWE-798 Hard-coded credentials | credential-named literals, `password=` kwargs, Flask secret keys, AWS key ids |
 
+A second, pure-Python scanner — **tantular-callgraph** (POC-005) — follows values through
+same-repository function calls (SQL/command/path built in one function, used in another) and
+reports the source-to-sink **call path** with explicit uncertainty. Unresolvable calls
+(dynamic dispatch, ambiguous imports) never produce findings.
+
 Evidence context is **AST-aware** (POC-004): the enclosing function, the assignments that
 build values used at the finding and same-file helpers, within strict line/char budgets,
 redacted before slicing; falls back to a fixed window for templates or unparsable files.
@@ -67,6 +72,8 @@ ollama list | grep tantular-cyber           # model must be present
 | `--repo PATH` | required | existing directory to analyze (read-only) |
 | `--output DIR` | required | report directory; must be **outside** `--repo` unless `--allow-output-inside-repo` |
 | `--rules FILE` | bundled rulesets (CWE-89/78/22/79/798) | local Semgrep rule file (repeatable; replaces the defaults) |
+| `--no-callgraph` | off | disable the interprocedural scanner |
+| `--callgraph-depth N` | 3 | max call levels followed |
 | `--context-strategy` | `ast` | `ast` (bounded AST-aware context) or `window` (fixed ±`--context-lines`) |
 | `--no-llm` | off | scanner-only report |
 | `--model NAME` | `tantular-cyber:latest` | Ollama model |
@@ -171,7 +178,9 @@ make bench    # offline benchmark: scanner precision/recall + adversarial suites
 make bench-live  # opt-in: + LLM explanation quality and cold/warm performance (local Ollama)
 ```
 
-Benchmarking (POC-003) is documented in [docs/benchmark.md](docs/benchmark.md).
+Benchmarking is documented in [docs/benchmark.md](docs/benchmark.md); the opt-in real-world
+pointers, human review and model comparison workflows in [docs/evaluation.md](docs/evaluation.md);
+fixture provenance and licenses in [docs/provenance-audit.md](docs/provenance-audit.md).
 
 Coverage: Semgrep JSON parsing and command construction, path safety and skip policy
 (secrets, binary, oversized, escaping symlinks), scan-coverage verification (including a

@@ -45,7 +45,9 @@ Aturan wajib:
 6. "confidence" adalah tingkat keyakinan Anda: "low", "medium", atau "high".
 7. "limitations" menjelaskan apa yang tidak dapat dipastikan dari bukti yang tersedia.
    "dataflow_hints_unverified" hanyalah petunjuk sintaksis (parameter, assignment lokal);
-   itu BUKAN bukti bahwa data tidak tepercaya mencapai sink.
+   itu BUKAN bukti bahwa data tidak tepercaya mencapai sink. "call_path" adalah jalur
+   sumber-ke-sink dari scanner; perhatikan "scanner_uncertainty" dan jangan menganggap
+   jalur itu terbukti dapat dieksploitasi.
 8. Jawab HANYA dengan satu objek JSON yang sesuai skema, tanpa teks lain.
 """
 
@@ -82,7 +84,28 @@ class LLMClient(Protocol):
     ) -> str: ...
 
 
-def build_messages(finding: Finding) -> list[dict[str, str]]:
+# Prompt profiles for controlled experiments. "baseline" is the production prompt; others
+# add constraints and are adopted only if paired quality/safety checks do not degrade.
+PROMPT_PROFILES: dict[str, str] = {
+    "baseline": "",
+    "concise": (
+        "\nBatasan panjang: summary maksimal 2 kalimat; setiap daftar maksimal 3 butir; "
+        "setiap butir maksimal 1 kalimat; corrected_code hanya baris yang diubah.\n"
+    ),
+}
+
+
+def system_prompt(profile: str = "baseline") -> str:
+    if profile not in PROMPT_PROFILES:
+        raise ValueError(f"unknown prompt profile: {profile}")
+    return SYSTEM_PROMPT + PROMPT_PROFILES[profile]
+
+
+def build_messages(
+    finding: Finding, profile: str = "baseline", system_role: bool = True
+) -> list[dict[str, str]]:
+    """``system_role=False`` puts our instructions at the top of the user message instead,
+    so a model's own Modelfile SYSTEM prompt applies (comparison "profile" mode)."""
     """System prompt is constant; all repository-derived text goes into an escaped JSON blob."""
     data = {
         "finding_id": finding.id,
@@ -97,6 +120,11 @@ def build_messages(finding: Finding) -> list[dict[str, str]]:
         "surrounding_context": finding.evidence.context[:MAX_CONTEXT_CHARS],
         "context_kind": finding.evidence.context_kind,
         "dataflow_hints_unverified": finding.evidence.dataflow_hints,
+        "call_path": [
+            f"{s.path}:{s.line} in {s.function} [{s.kind}] {s.detail}: {s.code}"
+            for s in finding.call_path
+        ],
+        "scanner_uncertainty": finding.uncertainty,
     }
     blob = json.dumps(data, ensure_ascii=False, indent=2)
     # A literal closing tag inside the data must not terminate the block.
@@ -105,7 +133,12 @@ def build_messages(finding: Finding) -> list[dict[str, str]]:
         "Jelaskan temuan berikut sesuai aturan sistem.\n"
         f"<untrusted_data>\n{blob}\n</untrusted_data>"
     )
-    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
+    if not system_role:
+        return [{"role": "user", "content": system_prompt(profile) + "\n" + user}]
+    return [
+        {"role": "system", "content": system_prompt(profile)},
+        {"role": "user", "content": user},
+    ]
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -341,14 +374,20 @@ def sanitize_explanation(expl: LLMExplanation) -> LLMExplanation:
 
 
 class FindingAnalyzer:
-    def __init__(self, client: LLMClient) -> None:
+    def __init__(
+        self, client: LLMClient, profile: str = "baseline", system_role: bool = True
+    ) -> None:
+        self.profile = profile
+        self.system_role = system_role
         self.client = client
 
     def analyze(self, finding: Finding) -> FindingAnalysis:
         """Analyze one finding. Transport errors propagate so the caller can stop early."""
         started = time.monotonic()
         base: dict[str, Any] = {"provider": self.client.provider, "model": self.client.model}
-        raw = self.client.chat(build_messages(finding), EXPLANATION_JSON_SCHEMA)
+        raw = self.client.chat(
+            build_messages(finding, self.profile, self.system_role), EXPLANATION_JSON_SCHEMA
+        )
         duration = round(time.monotonic() - started, 3)
         # Optional: clients may expose per-call metrics (OllamaClient.last_metrics).
         base["metrics"] = getattr(self.client, "last_metrics", None)

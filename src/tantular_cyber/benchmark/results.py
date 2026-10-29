@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from . import BENCHMARK_RESULT_TYPE, BENCHMARK_SCHEMA_VERSION
+from .ablation import Ablation
 from .adversarial import SuiteResult
 from .context_eval import ContextEval
 from .llm_eval import ExplanationEval, LLMEvalSummary
@@ -14,10 +15,12 @@ from .manifest import Thresholds
 from .matching import MatchRecord, Metrics, UnmatchedFinding
 from .perf import PerfSummary
 from .provenance import Provenance
+from .realworld import RealWorldResult
 
 LIMITATIONS = [
-    "The corpus is small and synthetic (Python, CWE-89 only). Precision/recall describe the "
-    "bundled rule on this corpus and are regression floors, not real-world performance.",
+    "The corpus is small and synthetic (Python; CWE-89/78/22/79/798). Precision/recall "
+    "describe the bundled rules and tantular-callgraph on this corpus and are regression "
+    "floors, not real-world performance.",
     "Ground-truth matching is line-range based (see docs/benchmark.md); it does not judge "
     "whether a finding's message is correct.",
     "LLM metrics are sample-based (small n, sampling noise) and come from deterministic "
@@ -85,9 +88,11 @@ class BenchmarkResult(BaseModel):
     scanner: ScannerBench | None
     adversarial: list[SuiteResult]
     context: ContextEval | None = None
+    ablation: Ablation | None = None
     llm: LLMBench | None = None
     performance: PerfSummary | None = None
     comparison: Comparison | None = None
+    real_world: RealWorldResult | None = None
     limitations: list[str] = LIMITATIONS
 
 

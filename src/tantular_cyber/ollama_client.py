@@ -153,8 +153,23 @@ class OllamaClient:
             "think": False,
             "stream": False,
             "options": {
-                "temperature": self.settings.temperature,
-                "num_ctx": self.settings.num_ctx,
+                **(
+                    {"temperature": self.settings.temperature, "num_ctx": self.settings.num_ctx}
+                    if self.settings.pin_core_options
+                    else {}
+                ),
+                **{
+                    k: v
+                    for k in (
+                        "top_p",
+                        "top_k",
+                        "repeat_penalty",
+                        "presence_penalty",
+                        "num_predict",
+                        "seed",
+                    )
+                    if (v := getattr(self.settings, k)) is not None
+                },
             },
         }
         if format_schema is not None:
@@ -199,6 +214,7 @@ def chat_metrics(data: dict[str, Any], wall_s: float) -> LLMMetrics:
         total_s=seconds("total_duration"),
         load_s=seconds("load_duration"),
         prompt_tokens=count("prompt_eval_count"),
+        prompt_cached_tokens=count("prompt_eval_cached_count"),
         prompt_eval_s=seconds("prompt_eval_duration"),
         output_tokens=output_tokens,
         eval_s=eval_s,

@@ -20,10 +20,12 @@ from typing import Any
 
 from . import __version__
 from .analysis import FindingAnalyzer, LLMClient
+from .callgraph import CallgraphBudget, CallgraphScanner
 from .config import ScanSettings
 from .context import ContextBudget, Strategy, extract_context
 from .models import (
     SEVERITY_ORDER,
+    CallStep,
     Evidence,
     EvidenceLine,
     Finding,
@@ -189,12 +191,65 @@ def normalize_findings(
             evidence=evidence,
             message=raw.message,
             confidence=raw.confidence,
+            call_path=_call_path(repo, raw, cache),
+            uncertainty=list(raw.uncertainty),
         )
     ordered = sorted(
         findings.values(),
         key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.path, f.start_line, f.rule_id),
     )
     return ordered, errors
+
+
+def _call_path(
+    repo: Path, raw: RawFinding, cache: dict[str, tuple[str, list[str]]]
+) -> list[CallStep]:
+    """Attach the redacted source line to each step (steps may span several files)."""
+    steps = []
+    for step in raw.trace:
+        path = str(step["path"])
+        line = int(step["line"])  # type: ignore[call-overload]
+        code = ""
+        target = repo / path
+        if target.is_file():
+            if path not in cache:
+                cache[path] = read_source(target)
+            lines = cache[path][1]
+            code = lines[line - 1].strip()[:200] if 0 < line <= len(lines) else ""
+        steps.append(
+            CallStep(
+                path=path,
+                line=line,
+                function=str(step["function"]),
+                kind=step["kind"],
+                detail=str(step["detail"]),
+                code=code,
+            )
+        )  # type: ignore[arg-type]
+    return steps
+
+
+def dedupe_across_scanners(runs: Sequence[ScannerRun]) -> tuple[list[RawFinding], dict[str, int]]:
+    """Scanner order is precedence: drop a later finding when an earlier scanner already
+    reported the same file and CWE on overlapping lines."""
+    kept: list[RawFinding] = []
+    suppressed: dict[str, int] = {}
+    for run in runs:
+        earlier = list(kept)
+        for raw in run.findings:
+            duplicate = any(
+                e.tool != raw.tool
+                and e.path == raw.path
+                and set(e.cwe) & set(raw.cwe)
+                and e.start_line <= raw.end_line
+                and e.end_line >= raw.start_line
+                for e in earlier
+            )
+            if duplicate:
+                suppressed[run.tool] = suppressed.get(run.tool, 0) + 1
+            else:
+                kept.append(raw)
+    return kept, suppressed
 
 
 def _skipped_summary(inventory: FileInventory) -> SkippedSummary:
@@ -391,6 +446,13 @@ def run_scan(
                 max_target_bytes=settings.max_file_bytes,
             )
         ]
+        if settings.callgraph_enabled:
+            scanners.append(
+                CallgraphScanner(
+                    CallgraphBudget(max_depth=settings.callgraph_max_depth),
+                    max_file_bytes=settings.max_file_bytes,
+                )
+            )
 
     runs: list[ScannerRun] = []
     for scanner in scanners:
@@ -398,7 +460,7 @@ def run_scan(
         runs.append(run)
         errors.extend(ReportError(stage="scanner", message=e) for e in run.errors)
 
-    raws = [f for run in runs for f in run.findings]
+    raws, suppressed = dedupe_across_scanners(runs)
     findings, norm_errors = normalize_findings(
         repo,
         raws,
@@ -472,6 +534,8 @@ def run_scan(
                 targets=r.targets,
                 succeeded=r.succeeded,
                 coverage=coverages.get(r.tool),
+                stats=r.stats,
+                suppressed_duplicates=suppressed.get(r.tool, 0),
             )
             for r in runs
         ],

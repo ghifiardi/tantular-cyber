@@ -22,6 +22,7 @@ from ..ollama_client import OllamaClient
 from ..pipeline import run_scan
 from ..reports import render_json, render_markdown
 from . import render
+from .ablation import run_ablation
 from .adversarial import run_adversarial
 from .context_eval import evaluate_context
 from .llm_eval import (
@@ -71,6 +72,8 @@ class BenchmarkOptions:
     baseline: Path | None = None
     semgrep_bin: str = "semgrep"
     record_replay: Path | None = None
+    real_world_manifest: Path | None = None
+    real_world_cache: Path | None = None
     context_strategy: Literal["ast", "window"] = "ast"
 
 
@@ -195,6 +198,7 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         scanner = _scanner_bench(manifest, scan)
         adversarial = run_adversarial(corpus)
         context = evaluate_context(manifest, cases_root, scanner.records)
+        ablation = run_ablation(manifest, cases_root, tmp, opts.semgrep_bin, opts.context_strategy)
 
         llm_bench = perf = None
         if opts.llm != "off":
@@ -247,9 +251,18 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         scanner=scanner,
         adversarial=adversarial,
         context=context,
+        ablation=ablation,
         llm=llm_bench,
         performance=perf,
     )
+    if opts.real_world_manifest is not None:
+        from .realworld import DEFAULT_CACHE, evaluate_pointers, load_realworld
+
+        result.real_world = evaluate_pointers(
+            load_realworld(opts.real_world_manifest),
+            opts.real_world_cache or DEFAULT_CACHE,
+            semgrep_bin=opts.semgrep_bin,
+        )
     if opts.baseline:
         result.comparison = compare(result, json.loads(opts.baseline.read_text()))
     result.provenance.finished_at = now()

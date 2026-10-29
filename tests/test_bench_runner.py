@@ -48,8 +48,9 @@ def test_offline_benchmark_passes_with_expected_metrics(offline) -> None:
     result, out = offline
     assert result.status == "pass", [g for g in result.gates if not g.passed]
     m = result.scanner.metrics
-    assert (m.tp, m.fp, m.fn, m.tn) == (32, 7, 7, 20)
-    assert m.precision == 0.8205 and m.recall == 0.8205
+    assert (m.tp, m.fp, m.fn, m.tn) == (43, 8, 4, 23)
+    assert m.precision == 0.8431 and m.recall == 0.9149
+    assert "tantular.callgraph.sqli-interprocedural" in result.scanner.by_rule
     ctx = {s.strategy: s for s in result.context.strategies}
     assert ctx["ast"].construct_covered == ctx["ast"].n
     assert ctx["window"].construct_covered < ctx["ast"].construct_covered
@@ -65,10 +66,10 @@ def test_offline_benchmark_passes_with_expected_metrics(offline) -> None:
     } <= labels
     assert result.llm is None and result.performance is None
     data = json.loads((out / "benchmark.json").read_text())
-    assert data["benchmark_schema_version"] == "1.1.0"
+    assert data["benchmark_schema_version"] == "1.2.0"
     assert data["result_type"] == "tantular-cyber.benchmark"
     assert data["provenance"]["corpus_sha256"] == corpus_digest(CORPUS)
-    assert json.loads((out / "scan-report.json").read_text())["schema_version"] == "1.2.0"
+    assert json.loads((out / "scan-report.json").read_text())["schema_version"] == "1.3.0"
 
 
 def test_outputs_contain_no_local_paths_or_secrets(offline, replay) -> None:
@@ -128,8 +129,8 @@ def test_regressions_fail_the_gates(tmp_path: Path) -> None:
     manifest = json.loads((corpus / "manifest.json").read_text())
     for case in manifest["cases"]:
         for a in case["annotations"]:
-            if a["id"] == "known-fn-join":
-                a["expect_detected"] = True  # pretend the rule used to catch it
+            if a["id"] == "interproc-known-fn-depth":
+                a["expect_detected"] = True  # pretend the scanner used to catch it
     (corpus / "manifest.json").write_text(json.dumps(manifest))
     suite = json.loads((corpus / "adversarial" / "secrets.json").read_text())
     suite["items"][0]["expect"] = "kept"  # behavior no longer matches expectation
@@ -178,7 +179,7 @@ def test_recorded_real_model_outputs_rescore_deterministically(tmp_path: Path) -
     )
     llm = result.llm
     assert llm is not None and llm.summary.n_explanations == 8
-    assert any("covers 6 of 10" in n for n in llm.notes)
+    assert any("covers 6 of 12" in n for n in llm.notes)
     assert llm.summary.checks["schema_valid"].rate == 1.0
     assert llm.summary.checks["injection_resisted"].rate == 1.0
     assert llm.summary.checks["impact_separated"].rate == 1.0
@@ -191,7 +192,8 @@ def test_recorded_poc004_outputs_cover_new_cwes(tmp_path: Path) -> None:
         BenchmarkOptions(corpus=CORPUS, output=tmp_path, llm="replay", replay_file=replay_file)
     )
     llm = result.llm
-    assert llm is not None and llm.summary.n_explanations == 13 and not llm.notes
+    assert llm is not None and llm.summary.n_explanations == 13
+    assert any("covers 10 of 12" in n for n in llm.notes)  # recorded before POC-005 cases
     checks = llm.summary.checks
     for cid in (
         "schema_valid",
@@ -218,3 +220,26 @@ def test_comparison_across_different_corpora_does_not_judge_counts(offline) -> N
     assert not deltas["scanner.fp"].worse and not deltas["scanner.fn"].worse
     assert deltas["scanner.precision"].worse  # rates are still judged
     assert "scanner.cwe.CWE-89.precision" in deltas
+
+
+def test_ablation_attributes_detections_and_pins_known_limits(offline) -> None:
+    result, _ = offline
+    ab = result.ablation
+    assert ab is not None and [a.scanners for a in ab.arms] == [
+        "semgrep",
+        "callgraph",
+        "semgrep+callgraph",
+    ]
+    former_gaps = {
+        "known-fn-cross-function",
+        "known-fn-sqlalchemy-text",
+        "known-fn-join",
+        "cmdi-known-fn-sh-c",
+        "path-known-fn-pathlib",
+    }
+    assert former_gaps <= set(ab.callgraph_unique)
+    assert ab.callgraph_new_fp == []  # no false positive that Semgrep did not already raise
+    combined = {r.annotation_id: r for r in result.scanner.records}
+    # Documented limitations stay undetected at the default depth budget (regression pin).
+    for limit in ("interproc-known-fn-depth", "interproc-known-fn-dynamic-dispatch"):
+        assert not combined[limit].detected and combined[limit].expectation_met
