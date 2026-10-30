@@ -1,10 +1,20 @@
-"""Command-line interface: ``tantular-cyber scan|benchmark|doctor|schema``.
+"""Command-line interface: ``tantular-cyber scan|doctor|sample|plugins|benchmark|schema``.
+
+``scan`` is deterministic by default (Semgrep + tantular-callgraph, no model needed);
+``--ai`` adds optional local Ollama explanations. ``--no-llm`` is accepted for
+compatibility (it is now the default) and will be removed in a future release.
 
 Exit codes for ``scan``:
-  0  complete — scanner and LLM stages succeeded (findings may or may not exist)
+  0  complete — all requested stages succeeded (findings may or may not exist)
   2  invalid input (bad repo/output path, bad arguments)
   3  failed — scanner failed; reports still written with the error
-  4  degraded — reports written, but the LLM stage was unavailable or partial
+  4  degraded — reports written, but coverage is partial (e.g. Semgrep missing, unsupported
+     platform) or the requested AI stage was unavailable or partial
+
+Exit codes for ``doctor``:
+  0  full scan capability
+  3  scanning unavailable
+  4  partial scan capability (reports would be degraded)
 
 Exit codes for ``benchmark``:
   0  all deterministic gates passed
@@ -24,9 +34,17 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from . import __version__
-from .config import OllamaSettings, ScanSettings, default_rules
+from .config import (
+    OllamaSettings,
+    ScanSettings,
+    default_corpus,
+    default_realworld_manifest,
+    default_rules,
+    sample_project,
+)
+from .doctor import unsupported_platform_reason
 from .models import ScanReport
-from .ollama_client import OllamaClient, OllamaError
+from .ollama_client import OllamaError
 from .pipeline import run_scan
 from .reports import write_reports
 from .security import PathSafetyError
@@ -38,7 +56,8 @@ _STATUS_EXIT = {"complete": EXIT_OK, "degraded": EXIT_DEGRADED, "failed": EXIT_F
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tantular-cyber",
-        description="Local, read-only repository security analyzer (Semgrep + local Ollama).",
+        description="Local-first, read-only repository security analyzer. Deterministic scans "
+        "need Semgrep (user-installed); AI explanations via local Ollama are optional (--ai).",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true", help="log progress to stderr")
@@ -51,13 +70,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rules",
         action="append",
         type=Path,
-        help="local Semgrep rule file (repeatable; default: bundled CWE-89 rules)",
+        help="local Semgrep rule file (repeatable; default: bundled CWE-89/78/22/79/798 rules)",
     )
     scan.add_argument("--semgrep-bin", default=None, help="semgrep executable (default: semgrep)")
     scan.add_argument("--semgrep-timeout", type=float, default=600.0, help="seconds")
     scan.add_argument("--max-file-bytes", type=int, default=1_000_000)
-    scan.add_argument("--no-llm", action="store_true", help="skip LLM explanations")
-    scan.add_argument("--model", default=None, help="Ollama model (default: tantular-cyber:latest)")
+    scan.add_argument(
+        "--ai",
+        action="store_true",
+        help="add explanations from a local Ollama model (optional; scans never need a model)",
+    )
+    scan.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="deprecated: deterministic-only is now the default",
+    )
+    scan.add_argument(
+        "--model", default=None, help="Ollama model for --ai (default: tantular-cyber:latest)"
+    )
     scan.add_argument(
         "--ollama-url", default=None, help="Ollama base URL (default: http://127.0.0.1:11434)"
     )
@@ -98,18 +128,36 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--allow-output-inside-repo", action="store_true")
 
-    doctor = sub.add_parser("doctor", help="check semgrep and Ollama availability")
+    doctor = sub.add_parser(
+        "doctor",
+        help="read-only diagnostics: Semgrep, platform, optional Ollama/models, privacy",
+    )
     doctor.add_argument("--model", default=None)
     doctor.add_argument("--ollama-url", default=None)
-    doctor.add_argument("--allow-remote-ollama", action="store_true")
+    doctor.add_argument("--allow-remote-ollama", action="store_true", help=argparse.SUPPRESS)
     doctor.add_argument("--semgrep-bin", default=None)
+    doctor.add_argument(
+        "--no-ollama", action="store_true", help="do not contact Ollama (not even loopback)"
+    )
+    doctor.add_argument("--json", action="store_true", help="machine-readable output")
+
+    sample = sub.add_parser(
+        "sample", help="copy a small synthetic vulnerable project to try a scan on"
+    )
+    sample.add_argument("--dest", type=Path, required=True, help="new or empty directory")
+
+    plugins = sub.add_parser(
+        "plugins", help="scanner plugin contract: list built-ins, validate a manifest"
+    )
+    plugins.add_argument("action", choices=["list", "validate"])
+    plugins.add_argument("manifest", nargs="?", type=Path, help="plugin manifest (validate)")
 
     bench = sub.add_parser("benchmark", help="run the evaluation benchmark (offline by default)")
     bench.add_argument(
         "--corpus",
         type=Path,
-        default=Path("benchmarks/corpus"),
-        help="corpus directory containing manifest.json",
+        default=None,
+        help="corpus directory containing manifest.json (default: bundled corpus)",
     )
     bench.add_argument(
         "--output", type=Path, required=True, help="directory for benchmark.json / benchmark.md"
@@ -167,7 +215,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     rw = sub.add_parser("realworld", help="pointer-only real-world cases (opt-in fetch)")
     rw.add_argument("action", choices=["fetch", "evaluate", "clean", "audit"])
-    rw.add_argument("--manifest", type=Path, default=Path("benchmarks/realworld/manifest.json"))
+    rw.add_argument("--manifest", type=Path, default=None, help="default: bundled manifest")
     rw.add_argument(
         "--cache",
         type=Path,
@@ -193,7 +241,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="two models that share weights, e.g. a profile and its base",
     )
-    cmp.add_argument("--corpus", type=Path, default=Path("benchmarks/corpus"))
+    cmp.add_argument("--corpus", type=Path, default=None, help="default: bundled corpus")
     cmp.add_argument("--output", type=Path, required=True)
     cmp.add_argument(
         "--fresh",
@@ -232,6 +280,15 @@ def _semgrep_bin(args: argparse.Namespace) -> str:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
+    if args.ai and args.no_llm:
+        print("error: --ai and --no-llm are mutually exclusive", file=sys.stderr)
+        return EXIT_INPUT
+    if args.no_llm:
+        print(
+            "note: --no-llm is deprecated; deterministic-only is now the default (use --ai to "
+            "add explanations)",
+            file=sys.stderr,
+        )
     settings = ScanSettings(
         repo=Path(args.repo),
         output=Path(args.output),
@@ -241,7 +298,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         max_file_bytes=args.max_file_bytes,
         allow_output_inside_repo=args.allow_output_inside_repo,
         keep_raw_scanner_output=args.keep_raw,
-        llm_enabled=not args.no_llm,
+        llm_enabled=args.ai,
         max_llm_findings=args.max_llm_findings,
         context_lines=args.context_lines,
         context_strategy=args.context_strategy,
@@ -270,8 +327,27 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return _STATUS_EXIT[report.status]
 
 
+def _coverage_label(report: ScanReport) -> str:
+    """Scanner coverage only (the optional AI stage is reported separately)."""
+    ran = [s.name for s in report.scanners if s.succeeded]
+    gaps = any(
+        s.coverage is not None and (s.coverage.not_scanned or not s.coverage.verified)
+        for s in report.scanners
+        if s.succeeded
+    )
+    full = (
+        "semgrep" in ran
+        and all(s.succeeded for s in report.scanners)
+        and not gaps
+        and unsupported_platform_reason() is None
+    )
+    return f"{'full' if full else 'PARTIAL'} (scanners succeeded: {', '.join(ran) or 'none'})"
+
+
 def _print_summary(report: ScanReport, written: dict[str, Path]) -> None:
     print(f"status: {report.status}")
+    print(f"coverage: {_coverage_label(report)}")
+    print(f"ai explanations: {'requested' if report.llm.enabled else 'not requested'}")
     for reason in report.status_reasons:
         print(f"  - {reason}")
     print(f"findings: {report.totals.findings} {report.totals.by_cwe or ''}".rstrip())
@@ -286,18 +362,57 @@ def _print_summary(report: ScanReport, written: dict[str, Path]) -> None:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    ok = True
-    semgrep = shutil.which(_semgrep_bin(args))
-    print(f"semgrep: {semgrep or 'NOT FOUND (brew install semgrep)'}")
-    ok &= semgrep is not None
+    from .doctor import render_doctor, run_doctor
+
+    report = run_doctor(
+        semgrep_bin=_semgrep_bin(args),
+        ollama=_ollama_settings(args),
+        check_ollama=not args.no_ollama,
+    )
+    print(report.model_dump_json(indent=2) if args.json else render_doctor(report), end="\n")
+    return {"full": EXIT_OK, "partial": EXIT_DEGRADED, "unavailable": EXIT_FAILED}[
+        report.scan_capability
+    ]
+
+
+def cmd_sample(args: argparse.Namespace) -> int:
+    source = sample_project()
+    dest: Path = args.dest
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        print(f"error: {dest} exists and is not an empty directory", file=sys.stderr)
+        return EXIT_INPUT
+    if not source.is_dir():
+        print("error: bundled sample project is missing; reinstall", file=sys.stderr)
+        return EXIT_INPUT
+    shutil.copytree(source, dest, dirs_exist_ok=True)
+    print(f"sample project (synthetic, deliberately vulnerable, never executed): {dest}")
+    print(f"next: tantular-cyber scan --repo {dest} --output {dest.parent / 'tantular-reports'}")
+    return EXIT_OK
+
+
+def cmd_plugins(args: argparse.Namespace) -> int:
+    from pydantic import ValidationError
+
+    from .plugins import PluginManifest, negotiate, plugin_policy
+
+    if args.action == "list":
+        print(json.dumps(plugin_policy(), indent=2))
+        return EXIT_OK
+    if args.manifest is None:
+        print("error: plugins validate requires a manifest path", file=sys.stderr)
+        return EXIT_INPUT
     try:
-        with OllamaClient(_ollama_settings(args)) as client:
-            version = client.health_check()
-            print(f"ollama: {client.base_url} version={version} model={client.model} OK")
-    except OllamaError as exc:
-        ok = False
-        print(f"ollama: UNAVAILABLE — {exc}")
-    return EXIT_OK if ok else EXIT_DEGRADED
+        manifest = PluginManifest.model_validate(
+            json.loads(args.manifest.read_text(encoding="utf-8"))
+        )
+    except (OSError, ValueError, ValidationError) as exc:
+        print(f"invalid manifest: {exc}", file=sys.stderr)
+        return EXIT_INPUT
+    compat = negotiate(manifest)
+    print(f"manifest: {manifest.id} {manifest.version} (plugin API {manifest.plugin_api})")
+    print(f"compatibility: {compat.reason}")
+    print("execution: DISABLED — third-party plugins are not run without an enforceable sandbox")
+    return EXIT_OK if compat.compatible else EXIT_INPUT
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
@@ -319,7 +434,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         print(f"error: baseline not found: {args.baseline}", file=sys.stderr)
         return EXIT_INPUT
     opts = BenchmarkOptions(
-        corpus=args.corpus,
+        corpus=args.corpus or default_corpus(),
         output=args.output,
         llm=args.llm,
         replay_file=args.replay_file,
@@ -329,9 +444,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         concurrency=levels,
         baseline=args.baseline,
         record_replay=args.record_replay,
-        real_world_manifest=(
-            Path("benchmarks/realworld/manifest.json") if args.real_world else None
-        ),
+        real_world_manifest=(default_realworld_manifest() if args.real_world else None),
         real_world_cache=args.real_world_cache,
         context_strategy=args.context_strategy,
         semgrep_bin=_semgrep_bin(args),
@@ -382,7 +495,7 @@ def cmd_realworld(args: argparse.Namespace) -> int:
         print(f"removed {cache}" if clean_cache(cache) else f"nothing to remove at {cache}")
         return EXIT_OK
     try:
-        manifest = load_realworld(args.manifest)
+        manifest = load_realworld(args.manifest or default_realworld_manifest())
     except (OSError, ValueError) as exc:
         print(f"error: cannot read manifest: {exc}", file=sys.stderr)
         return EXIT_INPUT
@@ -423,7 +536,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     pair = [m.strip() for m in args.identity_pair.split(",") if m.strip()]
     try:
         result = run_comparison(
-            args.corpus,
+            args.corpus or default_corpus(),
             arms,
             runs=max(1, args.runs),
             max_findings=max(1, args.max_findings),
@@ -507,6 +620,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_scan(args)
     if args.command == "doctor":
         return cmd_doctor(args)
+    if args.command == "sample":
+        return cmd_sample(args)
+    if args.command == "plugins":
+        return cmd_plugins(args)
     if args.command == "benchmark":
         return cmd_benchmark(args)
     if args.command == "realworld":

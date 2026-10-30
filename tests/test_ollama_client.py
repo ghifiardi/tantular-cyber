@@ -15,11 +15,20 @@ from tantular_cyber.ollama_client import (
     validate_base_url,
 )
 
+TAGS_LOCAL = {"models": [{"name": "tantular-cyber:latest"}]}
+
 
 def make_client(handler, **settings) -> OllamaClient:
+    """Client whose model check (/api/tags) succeeds, so tests exercise /api/chat."""
     sleeps: list[float] = []
+
+    def routed(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json=TAGS_LOCAL)
+        return handler(request)
+
     client = OllamaClient(
-        OllamaSettings(**settings), transport=httpx.MockTransport(handler), sleep=sleeps.append
+        OllamaSettings(**settings), transport=httpx.MockTransport(routed), sleep=sleeps.append
     )
     client.sleeps = sleeps  # type: ignore[attr-defined]
     return client
@@ -194,3 +203,36 @@ def test_metrics_tolerate_missing_counters() -> None:
     client.chat([])
     m = client.last_metrics
     assert m is not None and m.output_tokens is None and m.output_tokens_per_s is None
+
+
+def test_chat_refuses_cloud_model_before_any_chat_request() -> None:
+    """Regression (PR #10 review #1): every chat path verifies the model first."""
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200, json={"models": [{"name": "x:cloud", "remote_host": "https://ollama.com"}]}
+            )
+        return chat_ok()
+
+    client = OllamaClient(OllamaSettings(model="x:cloud"), transport=httpx.MockTransport(handler))
+    with pytest.raises(OllamaError, match="remote host"):
+        client.chat([{"role": "user", "content": "secret source"}])
+    assert paths == ["/api/tags"]
+
+
+def test_chat_verifies_model_once_per_client() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json=TAGS_LOCAL)
+        return chat_ok()
+
+    client = OllamaClient(OllamaSettings(), transport=httpx.MockTransport(handler))
+    client.chat([])
+    client.chat([])
+    assert paths == ["/api/tags", "/api/chat", "/api/chat"]

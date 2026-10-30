@@ -4,17 +4,21 @@ Guidance for Claude Code (and humans) working in this repository.
 
 ## What this is
 
-POC-002: a **local, read-only** repository security analyzer. Semgrep (local rules) finds
-issues; the local Ollama model `tantular-cyber:latest` explains them in Bahasa Indonesia;
-results go to a versioned `report.json` + `report.md`. Mac-first; no cloud services.
+A **local-first, read-only** repository security analyzer, distributed as a CLI wheel
+(POC-006). Semgrep (user-installed, local rules) and tantular-callgraph find issues
+deterministically; with `--ai` a local Ollama model explains them in Bahasa Indonesia;
+results go to a versioned `report.json` + `report.md`. macOS/Linux/WSL2; no cloud services.
 Detailed design: [docs/architecture.md](docs/architecture.md). Source issue: GitHub #1.
 
 ## Layout
 
 ```
 src/tantular_cyber/
-  cli.py            argparse CLI: scan | doctor | schema; exit codes 0/2/3/4
-  config.py         OllamaSettings / ScanSettings; env vars TANTULAR_*; bundled rules path
+  cli.py            argparse CLI: scan | doctor | sample | plugins | benchmark | ...; exit 0/2/3/4/5
+  doctor.py         read-only diagnostics (Semgrep, platform, loopback Ollama, models, privacy)
+  plugins.py        scanner plugin API 1.0: manifest, negotiation, output normalization;
+                    third-party execution always refused (no sandbox yet)
+  config.py         OllamaSettings / ScanSettings; env vars TANTULAR_*; bundled rules/data paths
   security.py       path canonicalization, file inventory/skip policy, redaction, sanitizing
   scanner.py        Scanner protocol, SemgrepScanner, Semgrep JSON parser
   pipeline.py       orchestrator run_scan(): inventory → scan → normalize → LLM → ScanReport
@@ -34,8 +38,16 @@ benchmarks/corpus/  benchmark corpus: manifest.json (ground truth), cases/ (neve
                     adversarial/ (overclaim + secret suites)
 benchmarks/replays/ recorded raw model outputs (real runs) for deterministic replay
 benchmarks/realworld/ pointer-only manifest of upstream vulnerable locations (no code)
-docs/               architecture, rules, benchmark guide + results, report-schema.json
+docs/               architecture, rules, benchmark, evaluation, install, quickstart(.id),
+                    privacy, plugin-api, release, report-schema.json
+requirements/       hash-locked runtime + build dependencies (uv pip compile; `make lock`)
+tools/release/      license_audit.py, sbom.py (CycloneDX), smoke.sh (fresh-venv install test)
+.github/workflows/  ci.yml (tests + package job), release.yml (tag → draft release)
 ```
+
+The wheel force-includes `benchmarks/corpus`, the real-world manifest, the sample project and
+THIRD_PARTY_NOTICES.md under `tantular_cyber/_data/`; `config._bundled()` falls back to the
+checkout paths.
 
 ## Commands
 
@@ -48,8 +60,11 @@ make schema             # regenerate docs/report-schema.json after changing mode
 make bench              # offline deterministic benchmark (what CI gates on)
 make bench-replay       # LLM-evaluation path with recorded outputs, no model
 make bench-live         # opt-in: local Ollama quality + cold/warm perf + concurrency 1,2
-.venv/bin/tantular-cyber doctor
-.venv/bin/tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out
+make dist               # reproducible wheel + sdist from requirements/build.lock.txt
+make package-smoke      # fresh-venv install of the wheel, without and with Semgrep
+make lock               # re-pin locks (network; review the diff)
+.venv/bin/tantular-cyber doctor [--json]
+.venv/bin/tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out [--ai]
 ```
 
 ## Non-negotiable safety rules
@@ -94,7 +109,15 @@ make bench-live         # opt-in: local Ollama quality + cold/warm perf + concur
   `make schema`, mention it in the PR. `test_committed_json_schema_matches_models` enforces it.
 * Adding a scanner or model: see "Extension points" in docs/architecture.md. Do not add
   the third-party Antares-1B GGUF to the critical path (it loops on `@`).
-* Dependencies: keep core deps minimal (`httpx`, `pydantic`) with bounded version ranges.
+* Dependencies: keep core deps minimal (`httpx`, `pydantic`) with bounded version ranges;
+  re-pin `requirements/*.lock.txt` in the same change. **Never bundle Semgrep** (LGPL-2.1,
+  external, user-managed) and never ship or download model weights.
+* `scan` is deterministic by default; `--ai` is opt-in. Never require a model to scan, and
+  never let doctor/setup pull models, write files or contact non-loopback hosts.
+* Ollama cloud models (`remote_host` in `/api/tags`) execute off-host: refuse them unless
+  `allow_remote`, and never `/api/show` them (Ollama forwards that request).
+* Plugins: third-party scanner code is never imported or executed until an enforceable
+  sandbox exists (docs/plugin-api.md). Do not add entry-point discovery; a test forbids it.
 
 ## Milestones
 
@@ -104,8 +127,11 @@ make bench-live         # opt-in: local Ollama quality + cold/warm perf + concur
   performance with honest cold/warm labels. Guide: docs/benchmark.md.
 * **POC-004 (done)** — CWE-78/22/79/798 rules (scoped, docs/rules.md), CVE-informed
   synthetic fixtures with provenance, per-CWE gates, bounded AST-aware context.
-* **POC-005 (this)** — tantular-callgraph, chain patterns, real-world pointers, human-review
+* **POC-005 (done)** — tantular-callgraph, chain patterns, real-world pointers, human-review
   ingestion, controlled model/profile comparison (docs/evaluation.md).
+* **POC-006 (this)** — downloadable CLI: deterministic default + `--ai`, read-only doctor,
+  plugin contract (no third-party execution), locks, reproducible builds, SBOM, release
+  workflow, install/quickstart/privacy docs.
 * Then — real-world sanitized evaluation, human-review score ingestion, then GATRA
   ingestion of `report.json` once detection quality is measured.
 * Application source code is licensed under Apache-2.0 (see LICENSE). Model weights are separate and retain their own applicable license.

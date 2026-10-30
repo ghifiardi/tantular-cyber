@@ -189,6 +189,8 @@ def test_modelfile_profile_mode_sends_no_system_role_or_pinned_options() -> None
     sent: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "b:latest"}]})
         sent.append(__import__("json").loads(request.content))
         return httpx.Response(200, json={"message": {"content": "{}"}, "done_reason": "stop"})
 

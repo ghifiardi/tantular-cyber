@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from ..analysis import PROMPT_PROFILES, FindingAnalyzer
 from ..config import OllamaSettings, ScanSettings
 from ..models import Finding, FindingAnalysis
-from ..ollama_client import OllamaClient, OllamaError, validate_base_url
+from ..ollama_client import OllamaClient, OllamaError, is_remote_model, validate_base_url
 from ..pipeline import run_scan
 from .llm_eval import RUBRIC, ExplanationEval, evaluate_finding, wilson
 from .manifest import Manifest, load_manifest
@@ -73,6 +73,7 @@ class Arm:
 class ModelProvenance(BaseModel):
     name: str
     installed: bool
+    remote: bool = Field(default=False, description="Cloud-backed model; excluded, not called.")
     digest: str | None = None
     weights_blob: str | None = None
     extra_blobs: list[str] = Field(default_factory=list)
@@ -126,7 +127,7 @@ class Adoption(BaseModel):
 
 class ComparisonResult(BaseModel):
     result_type: str = "tantular-cyber.model-comparison"
-    schema_version: str = "1.1.0"
+    schema_version: str = "1.2.0"
     started_at: str
     finished_at: str | None = None
     sample_based: bool = True
@@ -176,6 +177,10 @@ def model_provenance(base_url: str, names: Sequence[str]) -> list[ModelProvenanc
             tag = tags.get(name) or tags.get(f"{name}:latest")
             if tag is None:
                 out.append(ModelProvenance(name=name, installed=False))
+                continue
+            if is_remote_model(tag):
+                # Cloud model: never /api/show or chat (Ollama forwards to a remote host).
+                out.append(ModelProvenance(name=name, installed=False, remote=True))
                 continue
             show = http.post("/api/show", json={"model": name}).json()
             modelfile = show.get("modelfile", "")
@@ -542,7 +547,13 @@ def run_comparison(
     names = sorted({a.model for a in arms} | set(identity_pair))
     provenance = model_provenance(ollama.base_url, names)
     installed = {p.name for p in provenance if p.installed}
-    notes = [f"{p.name} not installed; skipped" for p in provenance if not p.installed]
+    notes = [
+        f"{p.name} is cloud-backed (remote execution); skipped"
+        if p.remote
+        else f"{p.name} not installed; skipped"
+        for p in provenance
+        if not p.installed
+    ]
     arms = [a for a in arms if a.model in installed]
     if not arms:
         raise ValueError("none of the requested models is installed")

@@ -1,16 +1,24 @@
 # Tantular Cyber — Local Repository Security Analyzer
 
-Read-only security analysis of an **authorized local repository**, entirely on your Mac:
+Read-only security analysis of an **authorized local repository**, entirely on your machine
+(macOS, Linux, Windows via WSL2):
 
 ```
-repo (read-only) → Semgrep (local rules) → normalized findings → Ollama tantular-cyber (advisory) → report.json + report.md
+repo (read-only) → Semgrep + tantular-callgraph → normalized findings → [optional --ai: local Ollama, advisory] → report.json + report.md
 ```
+
+**Get started:** [Install](docs/install.md) · [Quickstart](docs/quickstart.md) ·
+[Panduan cepat (Bahasa Indonesia)](docs/quickstart.id.md) · [Privacy](docs/privacy.md) ·
+[Third-party notices](THIRD_PARTY_NOTICES.md). A deterministic scan needs Python 3.11+ and a
+user-installed Semgrep — no AI model and no Ollama.
 
 * Scanner evidence is **authoritative**; LLM explanations (Bahasa Indonesia) are **advisory**
   and always marked unverified.
 * No repository code is executed, nothing is installed from the repo, nothing is uploaded,
   and no code is modified.
-* If Ollama is unavailable, you still get scanner findings, with an explicit **degraded** status.
+* Scans are deterministic by default; AI explanations are opt-in (`--ai`). If the requested
+  AI stage or Semgrep is unavailable, you still get findings, with an explicit **degraded**
+  status.
 
 Supported weaknesses (Python; scoped — see [docs/rules.md](docs/rules.md) for exact sinks,
 sanitizer boundaries and known gaps):
@@ -34,31 +42,33 @@ redacted before slicing; falls back to a fixed window for templates or unparsabl
 
 Architecture and trust model: [docs/architecture.md](docs/architecture.md).
 Rules: [docs/rules.md](docs/rules.md). Benchmark: [docs/benchmark.md](docs/benchmark.md).
-Developer guide: [CLAUDE.md](CLAUDE.md). License: Apache-2.0 (application code; model
-weights are licensed separately).
+Plugin contract: [docs/plugin-api.md](docs/plugin-api.md). Releases:
+[docs/release.md](docs/release.md). Developer guide: [CLAUDE.md](CLAUDE.md). License:
+Apache-2.0 (application code only; Semgrep, Ollama and model weights keep their own licenses —
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 
 ## Requirements
 
-| Component | Version tested | Install |
+| Component | Version tested | Required? |
 |---|---|---|
-| macOS (Apple silicon) | Darwin 27 | — |
-| Python | 3.11, 3.12, 3.14 | `brew install python@3.11` |
-| Semgrep CLI | 1.143.0 | `brew install semgrep` (or `pip install '.[semgrep]'`) |
-| Ollama | 0.40.2 | <https://ollama.com> |
-| Model | `tantular-cyber:latest` (Qwen3.5-9B based) | must already exist in `ollama list` |
-
-The model is optional at runtime (`--no-llm`, or degraded mode when unreachable).
+| macOS / Linux / WSL2 | macOS 27 (Apple silicon), Ubuntu (CI) | yes — native Windows is unsupported |
+| Python | 3.11, 3.12 | yes |
+| Semgrep CLI (LGPL-2.1, user-installed, not bundled) | 1.143.0; tested range `>=1.90,<2` | for **full** scans (otherwise PARTIAL) |
+| Ollama | 0.40.2 | only for `--ai` |
+| Model | Tantular weights (`ghifidanukusumo/tantular`, profile `tantular-cyber:latest`) | only for `--ai`; never downloaded by this tool |
 
 ## Setup
+
+Users: install a verified release wheel — see [docs/install.md](docs/install.md).
+
+Developers:
 
 ```bash
 git clone https://github.com/ghifiardi/tantular-cyber.git
 cd tantular-cyber
-python3.11 -m venv .venv
-.venv/bin/pip install -e '.[dev]'          # or: make install
+make install                                # python3.11 venv + dev extras
 brew install semgrep                        # if not installed
-ollama list | grep tantular-cyber           # model must be present
-.venv/bin/tantular-cyber doctor             # checks semgrep + Ollama + model
+.venv/bin/tantular-cyber doctor             # read-only: semgrep, platform, optional Ollama, privacy
 ```
 
 ## Running
@@ -75,8 +85,9 @@ ollama list | grep tantular-cyber           # model must be present
 | `--no-callgraph` | off | disable the interprocedural scanner |
 | `--callgraph-depth N` | 3 | max call levels followed |
 | `--context-strategy` | `ast` | `ast` (bounded AST-aware context) or `window` (fixed ±`--context-lines`) |
-| `--no-llm` | off | scanner-only report |
-| `--model NAME` | `tantular-cyber:latest` | Ollama model |
+| `--ai` | off | add local Ollama explanations (optional) |
+| `--no-llm` | — | deprecated no-op (deterministic is the default) |
+| `--model NAME` | `tantular-cyber:latest` | Ollama model for `--ai`; cloud models are refused |
 | `--ollama-url URL` | `http://127.0.0.1:11434` | localhost only… |
 | `--allow-remote-ollama` | off | …unless you opt in (code excerpts leave the machine) |
 | `--ollama-timeout S` | 300 | per request; first call includes model load |
@@ -89,18 +100,32 @@ Environment variables (`TANTULAR_OLLAMA_URL`, `TANTULAR_MODEL`, `TANTULAR_OLLAMA
 documented in [.env.example](.env.example). CLI flags take precedence.
 
 **Exit codes:** `0` complete · `2` invalid input · `3` scanner failed · `4` degraded
-(reports written, LLM stage unavailable or partial).
+(reports written; partial coverage such as missing Semgrep, or the requested `--ai` stage was
+unavailable or partial). `doctor` returns `0` full / `4` partial / `3` unavailable.
 
 `tantular-cyber schema` prints the JSON schema of `report.json`
 (committed as [docs/report-schema.json](docs/report-schema.json) for GATRA).
 
 ## Sample output
 
-Terminal (live run on the Mac baseline; the first run includes model load):
+Deterministic scan (default, no model):
 
 ```
 $ tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out
 status: complete
+coverage: full (scanners succeeded: semgrep, tantular-callgraph)
+ai explanations: not requested
+findings: 2 {'CWE-89': 2}
+analyses: {'disabled': 2}
+```
+
+With explanations (live run on the Mac baseline; the first run includes model load):
+
+```
+$ tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out --ai
+status: complete
+coverage: full (scanners succeeded: semgrep, tantular-callgraph)
+ai explanations: requested
 findings: 2 {'CWE-89': 2}
 analyses: {'completed': 2}
 json: /…/tantular-cyber/out/report.json
@@ -134,7 +159,7 @@ markdown: /…/tantular-cyber/out/report.md
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.3.0",
   "report_type": "tantular-cyber.repository-scan",
   "status": "complete",
   "totals": {"findings": 2, "by_severity": {"high": 2}, "by_cwe": {"CWE-89": 2},
@@ -155,10 +180,10 @@ markdown: /…/tantular-cyber/out/report.md
 }
 ```
 
-Degraded mode (Ollama down) — findings are still reported, exit code 4:
+Degraded mode (`--ai` requested, Ollama down) — findings are still reported, exit code 4:
 
 ```
-$ tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out --ollama-url http://127.0.0.1:9
+$ tantular-cyber scan --repo tests/fixtures/vulnerable --output ./out --ai --ollama-url http://127.0.0.1:9
 WARNING: scan DEGRADED — see status_reasons/errors in the report
 status: degraded
   - LLM explanation unavailable: Ollama not reachable or model missing; report contains scanner findings only

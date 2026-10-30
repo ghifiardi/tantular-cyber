@@ -243,3 +243,52 @@ def test_ablation_attributes_detections_and_pins_known_limits(offline) -> None:
     # Documented limitations stay undetected at the default depth budget (regression pin).
     for limit in ("interproc-known-fn-depth", "interproc-known-fn-dynamic-dispatch"):
         assert not combined[limit].detected and combined[limit].expectation_met
+
+
+def test_cloud_model_blocks_every_benchmark_ollama_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (PR #10 review #1): cold start and concurrency must not bypass the
+    cloud-model refusal. Only read-only metadata requests may reach Ollama."""
+    import httpx
+
+    from tantular_cyber.benchmark import runner
+    from tantular_cyber.config import OllamaSettings
+    from tantular_cyber.ollama_client import OllamaClient
+
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.40.2"})
+        if request.url.path == "/api/tags":
+            cloud = {"name": "x:cloud", "remote_host": "https://ollama.com:443"}
+            return httpx.Response(200, json={"models": [cloud]})
+        return httpx.Response(200, json={"message": {"content": "{}"}, "done_reason": "stop"})
+
+    class Client(OllamaClient):
+        def __init__(self, settings, **kw):
+            super().__init__(settings, transport=httpx.MockTransport(handler))
+
+    called: list[str] = []
+    monkeypatch.setattr(runner, "OllamaClient", Client)
+    monkeypatch.setattr(runner, "evict_model", lambda *a, **k: called.append("evict"))
+    monkeypatch.setattr(
+        runner, "concurrency_experiment", lambda *a, **k: called.append("concurrency") or []
+    )
+    monkeypatch.setattr(runner, "model_state", lambda *a, **k: {})
+    run_benchmark(
+        BenchmarkOptions(
+            corpus=CORPUS,
+            output=tmp_path,
+            llm="ollama",
+            cold=True,
+            concurrency=(1, 2),
+            ollama=OllamaSettings(model="x:cloud", max_retries=0),
+        )
+    )
+    assert called == []
+    assert set(paths) <= {"/api/version", "/api/tags"}, paths
+    notes = json.loads((tmp_path / "benchmark.json").read_text())["performance"]["notes"]
+    assert any("model check failed" in n and "remote host" in n for n in notes)

@@ -4,12 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tantular-cyber"
-version = "0.2.0"
-description = "Tantular Cyber POC-002: local, read-only repository security analyzer (Semgrep + local Ollama)."
+version = "0.3.0"
+description = "Local-first, read-only repository security analyzer: deterministic Semgrep + call-graph scanning, optional local Ollama explanations."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "ghifiardi" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
 dependencies = [
     "httpx>=0.27,<1",
     "pydantic>=2.7,<3",
@@ -20,16 +31,45 @@ dev = [
     "pytest>=8.2,<10",
     "ruff>=0.6,<1",
 ]
-# Semgrep is a large dependency; it is optional so `brew install semgrep` works too.
+# Convenience only: Semgrep is an external, user-installed dependency (LGPL-2.1, not bundled
+# and not covered by this package's Apache-2.0 license). This extra lets pip fetch it from
+# PyPI into the same environment; `brew install semgrep` / `pipx install semgrep` work too.
 semgrep = [
     "semgrep>=1.90,<2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ghifiardi/tantular-cyber"
+Documentation = "https://github.com/ghifiardi/tantular-cyber/tree/main/docs"
+Issues = "https://github.com/ghifiardi/tantular-cyber/issues"
 
 [project.scripts]
 tantular-cyber = "tantular_cyber.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tantular_cyber"]
+# Synthetic, independently written data (Apache-2.0) so `benchmark` and `sample` work from
+# a wheel. Never executed or imported. config._bundled() falls back to the checkout paths.
+[tool.hatch.build.targets.wheel.force-include]
+"benchmarks/corpus" = "tantular_cyber/_data/corpus"
+"benchmarks/realworld/manifest.json" = "tantular_cyber/_data/realworld/manifest.json"
+"tests/fixtures/vulnerable" = "tantular_cyber/_data/sample"
+"THIRD_PARTY_NOTICES.md" = "tantular_cyber/_data/THIRD_PARTY_NOTICES.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "tests/",
+    "benchmarks/",
+    "docs/",
+    "requirements/",
+    "tools/",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md",
+    "Makefile",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

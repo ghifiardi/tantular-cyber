@@ -1,3 +1,3 @@
-"""Tantular Cyber — local, read-only repository security analyzer (POC-002)."""
+"""Tantular Cyber — local-first, read-only repository security analyzer."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
