@@ -11,7 +11,10 @@ Exploratory only (docs/poc-007-plan.md, sections 3 and 7). For each retained run
    out of range, both, and nothing cited.
 
 It is not a reproduction of the published 57%: that run's per-sample outputs were not kept.
-Output is aggregate counts only, never model text, prompts or source.
+Output is aggregate counts only, never model text, prompts or source. The exit code is 0 only
+when ``validate`` finds nothing: every recorded finding rebuilt, the selection and corpus equal
+the run header, every recorded arm present and matching its recorded result, and no sample
+excluded.
 
 Usage (historical checkout created with ``git worktree add --detach DIR eval/poc-005-76a9318``):
 
@@ -153,6 +156,7 @@ def rescore(hist: SimpleNamespace, checkout: Path, run_dir: Path) -> dict[str, o
             continue
         tallies[arm][classify(check.passed, check.detail)] += 1
 
+    # The run's own summary defines which arms must be present and what they recorded.
     recorded = {}
     comparison = run_dir / "comparison.json"
     if comparison.is_file():
@@ -161,7 +165,7 @@ def rescore(hist: SimpleNamespace, checkout: Path, run_dir: Path) -> dict[str, o
             recorded[a["arm"]] = {"passed": eg.get("passed"), "assessed": eg.get("assessed")}
 
     arms = {}
-    for arm in sorted(set(tallies) | set(excluded)):
+    for arm in sorted(set(tallies) | set(excluded) | set(recorded)):
         t = tallies[arm]
         assessed = sum(t[c] for c in CATEGORIES if c != "nothing_cited")
         lo, hi = wilson(t["grounded"], assessed)
@@ -197,8 +201,42 @@ def rescore(hist: SimpleNamespace, checkout: Path, run_dir: Path) -> dict[str, o
             "missing_ids": missing_ids,
             "selection_matches_header": first_n == sorted(expected),
         },
+        "recorded_summary_found": comparison.is_file(),
+        "expected_arms": sorted(recorded),
         "arms": arms,
     }
+
+
+def validate(r: dict[str, object]) -> list[str]:
+    """Every reason the re-scoring cannot be trusted as a reconstruction; empty means valid.
+
+    Fails closed: a run without a recorded summary has no expected arms, and that is a
+    failure, not a vacuous pass.
+    """
+    failures: list[str] = []
+    rec = r["reconstruction"]
+    if rec["missing_ids"]:
+        failures.append(f"{len(rec['missing_ids'])} recorded finding(s) not reconstructed")
+    if rec["selection_matches_header"] is not True:
+        failures.append("reconstructed finding selection differs from the run header")
+    if r["corpus_matches_header"] is not True:
+        failures.append("corpus id or manifest version differs from the run header")
+    expected = r["expected_arms"]
+    if not r["recorded_summary_found"] or not expected:
+        failures.append("no recorded arm results (comparison.json) to check against")
+    arms = r["arms"]
+    for arm in expected:
+        if arm not in arms or arms[arm]["scored"] + sum(arms[arm]["excluded"].values()) == 0:
+            failures.append(f"expected arm missing from samples: {arm}")
+    for arm in sorted(set(arms) - set(expected)):
+        failures.append(f"arm in samples but not in the recorded results: {arm}")
+    for arm in expected:
+        if arm in arms and arms[arm]["matches_recorded"] is not True:
+            failures.append(f"re-scored result differs from the recorded result: {arm}")
+    excluded = sum(n for a in arms.values() for n in a["excluded"].values())
+    if excluded:
+        failures.append(f"{excluded} sample(s) excluded")
+    return failures
 
 
 def render(r: dict[str, object]) -> str:
@@ -212,6 +250,13 @@ def render(r: dict[str, object]) -> str:
         f"Findings reconstructed: {rec['reconstructed']}/{rec['expected_findings']}; "
         f"selection matches run header: {rec['selection_matches_header']}; "
         f"corpus matches header: {r['corpus_matches_header']}.",
+        "",
+        "Validation: "
+        + (
+            "passed."
+            if r["validation"]["passed"]
+            else "**FAILED** — " + "; ".join(r["validation"]["failures"]) + "."
+        ),
         "",
         "| Arm | Grounded | Missing ids | Lines out of range | Both | Nothing cited "
         "| Rate (Wilson 95%) | Recorded in run | Match | Excluded |",
@@ -239,12 +284,13 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     hist = import_historical(args.historical)
     result = rescore(hist, args.historical, args.run)
+    failures = validate(result)
+    result["validation"] = {"passed": not failures, "failures": failures}
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "rescoring.json").write_text(json.dumps(result, indent=2) + "\n", "utf-8")
     (args.output / "rescoring.md").write_text(render(result), "utf-8")
     print(render(result))
-    ok = result["reconstruction"]["missing_ids"] == [] and result["corpus_matches_header"]
-    return 0 if ok else 1
+    return 0 if result["validation"]["passed"] else 1
 
 
 if __name__ == "__main__":

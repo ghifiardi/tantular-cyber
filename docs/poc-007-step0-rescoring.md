@@ -103,5 +103,8 @@ git worktree add --detach /tmp/hist-76a9318 eval/poc-005-76a9318
 ```
 
 `out/optim` and `out/sameweights` are the git-ignored POC-005 run directories on the
-machine that produced them; they are not published. The tool exits non-zero if any recorded
-finding cannot be rebuilt or the corpus differs from the run header.
+machine that produced them; they are not published. The tool fails closed: it exits non-zero
+unless every recorded finding is rebuilt, the rebuilt selection and the corpus equal the run
+header, every arm recorded in the run's `comparison.json` is present (and no other arm), each
+arm's re-scored result equals its recorded one, and no sample is excluded. All three runs
+above pass this validation.
