@@ -13,6 +13,7 @@ from tantular_cyber.benchmark.compare import (
     Arm,
     ArmSummary,
     ModelProvenance,
+    ModelSnapshot,
     PairedResult,
     adoption_decision,
     mcnemar_exact,
@@ -23,6 +24,30 @@ from tantular_cyber.benchmark.compare import (
 )
 
 CORPUS = Path(__file__).parents[1] / "benchmarks" / "corpus"
+STEADY = "d" * 64
+
+
+class SteadySnapshots:
+    """A local Ollama whose installed and loaded model never changes."""
+
+    def __init__(self, base_url, transport=None) -> None:
+        pass
+
+    def __call__(self, model: str) -> ModelSnapshot:
+        return ModelSnapshot(
+            model=model, tags_digest=STEADY, quantization="Q8_0", loaded_digest=STEADY
+        )
+
+    def version(self) -> str:
+        return "0.40.2"
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def steady_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(compare, "SnapshotSource", SteadySnapshots)
 
 
 def test_mcnemar_exact() -> None:
@@ -99,6 +124,7 @@ def test_run_comparison_offline_with_pinned_options(monkeypatch) -> None:
             pass
 
         def chat(self, messages, format_schema=None) -> str:
+            self.last_request_sha256, self.last_response_sha256 = "q" * 64, "r" * 64
             s = self.settings
             sent.append(
                 {
@@ -219,6 +245,7 @@ def test_checkpoint_resumes_without_repeating_calls(monkeypatch, tmp_path: Path)
             pass
 
         def chat(self, messages, format_schema=None) -> str:
+            self.last_request_sha256, self.last_response_sha256 = "q" * 64, "r" * 64
             calls["n"] += 1
             if calls["n"] > limit["n"]:
                 raise compare.OllamaError("interrupted")

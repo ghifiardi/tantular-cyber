@@ -94,8 +94,8 @@ tantular-cyber -v compare --models tantular-cyber:latest --profiles baseline,con
 * Provenance is captured **before and after** the arms; any difference (digest, weights
   blob, quantization, SYSTEM hash) is listed under `provenance_changes`, shown as a
   warning, and every arm of an affected model is flagged `provenance_changed` (⚠ in the
-  table) — its samples may mix model files and are not a single-version result. Recording
-  the digest per response is a follow-up, not part of POC-005. Ollama 0.40.x runs a "local compat GGUF migration" the first time it loads an
+  table) — its samples may mix model files and are not a single-version result. Since
+  POC-007 Step 1 the digest is also checked per response (next section). Ollama 0.40.x runs a "local compat GGUF migration" the first time it loads an
   older model and rewrites the manifest to a new weights blob, so the first request(s) of
   an arm can be served by the pre-migration file. Warm every model once (or run a short
   smoke comparison) before a long comparison, and confirm in the Ollama server log
@@ -108,6 +108,57 @@ tantular-cyber -v compare --models tantular-cyber:latest --profiles baseline,con
   `tantular-cyber:latest` with `ghifidanukusumo/tantular:latest` in this mode isolates the
   Tantular Cyber prompt/parameter profile on **identical weights**; `--modes pinned`
   (default) neutralizes the profile and should make the two indistinguishable.
+
+### Evaluation-run record (POC-007 Step 1)
+
+Every `compare` run also writes `evaluation-run.json` (`result_type:
+tantular-cyber.evaluation-run`, `schema_version` 1.0.0; `benchmark/evalrun.py`). Plan:
+[poc-007-plan.md](poc-007-plan.md) §§ 4–7.
+
+```bash
+# Controlled: clean checkout required; exits 5 unless every response is eligible
+tantular-cyber -v compare --controlled --models tantular-cyber:latest --runs 3 \
+    --max-findings 40 --output out/controlled
+# Restrict to one side of a frozen split (development while iterating, heldout to compare)
+tantular-cyber -v compare --controlled --split split.json --split-side heldout ...
+```
+
+* **Code state** (commit and dirty flag) is captured at the start *and* the end. Unknown or
+  changed code makes the run `invalid`; `--controlled` refuses a dirty or unknown checkout
+  before any model call. Exploratory runs record a dirty tree but do not fingerprint it.
+* **Inputs** are hashed: corpus (`corpus_digest`), manifest version, the evaluated finding
+  ids, each finding's redacted evidence + context, the system prompt with every profile and
+  the explanation schema, arms, runs, pinned options and the split. `inputs_sha256` covers
+  them all.
+* **Per response:** `/api/tags` and `/api/ps` are read immediately before and after the
+  `/api/chat` call (never `/api/show`), plus the SHA-256 of the exact request payload and of
+  the reply text. A response is **eligible** only if every field is present, the installed
+  digest and quantization are equal before and after, the loaded model after the call is
+  that digest, and a model loaded before the call did not change. Otherwise it is
+  **excluded**, with its reasons. A request error is excluded too.
+* **Run status:** `complete` only when every expected response is present and eligible;
+  `incomplete` when any is excluded or missing; `invalid` per code state above.
+  `comparable` is true only for a complete controlled run. Summaries and paired results
+  use eligible responses only and count exclusions per arm; on any non-comparable run
+  (exploratory, incomplete or invalid) every adoption decision is "no", and the report
+  says the aggregates are exploratory. A controlled run that is not comparable exits 5.
+* **Checkpoint resume** is refused when the commit, dirty state, mode, prompt-storage
+  setting or `inputs_sha256` differ from the checkpoint header. Each checkpoint row keeps
+  its response's provenance record, so resumed responses keep their eligibility.
+* **Prompt text** is never stored by default; only request hashes are. `--store-prompts`
+  keeps the rendered messages in the record and is refused for any corpus other than the
+  bundled synthetic one. Nothing is logged.
+* **Split file** (`tantular-cyber.evaluation-split` 1.0.0): `corpus_id`, `development` and
+  `heldout` case ids. Unknown or duplicate ids, a case on both sides, another corpus or an
+  empty side are refused; the file hash and each side's membership hash are recorded.
+  Near-duplicate code across sides is a human-review concern, not checked automatically.
+
+Limitations (also written into every record): this is a **client-side** control. Matching
+snapshots show only that the client observed the same model before and after a request;
+they are not proof of which weights generated the response, and they cannot detect a model
+that changed and changed back between the two snapshots. The Ollama server log is not read.
+Reproducibility is per machine, Ollama version and model digest. `benchmark --llm` does not
+write this record; controlled comparisons use `compare`.
 
 ### Optimization rule
 

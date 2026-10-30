@@ -5,6 +5,8 @@ Prompts and source code are never logged; only status codes, durations and error
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -75,6 +77,10 @@ class OllamaClient:
         self.model = settings.model
         self._sleep = sleep
         self.last_metrics: LLMMetrics | None = None
+        # Hashes of the last /api/chat payload and reply text, for evaluation provenance
+        # (benchmark/evalrun.py). Neither the prompt nor the reply is logged or kept here.
+        self.last_request_sha256: str | None = None
+        self.last_response_sha256: str | None = None
         self._model_verified = False
         # trust_env=False: never route local inference through a system HTTP proxy.
         self._http = httpx.Client(
@@ -196,6 +202,10 @@ class OllamaClient:
             payload["format"] = format_schema
         started = time.monotonic()
         self.last_metrics = None
+        self.last_response_sha256 = None
+        self.last_request_sha256 = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
         response = self._request("POST", "/api/chat", json=payload)
         try:
             data = response.json()
@@ -204,6 +214,7 @@ class OllamaClient:
             raise OllamaError("malformed /api/chat response") from exc
         if not isinstance(content, str):
             raise OllamaError("malformed /api/chat response: content is not text")
+        self.last_response_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
         self.last_metrics = chat_metrics(data, time.monotonic() - started)
         log.info(
             "ollama chat ok model=%s done_reason=%s duration=%.1fs",
