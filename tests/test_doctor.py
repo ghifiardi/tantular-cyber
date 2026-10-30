@@ -184,3 +184,40 @@ def test_sample_command_copies_project_and_refuses_non_empty(
     assert main(["sample", "--dest", str(dest)]) == EXIT_OK
     assert (dest / "app.py").is_file() and "tantular-cyber scan" in capsys.readouterr().out
     assert main(["sample", "--dest", str(dest)]) != EXIT_OK
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://user:pass@127.0.0.1:11434", "http://tok3n@localhost:11434", "ftp://127.0.0.1:21"],
+)
+def test_invalid_or_credential_urls_are_rejected_not_contacted(url: str) -> None:
+    """Regression (PR #10 review #3): credentials are rejected, never sent or echoed."""
+    seen: list[str] = []
+    report = doctor(ollama=OllamaSettings(base_url=url), transport=ollama_transport(seen))
+    ollama = next(c for c in report.checks if c.id == "ollama")
+    assert seen == [] and report.network_requests == [] and ollama.status == "fail"
+    rendered = render_doctor(report) + report.model_dump_json()
+    for secret in ("user", "pass", "tok3n"):
+        assert secret not in rendered
+    assert next(c for c in report.checks if c.id == "privacy").status == "warn"
+
+
+def test_remote_endpoint_with_credentials_is_not_echoed() -> None:
+    report = doctor(ollama=OllamaSettings(base_url="http://admin:hunter2@192.0.2.10:11434/x?k=v"))
+    rendered = render_doctor(report) + report.model_dump_json()
+    assert "hunter2" not in rendered and "admin" not in rendered and "k=v" not in rendered
+
+
+def test_display_url_keeps_only_scheme_host_port() -> None:
+    from tantular_cyber.doctor import display_url
+
+    assert display_url("http://u:p@127.0.0.1:11434/api?x=1") == "http://127.0.0.1:11434"
+    assert display_url("http://[::1]:11434") == "http://[::1]:11434"
+    assert display_url("http://127.0.0.1:notaport") == "<invalid URL>"
+
+
+def test_doctor_wording_does_not_overclaim_local_inference() -> None:
+    report = doctor(check_ollama=False)
+    text = " ".join(next(c for c in report.checks if c.id == "privacy").details)
+    assert "Tantular Cyber wrote no files" in text and "~/.semgrep" in text
+    assert "does not by itself guarantee local inference" in text

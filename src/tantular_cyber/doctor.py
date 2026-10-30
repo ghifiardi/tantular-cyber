@@ -1,9 +1,11 @@
 """Read-only environment diagnostics for ``tantular-cyber doctor``.
 
-Doctor never downloads, pulls models, writes files or contacts anything except a
-**loopback** Ollama endpoint, and only with read-only requests (``GET /api/version``,
-``GET /api/tags``, ``POST /api/show``). A non-loopback endpoint is reported, not contacted.
-The only subprocess is ``semgrep --version`` with metrics and version checks disabled.
+Doctor never downloads, pulls models or writes files itself, and contacts nothing except a
+**loopback** Ollama endpoint, only with read-only requests (``GET /api/version``,
+``GET /api/tags``, ``POST /api/show``). Non-loopback or credential-bearing endpoint URLs are
+rejected (``validate_base_url``) and never contacted; URLs are displayed as scheme://host:port
+only. The only subprocess is ``semgrep --version`` with metrics and version checks disabled;
+Semgrep may maintain its own state (e.g. ``~/.semgrep``), which is outside doctor's control.
 
 Capabilities:
 * ``scan``: ``full`` (Semgrep + tantular-callgraph on a supported platform), ``partial``
@@ -30,7 +32,13 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import DEFAULT_MODEL, OllamaSettings, default_rules
-from .ollama_client import LOCAL_HOSTS, is_remote_model, model_matches
+from .ollama_client import (
+    OllamaError,
+    RemoteEndpointNotAllowed,
+    is_remote_model,
+    model_matches,
+    validate_base_url,
+)
 from .scanner import SemgrepScanner
 
 # Semgrep range exercised by CI (`pip install 'tantular-cyber[semgrep]'`) and local testing.
@@ -122,14 +130,6 @@ def total_memory_gb() -> float | None:
     except (AttributeError, OSError, ValueError):
         return None
     return round(pages * size / 1024**3, 1) if pages > 0 and size > 0 else None
-
-
-def is_loopback(url: str) -> bool:
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return False
-    return host in LOCAL_HOSTS
 
 
 def run_doctor(
@@ -235,14 +235,32 @@ def run_doctor(
     requests: list[str] = []
     installed: list[InstalledModel] = []
     ai: Literal["available", "model_missing", "unavailable", "not_checked"] = "not_checked"
+    shown = display_url(ollama.base_url)
+    endpoint: Literal["local", "remote", "invalid"] = "local"
+    try:
+        base = validate_base_url(ollama.base_url, allow_remote=False)
+    except RemoteEndpointNotAllowed:
+        endpoint = "remote"
+    except OllamaError as exc:
+        endpoint = "invalid"
+        invalid_reason = str(exc)
     if not check_ollama:
         checks.append(Check(id="ollama", status="skip", summary="not checked (--no-ollama)"))
-    elif not is_loopback(ollama.base_url):
+    elif endpoint == "invalid":
+        checks.append(
+            Check(
+                id="ollama",
+                status="fail",
+                summary=f"endpoint {shown} rejected — not contacted ({invalid_reason})",
+                action="use a URL like http://127.0.0.1:11434 (no credentials)",
+            )
+        )
+    elif endpoint == "remote":
         checks.append(
             Check(
                 id="ollama",
                 status="warn",
-                summary=f"endpoint {ollama.base_url} is not loopback — not contacted",
+                summary=f"endpoint {shown} is not loopback — not contacted",
                 details=[
                     "doctor only contacts loopback endpoints; scanning with --ai against a "
                     "remote endpoint sends redacted code excerpts off this machine"
@@ -250,24 +268,32 @@ def run_doctor(
             )
         )
     else:
-        ai, installed = _check_ollama(ollama, transport, checks, requests, memory)
+        ai, installed = _check_ollama(base, ollama, transport, checks, requests, memory)
 
     # Privacy ------------------------------------------------------------------------------------
     privacy = [
         "no telemetry: Semgrep runs with --metrics=off and --disable-version-check",
         "HTTP proxies are ignored for Ollama (trust_env=False); scanned code is never executed",
-        "doctor made no requests outside loopback and wrote no files",
+        "doctor made no requests outside loopback and Tantular Cyber wrote no files "
+        "(external tools such as Semgrep may keep their own state, e.g. ~/.semgrep)",
+        "a loopback endpoint does not by itself guarantee local inference: cloud models are "
+        "refused when Ollama marks them, but a local port forwarding elsewhere cannot be "
+        "detected (see docs/privacy.md)",
     ]
     if os.environ.get("TANTULAR_ALLOW_REMOTE_OLLAMA", "").lower() in {"1", "true", "yes", "on"}:
         privacy.append("TANTULAR_ALLOW_REMOTE_OLLAMA is set: --ai may send excerpts off-host")
     if any(k.startswith("SEMGREP_APP") for k in os.environ):
         privacy.append("SEMGREP_APP_* variables are present; they are stripped for scans")
-    local = is_loopback(ollama.base_url)
+    local = endpoint == "local"
     checks.append(
         Check(
             id="privacy",
             status="ok" if local else "warn",
-            summary="local-only" if local else "remote LLM endpoint configured",
+            summary={
+                "local": "local-only",
+                "remote": "remote LLM endpoint configured",
+                "invalid": "invalid LLM endpoint configured (rejected)",
+            }[endpoint],
             details=privacy,
         )
     )
@@ -293,21 +319,33 @@ def _v(version: tuple[int, int, int]) -> str:
     return ".".join(map(str, version))
 
 
+def display_url(url: str) -> str:
+    """scheme://host[:port] only — never userinfo, path or query (may carry credentials)."""
+    try:
+        parts = urlsplit(url.strip())
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<invalid URL>"
+    host = parts.hostname or "?"
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme or '?'}://{host}{port}"
+
+
 def _check_ollama(
+    base: str,
     settings: OllamaSettings,
     transport: httpx.BaseTransport | None,
     checks: list[Check],
     requests: list[str],
     memory_gb: float | None,
 ) -> tuple[Literal["available", "model_missing", "unavailable"], list[InstalledModel]]:
-    base = settings.base_url.rstrip("/")
     try:
         with httpx.Client(
             base_url=base, timeout=5.0, trust_env=False, transport=transport, follow_redirects=False
         ) as http:
-            requests.append(f"GET {base}/api/version")
+            requests.append(f"GET {display_url(base)}/api/version")
             version = http.get("/api/version").raise_for_status().json().get("version")
-            requests.append(f"GET {base}/api/tags")
+            requests.append(f"GET {display_url(base)}/api/tags")
             tags = http.get("/api/tags").raise_for_status().json().get("models") or []
             installed = [
                 InstalledModel(
@@ -324,7 +362,7 @@ def _check_ollama(
             capabilities: list[str] | None = None
             # Never /api/show a cloud model: Ollama forwards that request to the remote host.
             if match and not match.remote:
-                requests.append(f"POST {base}/api/show")
+                requests.append(f"POST {display_url(base)}/api/show")
                 show = http.post("/api/show", json={"model": match.name}).raise_for_status()
                 capabilities = show.json().get("capabilities")
     except (httpx.HTTPError, ValueError) as exc:
@@ -332,7 +370,8 @@ def _check_ollama(
             Check(
                 id="ollama",
                 status="info",
-                summary=f"not reachable at {base} ({type(exc).__name__}) — AI explanations "
+                summary=f"not reachable at {display_url(base)} ({type(exc).__name__}) — AI "
+                "explanations "
                 "unavailable; deterministic scans are unaffected",
                 action="optional: install Ollama from https://ollama.com and start it",
             )
@@ -343,7 +382,7 @@ def _check_ollama(
         Check(
             id="ollama",
             status="ok",
-            summary=f"Ollama {version} at {base}; {len(installed)} model(s) installed",
+            summary=f"Ollama {version} at {display_url(base)}; {len(installed)} model(s) installed",
             details=[
                 f"{m.name}: REMOTE (cloud-backed; runs off this machine)"
                 if m.remote
@@ -401,7 +440,8 @@ def _check_ollama(
 def render_doctor(report: DoctorReport) -> str:
     marks = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL", "info": "info", "skip": "skip"}
     out = [
-        f"tantular-cyber {report.tool_version} doctor (read-only: no downloads, no writes)",
+        f"tantular-cyber {report.tool_version} doctor (read-only: no downloads; "
+        "Tantular Cyber writes no files)",
         "",
     ]
     for c in report.checks:

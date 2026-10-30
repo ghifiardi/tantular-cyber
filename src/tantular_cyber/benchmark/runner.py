@@ -18,7 +18,7 @@ from typing import Any, Literal
 from ..analysis import LLMClient
 from ..config import OllamaSettings, ScanSettings
 from ..models import Finding, ScanReport
-from ..ollama_client import OllamaClient
+from ..ollama_client import OllamaClient, OllamaError, validate_base_url
 from ..pipeline import run_scan
 from ..reports import render_json, render_markdown
 from . import render
@@ -207,7 +207,9 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
 
     commit, dirty = code_state()
     model_meta = (
-        model_state(opts.ollama.base_url, opts.ollama.model) if opts.llm == "ollama" else {}
+        model_state(opts.ollama.base_url, opts.ollama.model)
+        if opts.llm == "ollama" and _endpoint_allowed(opts.ollama)
+        else {}
     )
     provenance = Provenance(
         started_at=started,
@@ -270,6 +272,14 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
     return result
 
 
+def _endpoint_allowed(settings: OllamaSettings) -> bool:
+    try:
+        validate_base_url(settings.base_url, allow_remote=settings.allow_remote)
+    except OllamaError:
+        return False
+    return True
+
+
 def _run_llm(
     opts: BenchmarkOptions, manifest: Manifest, cases_root: Path, tmp: Path
 ) -> tuple[LLMBench, PerfSummary | None, list[str]]:
@@ -308,9 +318,20 @@ def _run_llm(
     first_records: list[MatchRecord] = []
     first_findings: list[Finding] = []
 
+    # Verify the model (presence + cloud refusal) before ANY Ollama request: cold-start
+    # eviction and the concurrency experiment bypass run_scan's own health check.
+    model_ok = True
+    if opts.llm == "ollama":
+        try:
+            with OllamaClient(opts.ollama) as probe:
+                probe.ensure_model()
+        except OllamaError as exc:
+            model_ok = False
+            notes.append(f"model check failed ({exc}); cold start and concurrency skipped")
+
     for run in range(1, max(1, opts.llm_runs) + 1):
         kind: RunKind = "warm"
-        if opts.llm == "ollama" and opts.cold and run == 1:
+        if opts.llm == "ollama" and opts.cold and run == 1 and model_ok:
             if evict_model(opts.ollama.base_url, opts.ollama.model):
                 kind = "cold_after_eviction"
                 notes.append(COLD_NOTE)
@@ -371,7 +392,7 @@ def _run_llm(
     perf = None
     if opts.llm == "ollama":
         concurrency = []
-        if opts.concurrency and first_findings:
+        if opts.concurrency and first_findings and model_ok:
             notes.append(
                 "concurrency results are experimental; server-side parallelism "
                 "(e.g. OLLAMA_NUM_PARALLEL) is not observable from the client"

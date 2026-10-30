@@ -58,6 +58,12 @@ shasum -a 256 dist/*
 The hashes should match `SHA256SUMS`. Builds are pure Python; differences usually mean a
 different checkout (line endings, extra files) or different build tool versions.
 
+## Known limitations
+
+See [privacy.md › Residual risks](privacy.md#residual-risks): unpinned pip/Semgrep in smoke
+jobs, checksums vs attestation, same-runner reproducibility, SBOM hashes, and building only
+from clean checkouts.
+
 ## Updating locks
 
 ```bash

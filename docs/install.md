@@ -83,7 +83,9 @@ tantular-cyber doctor          # human-readable; add --json for machines
 
 `doctor` is read-only: it runs `semgrep --version`, may contact a **loopback** Ollama endpoint
 with read-only requests (`/api/version`, `/api/tags`, `/api/show`) and nothing else. It never
-downloads anything, pulls models, writes files or contacts remote hosts. Exit code 0 = full
+downloads anything, pulls models or contacts remote hosts, and Tantular Cyber writes no files
+(Semgrep may update its own state such as `~/.semgrep`). URLs containing credentials are
+rejected. Exit code 0 = full
 scan capability, 4 = partial, 3 = unavailable. Use `--no-ollama` to skip Ollama entirely.
 
 ## 4. Optional: local AI explanations (Ollama)

@@ -35,3 +35,10 @@
   excerpts off the machine. `doctor` and `compare` never call `/api/show` for such models,
   because Ollama forwards that request to the remote host.
 * Native Windows (and other unsupported platforms) can never produce a `complete` report.
+* `OllamaClient.chat` verifies the model (presence + cloud refusal) before its first request,
+  and `benchmark --llm ollama` checks the model before cold-start eviction and the
+  concurrency experiment (previously these could reach a cloud model).
+* `doctor` rejects credential-bearing Ollama URLs (never contacted) and displays endpoints as
+  scheme://host:port only.
+* Residual risks (loopback is not proof of local inference, release-engineering gaps) are
+  documented in docs/privacy.md.

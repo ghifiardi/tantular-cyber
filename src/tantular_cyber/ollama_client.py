@@ -75,6 +75,7 @@ class OllamaClient:
         self.model = settings.model
         self._sleep = sleep
         self.last_metrics: LLMMetrics | None = None
+        self._model_verified = False
         # trust_env=False: never route local inference through a system HTTP proxy.
         self._http = httpx.Client(
             base_url=self.base_url,
@@ -151,6 +152,7 @@ class OllamaClient:
                 "source excerpts would leave this machine. Use a local model, or pass "
                 "--allow-remote-ollama to accept that explicitly."
             )
+        self._model_verified = True
 
     def health_check(self) -> str | None:
         """Verify the server answers and the model exists; returns the server version."""
@@ -161,6 +163,10 @@ class OllamaClient:
     def chat(
         self, messages: list[dict[str, str]], format_schema: dict[str, Any] | None = None
     ) -> str:
+        # Every chat path (scan, benchmark, comparison) verifies the model first, so a cloud
+        # model is refused before any request could execute remotely.
+        if not self._model_verified:
+            self.ensure_model()
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
