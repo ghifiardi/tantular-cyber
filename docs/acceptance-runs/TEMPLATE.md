@@ -9,7 +9,20 @@ non-sample repository content before committing.
 * Checklist version: 1.0
 * Tester / reviewer (pseudonym is fine):
 * Started / finished (UTC):
-* Overall: ACCEPTED / NOT ACCEPTED (any FAIL, or any BLOCKED test in A, B, N or C)
+* Overall (one of, using the rules in the checklist's "Test classes and the acceptance
+  decision"):
+  * **ACCEPTED** — every mandatory and conditional test PASS, no FAIL anywhere;
+  * **CONDITIONALLY ACCEPTED** — every mandatory test PASS, no FAIL, one or more
+    conditional tests BLOCKED (list them under "Blocked conditional tests" below);
+  * **NOT ACCEPTED** — any mandatory test FAIL or BLOCKED, or any FAIL in any class.
+* Decision:
+* Section D (separate evaluation): BLOCKED (no authorized repository selected) / complete
+
+### Blocked conditional tests
+
+| ID | Missing prerequisite | Assurance not established |
+|---|---|---|
+| | | |
 
 ## Environment
 
@@ -39,44 +52,44 @@ Attestation (A3): wheel ___, sdist ___; workflow / ref / commit shown: ___
 
 ## Results
 
-Status is PASS, FAIL or BLOCKED (with the missing prerequisite).
+Status is PASS, FAIL, BLOCKED (with the missing prerequisite) or, for optional tests only, N/A (with the reason).
 
-| ID | Actual result (exact output or summary of it) | Exit code | Evidence location | Status |
-|---|---|---|---|---|
-| A1 | | | | |
-| A2 | | | | |
-| A3 | | | | |
-| A4 | | | | |
-| A5 | | | | |
-| A6 | | | | |
-| A7 | | | | |
-| A8 | | | | |
-| A9 | | | | |
-| A10 | | | | |
-| A11 | | | | |
-| B1 | | | | |
-| B2 | | | | |
-| B3 | | | | |
-| B4 | | | | |
-| B5 | | | | |
-| B6 | | | | |
-| B7 | | | | |
-| B8 | | | | |
-| B9 | | | | |
-| B10 | | | | |
-| B11 | | | | |
-| N1 | | | | |
-| N2 | | | | |
-| N3 | | | | |
-| N4 | | | | |
-| N5 | | | | |
-| C1 | | | | |
-| C2 | | | | |
-| D1 | | | | BLOCKED (no authorized repository selected) |
-| D2 | | | | BLOCKED |
-| D3 | | | | BLOCKED |
-| D4 | | | | BLOCKED |
-| D5 | | | | BLOCKED |
+| ID | Class | Actual result (exact output or summary of it) | Exit code | Evidence location | Status |
+|---|---|---|---|---|---|
+| A1 | mandatory | | | | |
+| A2 | mandatory | | | | |
+| A3 | mandatory | | | | |
+| A4 | mandatory | | | | |
+| A5 | mandatory | | | | |
+| A6 | mandatory | | | | |
+| A7 | mandatory | | | | |
+| A8 | mandatory | | | | |
+| A9 | mandatory | | | | |
+| A10 | mandatory | | | | |
+| A11 | mandatory | | | | |
+| B1 | mandatory | | | | |
+| B2 | mandatory | | | | |
+| B3 | mandatory | | | | |
+| B4 | conditional | | | | |
+| B5 | mandatory | | | | |
+| B6 | mandatory | | | | |
+| B7 | mandatory | | | | |
+| B8 | mandatory | | | | |
+| B9 | conditional | | | | |
+| B10 | mandatory | | | | |
+| B11 | mandatory | | | | |
+| N1 | mandatory | | | | |
+| N2 | conditional | | | | |
+| N3 | conditional | | | | |
+| N4 | conditional | | | | |
+| N5 | optional | | | | |
+| C1 | mandatory | | | | |
+| C2 | mandatory | | | | |
+| D1 | separate | | | | BLOCKED (no authorized repository selected) |
+| D2 | separate | | | | BLOCKED |
+| D3 | separate | | | | BLOCKED |
+| D4 | separate | | | | BLOCKED |
+| D5 | separate | | | | BLOCKED |
 
 ## Network observations (section N)
 

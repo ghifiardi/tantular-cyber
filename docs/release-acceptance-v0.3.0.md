@@ -15,19 +15,46 @@ two tracks must not be combined.
 * Every test in a run record gets **actual result**, **evidence location** and a status:
   * **PASS** — every condition under "Expected" was observed, and the evidence is retained.
   * **FAIL** — the test ran and at least one expected condition was not observed.
-  * **BLOCKED** — a prerequisite was not available (for example no Linux host for N2, or no
-    authorized repository for section D). Say what is missing. A BLOCKED test is not a pass.
+  * **BLOCKED** — a prerequisite was not available (for example no Linux host for N3, or no
+    authorized repository for section D). Say what is missing. A BLOCKED test is never
+    counted as a pass.
+  * **N/A** — allowed **only** for optional tests that do not apply to the platform (N5 on
+    Linux). Say why.
 * Do not assume success: a test passes only on what was observed during that run. Copy
   output exactly; do not paraphrase it into the expected wording.
+
+### Test classes and the acceptance decision
+
+| Class | Tests | Prerequisite | If not PASS |
+|---|---|---|---|
+| **Mandatory** | A1–A11, B1, B2, B3, B5, B6, B7, B8, B10, B11, N1, C1, C2 | none beyond section A's | FAIL or BLOCKED → **NOT ACCEPTED** |
+| **Conditional** | B4 | a cloud model listed by `ollama list`, and the Ollama server request log | BLOCKED → at most **CONDITIONALLY ACCEPTED** |
+| **Conditional** | B9, N2 | Ollama running with `ghifidanukusumo/tantular:latest` already pulled | BLOCKED → at most **CONDITIONALLY ACCEPTED** |
+| **Conditional** | N3, N4 (N4 also needs the model) | a Linux host with `strace` | BLOCKED → at most **CONDITIONALLY ACCEPTED**; network assurance is **not established** |
+| **Optional** | N5 | macOS | N/A or BLOCKED has no effect; FAIL → **NOT ACCEPTED** |
+| **Separate evaluation** | D1–D5 | an authorized repository and a reviewer | reported on its own; does not change the release decision |
+
+The run record's overall decision is exactly one of:
+
+* **ACCEPTED** — every mandatory and conditional test is PASS, and no test is FAIL.
+* **CONDITIONALLY ACCEPTED** — every mandatory test is PASS, no test is FAIL, and one or
+  more conditional tests are BLOCKED. The record lists each blocked test and the assurance
+  it leaves unestablished (for example "N3/N4 BLOCKED: no process-tree evidence that
+  Semgrep makes no connection attempts").
+* **NOT ACCEPTED** — any mandatory test is FAIL or BLOCKED, or any test of any class
+  (including optional and section D) is FAIL.
+
+Section D gets its own line in the run record (BLOCKED, or complete with counts). A FAIL in
+D (for example the repository was modified, or reports landed inside it) still makes the
+run NOT ACCEPTED, because it is a product failure; a D finding classified as a false
+positive is a detection-quality result, not a FAIL.
 * Run everything from the downloaded release, **not** from a source checkout, unless a test
   says otherwise. Use a fresh working directory, referred to below as `$ACC`.
 * Evidence goes in `$ACC/evidence/<test-id>/` (terminal output, report files, logs). Before
   any evidence is committed, redact local absolute paths (replace with `$ACC`), user names,
   hostnames and anything from a scanned repository other than the sample (section D).
-* A run is **accepted** when every test in sections A, B, N and C is PASS, and no test is
-  FAIL. Tests that are BLOCKED must be listed with a reason; section D may be BLOCKED until
-  an authorized repository is chosen. Any FAIL is reported as an issue; release code and
-  v0.3.0 assets are not changed as part of this checklist.
+* Any FAIL is reported as an issue; release code and v0.3.0 assets are not changed as part
+  of this checklist.
 
 ### Environment to record in every run
 
@@ -69,17 +96,18 @@ the user (`brew install semgrep` or `pipx install semgrep`).
 
 ## B. Failure handling and trust boundaries
 
-Prerequisites: section A passed. B5/B6/B9 need Ollama running locally and the model
+Prerequisites: section A passed. B9 needs Ollama running locally and the model
 `ghifidanukusumo/tantular:latest` already pulled (the tester decides whether to pull it;
 otherwise BLOCKED). B4 needs a cloud model listed by `ollama list` (for example
-`qwen3.5:cloud`); otherwise BLOCKED.
+`qwen3.5:cloud`) and access to the Ollama server's request log; otherwise BLOCKED. B3, B5
+and B6 need no running Ollama.
 
 | ID | Procedure | Expected |
 |---|---|---|
 | B1 | `$TC scan --repo "$ACC/sample" --output "$ACC/reports/b1" --semgrep-bin /nonexistent` | `WARNING: scan DEGRADED`, `status: degraded`, `coverage: PARTIAL (scanners succeeded: tantular-callgraph)`, a reason listed. Call-graph findings still reported. Exit 4. Never `complete`. |
 | B2 | `$TC doctor --semgrep-bin /nonexistent --no-ollama` | `[FAIL] semgrep: '/nonexistent' not found — scans run tantular-callgraph only (PARTIAL)` with install guidance naming LGPL-2.1 and "not bundled"; `scan capability: PARTIAL — reports will be marked degraded`. Exit 4. |
 | B3 | Ollama unavailable: `$TC scan --repo "$ACC/sample" --output "$ACC/reports/b3" --ai --ollama-url http://127.0.0.1:9 --model x` (port 9 has no listener). Optionally repeat with the real Ollama stopped. | `status: degraded`, `coverage: full`, `ai explanations: requested`, reason "LLM explanation unavailable…", `findings: 2 {'CWE-89': 2}`, analyses `skipped`. Exit 4. |
-| B4 | Cloud model refused: `$TC scan --repo "$ACC/sample" --output "$ACC/reports/b4" --ai --model qwen3.5:cloud`, run under the N2 or N3 instrumentation | Exit 4, `status: degraded`, findings unchanged. `report.json` `errors` contains "runs on a remote host … source excerpts would leave this machine". Instrumentation shows connections **only** to `127.0.0.1:11434` and no `/api/chat` or `/api/show` request for the cloud model (Ollama server log, if available, confirms only `/api/version` and `/api/tags`). |
+| B4 | Cloud model refused (procedure below): `$TC scan --repo "$ACC/sample" --output "$ACC/reports/b4" --ai --model qwen3.5:cloud` under the N1 audit hook, with the Ollama request log captured | Exit 4, `status: degraded`, findings unchanged. `report.json` `errors` contains "runs on a remote host … source excerpts would leave this machine". Audit log: connections only to `127.0.0.1:11434`. **Request log (required HTTP-level evidence):** only `GET "/api/version"` and `GET "/api/tags"` during the scan; no `POST "/api/chat"` and no `POST "/api/show"`. Socket destinations alone cannot show which HTTP requests were sent, so without the request log B4 is BLOCKED, not PASS. |
 | B5 | `$TC doctor --ollama-url http://user:pass@127.0.0.1:11434` | Ollama line `[FAIL] … rejected — not contacted (credentials in the Ollama base URL are not supported)`. Neither `user` nor `pass` appears anywhere in the output. `network requests: none`. Exit reflects scan capability only (0 when Semgrep is present). |
 | B6 | `$TC scan --repo "$ACC/sample" --output "$ACC/reports/b6" --ai --ollama-url http://user:pass@127.0.0.1:11434`, under the N1 audit hook | `status: degraded`, reason `LLM explanation unavailable: invalid or disallowed Ollama endpoint`, findings unchanged, exit 4. `report.json` `llm.endpoint` shows `[REDACTED:credentials]`; `grep -E 'user:\|pass@' "$ACC/reports/b6"/report.*` finds nothing. The audit log shows no connection attempt. |
 | B7 | `$TC scan --repo "$ACC/sample" --output "$ACC/sample/out"` | `error: output directory is inside the analyzed repository…`. Exit 2. `$ACC/sample/out` not created. |
@@ -87,6 +115,24 @@ otherwise BLOCKED). B4 needs a cloud model listed by `ollama list` (for example
 | B9 | AI is advisory: `$TC scan --repo "$ACC/sample" --output "$ACC/reports/b9" --ai --model ghifidanukusumo/tantular:latest`, then compare findings with A9 ignoring `analysis` (snippet below) | Findings identical to A9 apart from `analysis`; every finding still `status: unverified`; report `status` decided by scanners/LLM availability only. Explanations in Bahasa Indonesia. |
 | B10 | `$TC scan … --ai --no-llm` | Rejected as contradictory input. Exit 2. |
 | B11 | Offline operability: disconnect all networks (Wi-Fi off, cable out), repeat A9 into `$ACC/reports/b11` | Same result as A9, exit 0. **This shows offline operation only; it does not show that no connection was attempted** (that is section N). |
+
+Request log for B4. Ollama writes one `[GIN]` line per HTTP request with method and path:
+on macOS to `~/.ollama/logs/server.log`, on Linux to the service journal
+(`journalctl -u ollama`) or the terminal running `ollama serve`. The log does not say which
+client sent a request, so stop every other Ollama client (editors, other agents, other
+terminals) first; if another client may have been active during the window, B4 is BLOCKED.
+
+```bash
+mkdir -p "$ACC/evidence/B4"
+LOG=~/.ollama/logs/server.log
+START=$(wc -l < "$LOG")
+"$ACC/venv/bin/python" -I "$ACC/netaudit.py" "$ACC/evidence/B4/net.log" \
+    scan --repo "$ACC/sample" --output "$ACC/reports/b4" --ai --model qwen3.5:cloud
+tail -n +"$((START + 1))" "$LOG" | grep '\[GIN\]' > "$ACC/evidence/B4/requests.log"
+cat "$ACC/evidence/B4/requests.log"
+```
+
+(`netaudit.py` is created in section N; create it before running B4.)
 
 Findings comparison for B9 (run with the venv Python, `-I`):
 
@@ -124,10 +170,14 @@ Pass criteria for every N test:
 | N5 | **macOS (weaker, optional):** `sudo fs_usage -w -f network` or `nettop -p <pid>` while running A9 and B9 | Same destinations as N1/N2. Record that this evidence is observational and may miss short-lived attempts. |
 
 N3/N4 are the strongest evidence because they cover every process, including Semgrep. If
-no Linux host is available, mark N3/N4 **BLOCKED**; N1/N2 alone do not satisfy them.
+no Linux host is available, mark N3/N4 **BLOCKED** (the run is then at most CONDITIONALLY
+ACCEPTED); N1/N2 alone do not satisfy them.
 
 Audit-hook wrapper for N1/N2. It records Python-level socket events, including attempts
-that fail, but **does not cover the Semgrep child process** (a separate executable):
+that fail, but **does not cover the Semgrep child process** (a separate executable): it
+sees neither Semgrep's connection attempts nor its DNS lookups. Socket events also do not
+show which HTTP requests were sent (see B4). A clean N1 therefore establishes only that the
+Tantular Cyber Python process made no attempt.
 
 ```bash
 cat > "$ACC/netaudit.py" <<'EOF'
