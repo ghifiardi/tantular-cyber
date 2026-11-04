@@ -1,0 +1,221 @@
+{
+  "protocol_version": "exp8-replication-draft-0.1",
+  "frozen": false,
+  "synthetic": false,
+  "description": "DRAFT for review (2026-11-04). Behavioural replication of the post's Experiment 8 MATH-500 result for the published 50-pass edit (p50c), from public artifacts. Not approved, not frozen, nothing executed. See docs/wsp/exp8-replication-protocol.md.",
+  "claim_scope": "qualified replication of the published p50c checkpoint's MATH-500 behaviour (decided 2026-11-04); NOT an independent reproduction of the controller's discovery of the edit",
+  "claim_wording": "Replication of the published p50c checkpoint's MATH-500 behaviour under the authors' released evaluation settings, using the multimodal Qwen3.5-0.8B release in place of the authors' unreleased text-only export, on a different engine version and hardware. This is not a reproduction of the edit's discovery.",
+  "decisions": [
+    {
+      "id": "D1-scope",
+      "date": "2026-11-04",
+      "decided_by": "research-owner",
+      "decision": "Proceed with the qualified MATH-500 replication on the published multimodal checkpoints, with the claim_wording above. Other benchmarks (GSM8K, IFEval, ...) get separate protocols.",
+      "does_not_authorize": [
+        "downloads of checkpoints or datasets",
+        "model runs",
+        "freezing the protocol",
+        "completing the license review"
+      ],
+      "conditions": [
+        "Choose the engine and versions, hardware, MATH-500 revision and grading implementation BEFORE approving drift bounds and the agreement criterion.",
+        "Approve drift bounds, the agreement criterion and min_meaningful_effect BEFORE collecting confirmatory results.",
+        "The required_limitations stay in every report."
+      ]
+    }
+  ],
+  "status_notes": {
+    "frozen": false,
+    "license_review": "pending (human)",
+    "downloads_authorized": false,
+    "runs_authorized": false
+  },
+  "sources": {
+    "logs": "RikiyaT/lm_understand-logs@4d09ba6d6a7e891dd8063974dfe81b3d78e3494f",
+    "ledger": "docs/wsp/ledger/exp8-source-pins-2026-11-03.json"
+  },
+  "sampling_mode": "n_per_request",
+  "samples_per_item": 4,
+  "seeds": [
+    0
+  ],
+  "dataset": {
+    "name": "HuggingFaceH4/MATH-500",
+    "split": "test",
+    "revision": "REPLACE (authors loaded it without a revision)",
+    "n_items": 500,
+    "item_id": "unique_id",
+    "content_hash": "REPLACE",
+    "access": "REPLACE (approved download into research storage)"
+  },
+  "grader": {
+    "id": "exp8-mathqa-math-verify",
+    "revision": "REPLACE (adapter of exp8_math/code/mathqa.py, git blob 808a04776906b1cf4630d397cef54f03d8795477, not yet reviewed)",
+    "dependencies": {
+      "math-verify": "0.9.0",
+      "latex2sympy2_extended": "1.11.0",
+      "antlr4-python3-runtime": "4.13.2",
+      "sympy": "REPLACE (from the authors' venv, version not stated)"
+    },
+    "rule": "last \\boxed{} (or \\fbox{}) of the response after cutting a stray reasoning block; no box = incorrect; math-verify verify(parse(gold), parse(pred)) with 5 s timeouts on the main thread"
+  },
+  "arms": [
+    {
+      "id": "base",
+      "role": "reference",
+      "checkpoint": {
+        "repo": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+        "weights_file": "model.safetensors-00001-of-00001.safetensors",
+        "weights_sha256_lfs": "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696",
+        "format": "multimodal release (Qwen3.5 image-text); text prompts only",
+        "verification": "recompute file SHA-256 after an approved download; check layers 15/19 down_proj base tensor hashes against the authors' manifest"
+      },
+      "inference": {
+        "chat_template": "repo chat_template.jinja (git blob 0ef09f214eaa6d9bca297988afc1454b5827b2c7)",
+        "enable_thinking": true,
+        "user_message": "<problem>\\nPlease reason step by step, and put your final answer within \\boxed{}.",
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_tokens": 32768
+      },
+      "engine": {
+        "name": "vllm",
+        "version": "REPLACE (original version not identified; third-party re-run used 0.33.0)",
+        "dtype": "bfloat16",
+        "max_model_len": 34816,
+        "llm_seed": 0,
+        "gpu_memory_utilization": "REPLACE (authors default 0.85, capped by a shared-pool file)",
+        "batching": "one LLM.generate call per shard with all prompts of the shard",
+        "sharding": "problems rows[i::10] for i in 0..9 (authors' MATH-500 jobs math500_s<i>of10)",
+        "transformers_version": "REPLACE",
+        "hardware": "REPLACE",
+        "tensor_parallel_size": "REPLACE"
+      }
+    },
+    {
+      "id": "edited",
+      "role": "candidate",
+      "checkpoint": {
+        "repo": "RikiyaT/Qwen3.5-0.8B-weight-space-programming",
+        "revision": "d1671a178705bcab7644806d23c535517f35723b",
+        "weights_file": "model.safetensors-00001-of-00001.safetensors",
+        "weights_sha256_lfs": "fd1e42acdd118ac1b300d37500fd2885e75f5a09de3a33010d802bf7f737b553",
+        "format": "multimodal release (Qwen3.5 image-text); text prompts only",
+        "verification": "wsp.py verify-edit against exp8_math/runs/p50c/edit/manifest.json: exactly 2 changed tensors with the published hashes; record any other header/tensor difference"
+      },
+      "inference": {
+        "chat_template": "repo chat_template.jinja (git blob 0ef09f214eaa6d9bca297988afc1454b5827b2c7)",
+        "enable_thinking": true,
+        "user_message": "<problem>\\nPlease reason step by step, and put your final answer within \\boxed{}.",
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_tokens": 32768
+      },
+      "engine": {
+        "name": "vllm",
+        "version": "REPLACE (original version not identified; third-party re-run used 0.33.0)",
+        "dtype": "bfloat16",
+        "max_model_len": 34816,
+        "llm_seed": 0,
+        "gpu_memory_utilization": "REPLACE (authors default 0.85, capped by a shared-pool file)",
+        "batching": "one LLM.generate call per shard with all prompts of the shard",
+        "sharding": "problems rows[i::10] for i in 0..9 (authors' MATH-500 jobs math500_s<i>of10)",
+        "transformers_version": "REPLACE",
+        "hardware": "REPLACE",
+        "tensor_parallel_size": "REPLACE"
+      }
+    },
+    {
+      "id": "base_reload",
+      "role": "no_edit_reload",
+      "checkpoint": {
+        "repo": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+        "weights_file": "model.safetensors-00001-of-00001.safetensors",
+        "weights_sha256_lfs": "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696",
+        "format": "multimodal release (Qwen3.5 image-text); text prompts only",
+        "verification": "recompute file SHA-256 after an approved download; check layers 15/19 down_proj base tensor hashes against the authors' manifest"
+      },
+      "inference": {
+        "chat_template": "repo chat_template.jinja (git blob 0ef09f214eaa6d9bca297988afc1454b5827b2c7)",
+        "enable_thinking": true,
+        "user_message": "<problem>\\nPlease reason step by step, and put your final answer within \\boxed{}.",
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_tokens": 32768
+      },
+      "engine": {
+        "name": "vllm",
+        "version": "REPLACE (original version not identified; third-party re-run used 0.33.0)",
+        "dtype": "bfloat16",
+        "max_model_len": 34816,
+        "llm_seed": 0,
+        "gpu_memory_utilization": "REPLACE (authors default 0.85, capped by a shared-pool file)",
+        "batching": "one LLM.generate call per shard with all prompts of the shard",
+        "sharding": "problems rows[i::10] for i in 0..9 (authors' MATH-500 jobs math500_s<i>of10)",
+        "transformers_version": "REPLACE",
+        "hardware": "REPLACE",
+        "tensor_parallel_size": "REPLACE"
+      }
+    }
+  ],
+  "proposed_arms": [
+    {
+      "id": "text_only_reconstruction",
+      "role": "alternative",
+      "status": "proposed; pending budget and a separate protocol decision (not part of this protocol's runs)",
+      "description": "Text-only checkpoint reconstructed by Tantular from the release: the model.language_model.* tensors of Qwen/Qwen3.5-0.8B@2fc06364 (and the p50c edit for an edited counterpart) with the export config.json published in the logs (git blob f1b52bb0503dae9c6e89f65853a767f0bc72e153). Purpose: bound the effect of the model class and loading path on identical weights. It is a Tantular reconstruction, not the authors' export, and cannot remove the untouched-weights limitation.",
+      "cost": "roughly one additional arm of MATH-500 generation per reconstructed checkpoint; not budgeted"
+    }
+  ],
+  "analysis": {
+    "primary_endpoint": "accuracy",
+    "reference_arm": "base",
+    "candidate_arm": "edited",
+    "missing_policy": "count_as_incorrect",
+    "missing_policy_note": "proposed: matches the authors' score (truncated or unboxed answers are incorrect). Harness errors are additionally reported per arm; the authors' evaluate.py aborted a job on abnormal finishes instead.",
+    "min_meaningful_effect": null,
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 20261109,
+    "secondary_endpoints": [
+      "token-limit rate (finish_reason == 'length'; truncation proxy, not proof of looping)",
+      "mean output tokens",
+      "error rate"
+    ],
+    "reference_values_not_targets": {
+      "post_base_math500": 0.079,
+      "post_edited_math500": 0.481,
+      "post_base_cut_share": 0.93,
+      "post_edited_cut_share": 0.331,
+      "third_party_rerun_edited_math500": 0.51,
+      "third_party_rerun_edited_cut_share": 0.316
+    },
+    "agreement_with_published": "REPLACE (criterion against the post's 7.9% -> 48.1% and 93.0% -> 33.1%; to be approved after engine/hardware/dataset/grader are chosen and before confirmatory results)",
+    "required_limitations": [
+      "The comparison of the published base and edited checkpoints verifies what changed within those files; it cannot establish that the authors' unreleased text-only export had identical untouched weights.",
+      "The published multimodal release (Qwen3_5ForConditionalGeneration) was evaluated in place of the authors' text-only export (Qwen3_5ForCausalLM); the export's tokenizer.json and generation_config.json handling are not reproduced exactly.",
+      "The edited checkpoint is a third-party rebuild (copied from ML-Intern-lab); its identity is established only by the tensor checks recorded for this run.",
+      "Engine and library versions and hardware differ from (or are unknown for) the authors' run; only statistical, not output-level, replication is attempted.",
+      "Not a reproduction of the controller's discovery of the edit; the agent harness is not released."
+    ]
+  },
+  "drift": {
+    "tolerance": {
+      "status": "unapproved",
+      "max_abs_accuracy_diff": null,
+      "max_abs_token_limit_rate_diff": null,
+      "max_abs_error_rate_diff": null,
+      "approved_by": null,
+      "approved_at": null
+    },
+    "pilot": "REPLACE (whether a non-confirmatory pilot on non-MATH-500 items is used to estimate reload variability before bounds are set)"
+  },
+  "license_review": "pending (human)"
+}

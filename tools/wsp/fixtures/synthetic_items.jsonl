@@ -1,0 +1,8 @@
+{"id": "syn-dev-001", "split": "development", "prompt": "Synthetic fixture: compute 2 + 3.", "answer": "5"}
+{"id": "syn-dev-002", "split": "development", "prompt": "Synthetic fixture: compute 7 * 6.", "answer": "42"}
+{"id": "syn-dev-003", "split": "development", "prompt": "Synthetic fixture: compute 10 - 4.", "answer": "6"}
+{"id": "syn-dev-004", "split": "development", "prompt": "Synthetic fixture: compute 9 / 3.", "answer": "3"}
+{"id": "syn-dev-005", "split": "development", "prompt": "Synthetic fixture: compute 2 ^ 5.", "answer": "32"}
+{"id": "syn-dev-006", "split": "development", "prompt": "Synthetic fixture: compute 11 + 12.", "answer": "23"}
+{"id": "syn-hold-001", "split": "heldout", "prompt": "Synthetic fixture: compute 8 + 8.", "answer": "16"}
+{"id": "syn-hold-002", "split": "heldout", "prompt": "Synthetic fixture: compute 5 * 5.", "answer": "25"}

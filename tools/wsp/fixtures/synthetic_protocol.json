@@ -1,0 +1,105 @@
+{
+  "protocol_version": "synthetic-0.1",
+  "frozen": false,
+  "synthetic": true,
+  "description": "Synthetic harness fixture. Not a model, not a benchmark, not a measurement.",
+  "sampling_mode": "per_sample_seed",
+  "samples_per_item": 2,
+  "seeds": [
+    11,
+    12
+  ],
+  "dataset": {
+    "name": "wsp-synthetic-arithmetic",
+    "revision": "fixture-1",
+    "split_policy": "development items only for smoke runs"
+  },
+  "grader": {
+    "id": "wsp-synthetic-final-answer",
+    "revision": "1"
+  },
+  "arms": [
+    {
+      "id": "reference",
+      "role": "reference",
+      "checkpoint": {
+        "name": "synthetic-base",
+        "revision": null
+      },
+      "inference": {
+        "thinking": true,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_new_tokens": 64
+      },
+      "engine": {
+        "name": "synthetic",
+        "version": "fixture-1",
+        "batching": "one request per sample"
+      }
+    },
+    {
+      "id": "candidate",
+      "role": "candidate",
+      "checkpoint": {
+        "name": "synthetic-edited",
+        "revision": null
+      },
+      "inference": {
+        "thinking": true,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_new_tokens": 64
+      },
+      "engine": {
+        "name": "synthetic",
+        "version": "fixture-1",
+        "batching": "one request per sample"
+      }
+    },
+    {
+      "id": "reload",
+      "role": "no_edit_reload",
+      "checkpoint": {
+        "name": "synthetic-base",
+        "revision": null
+      },
+      "inference": {
+        "thinking": true,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_new_tokens": 64
+      },
+      "engine": {
+        "name": "synthetic",
+        "version": "fixture-1",
+        "batching": "one request per sample"
+      }
+    }
+  ],
+  "analysis": {
+    "primary_endpoint": "accuracy",
+    "reference_arm": "reference",
+    "candidate_arm": "candidate",
+    "missing_policy": "count_as_incorrect",
+    "min_meaningful_effect": 0.1,
+    "bootstrap_resamples": 2000,
+    "bootstrap_seed": 20261109
+  },
+  "drift": {
+    "tolerance": {
+      "status": "unapproved",
+      "max_abs_accuracy_diff": null,
+      "max_abs_token_limit_rate_diff": null,
+      "max_abs_error_rate_diff": null,
+      "approved_by": null,
+      "approved_at": null
+    }
+  }
+}
