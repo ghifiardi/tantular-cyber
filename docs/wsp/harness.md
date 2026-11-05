@@ -33,7 +33,7 @@ real graders, prompts, dataset adapters and inference adapters.
 | `docs/wsp/exp8-replication-protocol.md`, `docs/wsp/protocols/exp8-replication-draft.json` | Draft Experiment 8 replication protocol (unfrozen; drift tolerance and minimum effect unset) |
 | `docs/wsp/ledger/` | Ledger records. `exp8-source-pins-2026-11-03.json`: public-metadata pins for Experiment A (status `planned`) |
 | `docs/wsp/run-readiness.md` | Decisions, infrastructure and harness work required before a real run |
-| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py` | 67 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
+| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py` | 72 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
 
 ```bash
 .venv/bin/python tools/wsp/wsp.py smoke --output ~/wsp-research/runs/smoke-$(date +%s)
@@ -140,6 +140,15 @@ unfrozen protocols, with a descriptive-only verdict.
   at once and sends one request per (item, arm). The authors batched shards and a GPU cannot
   hold three vLLM instances at 0.85 memory utilization. See
   [run-readiness.md](run-readiness.md) C4.
+
+2026-11-04, post-merge (PR #23 Codex review, P2): `parse_protocol` now requires
+`analysis.missing_policy` to be `exclude_item` or `count_as_incorrect`, frozen or not.
+Previously a protocol with a missing or misspelled policy was accepted, the run completed,
+and only `analyze()` failed, leaving a frozen run unanalyzable. One validator
+(`protocol.missing_policy`) is now used by `parse_protocol`, `analyze()` and the drift report.
+Each raises `ProtocolError` for a missing or unknown policy, even if the analysis plan was
+altered after parsing. Previously drift raised `KeyError` for a missing policy and silently
+treated an unknown one as `count_as_incorrect`.
 
 ## Readiness (unchanged from the package)
 

@@ -40,7 +40,7 @@ from statistics import mean
 from typing import Any
 
 from .analysis import percentile_bootstrap, preregistration
-from .protocol import TOLERANCE_METRICS, Protocol
+from .protocol import TOLERANCE_METRICS, Protocol, missing_policy
 
 PAIR_CATEGORIES = (
     "identical_output",
@@ -172,7 +172,7 @@ def reproducibility_report(
 ) -> dict[str, Any]:
     _check_unique(records, (reference, reload))
     analysis = protocol.analysis
-    missing_policy = analysis.get("missing_policy", "exclude_item")
+    policy = missing_policy(analysis)  # same check as parse_protocol and analyze()
     resamples = int(analysis["bootstrap_resamples"])
     seed = int(analysis["bootstrap_seed"])
 
@@ -232,8 +232,8 @@ def reproducibility_report(
             if not ra or not rb or item in unbalanced:
                 excluded.append(item)
                 continue
-            va, ma = _item_rates(ra, key, missing_policy)
-            vb, mb = _item_rates(rb, key, missing_policy)
+            va, ma = _item_rates(ra, key, policy)
+            vb, mb = _item_rates(rb, key, policy)
             if va is None or vb is None:
                 excluded.append(item)
                 continue
@@ -260,7 +260,7 @@ def reproducibility_report(
         "errors_by_arm": {arm: dict(sorted(e.items())) for arm, e in errors.items()},
         "items_unbalanced": unbalanced,
         "metrics": metrics,
-        "missing_policy": missing_policy,
+        "missing_policy": policy,
         "bootstrap_resamples": resamples,
         "bootstrap_seed": seed,
     }

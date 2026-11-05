@@ -37,6 +37,7 @@ ARM_ROLES = ("reference", "candidate", "no_edit_reload", "alternative")
 REPLICATION_ROLES = ("reference", "candidate", "no_edit_reload")
 SPLITS = ("development", "heldout")
 SAMPLING_MODES = ("per_sample_seed", "n_per_request")
+MISSING_POLICIES = ("exclude_item", "count_as_incorrect")
 TOLERANCE_METRICS = (
     "max_abs_accuracy_diff",
     "max_abs_token_limit_rate_diff",
@@ -49,6 +50,16 @@ _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z$")
 
 class ProtocolError(ValueError):
     pass
+
+
+def missing_policy(analysis: dict[str, Any]) -> str:
+    """The protocol's missing-outcome policy, or ProtocolError (a ValueError) if it is missing
+    or unknown. parse_protocol, analyze() and the drift report all go through this check, so
+    a plan that cannot be executed is rejected the same way everywhere."""
+    policy = analysis.get("missing_policy") if isinstance(analysis, dict) else None
+    if policy not in MISSING_POLICIES:
+        raise ProtocolError(f"analysis.missing_policy must be one of {MISSING_POLICIES}")
+    return policy
 
 
 @dataclass(frozen=True)
@@ -162,6 +173,9 @@ def parse_protocol(raw: dict[str, Any]) -> Protocol:
 
     for key in ("reference_arm", "candidate_arm", "primary_endpoint"):
         _require(analysis, key, str)
+    # Validated here, before any run: a run under a protocol whose analysis plan cannot be
+    # executed would be unanalyzable, and fixing the plan afterwards changes the protocol hash.
+    missing_policy(analysis)
     for key in ("bootstrap_resamples", "bootstrap_seed"):
         _require(analysis, key, int)
     if "min_meaningful_effect" not in analysis:
