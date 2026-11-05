@@ -141,6 +141,12 @@ unfrozen protocols, with a descriptive-only verdict.
   hold three vLLM instances at 0.85 memory utilization. See
   [run-readiness.md](run-readiness.md) C4.
 
+2026-11-05: `verify_edit` reports now include `manifest_sha256`, the canonical-JSON SHA-256 of
+the manifest they were checked against. `wsp.py verify-edit` also adds `manifest_file_sha256`
+(the raw file bytes). A consumer can then confirm that a `verified` report refers to the edit
+manifest it registered, rather than to another manifest for the same two files. This is a
+provenance link, not authentication of who ran the check.
+
 ## Readiness (unchanged from the package)
 
 None of the Week 1 readiness items is complete. Roles, budgets, isolation, source and model

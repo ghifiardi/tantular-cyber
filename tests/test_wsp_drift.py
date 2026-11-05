@@ -21,6 +21,7 @@ from wsp_eval.dataset import load_items  # noqa: E402
 from wsp_eval.drift import drift_report  # noqa: E402
 from wsp_eval.generation import Generation, SyntheticGenerator  # noqa: E402
 from wsp_eval.grading import FinalAnswerGrader  # noqa: E402
+from wsp_eval.hashing import sha256_json  # noqa: E402
 from wsp_eval.protocol import ProtocolError, load_protocol, parse_protocol  # noqa: E402
 from wsp_eval.runner import run_paired  # noqa: E402
 from wsp_eval.synthetic import synthetic_generators  # noqa: E402
@@ -254,12 +255,16 @@ def test_verify_edit_against_a_published_style_manifest(tmp_path) -> None:
     }
     report = verify_edit(diff_checkpoints(base, cand), manifest)
     assert report["status"] == "verified", report["problems"]
+    # The report names the manifest it was checked against (canonical JSON SHA-256).
+    assert report["manifest_sha256"] == sha256_json(manifest)
 
     wrong = copy.deepcopy(manifest)
     wrong["tensors"][0]["edited_sha256"] = "0" * 64
     wrong["tensors"][0]["changed_entries"] = 3
-    problems = " | ".join(verify_edit(diff_checkpoints(base, cand), wrong)["problems"])
+    wrong_report = verify_edit(diff_checkpoints(base, cand), wrong)
+    problems = " | ".join(wrong_report["problems"])
     assert "edited tensor hash" in problems and "changed entries" in problems
+    assert wrong_report["manifest_sha256"] != report["manifest_sha256"]
 
     extra = copy.deepcopy(manifest)
     extra["tensors"].append(dict(manifest["tensors"][0], name="b"))
@@ -347,3 +352,30 @@ def test_every_analysis_report_carries_the_required_limitations(tmp_path, raw, i
 
     report = analyze(res.records, proto.analysis, synthetic=True)
     assert report["limitations"] == draft["analysis"]["required_limitations"]
+
+
+def test_verify_edit_cli_reports_which_manifest_it_checked(tmp_path, capsys) -> None:
+    import wsp
+
+    base_w, edit_w = [1.0, 2.0], [1.0, 2.5]
+    base = _write_safetensors(tmp_path / "base.safetensors", {"w": ("BF16", [2], _bytes(base_w))})
+    cand = _write_safetensors(tmp_path / "cand.safetensors", {"w": ("BF16", [2], _bytes(edit_w))})
+    manifest = {
+        "tensors": [
+            {
+                "name": "w",
+                "shape": [2],
+                "dtype": "bfloat16",
+                "changed_entries": 1,
+                "base_sha256": hashlib.sha256(_bytes(base_w)).hexdigest(),
+                "edited_sha256": hashlib.sha256(_bytes(edit_w)).hexdigest(),
+            }
+        ]
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=1))
+    assert wsp.main(["verify-edit", str(base), str(cand), str(path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "verified"
+    assert out["manifest_sha256"] == sha256_json(manifest)  # canonical JSON content
+    assert out["manifest_file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()

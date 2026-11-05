@@ -20,7 +20,7 @@ import struct
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from .hashing import sha256_file
+from .hashing import sha256_file, sha256_json
 
 MAX_HEADER_BYTES = 100 * 1024 * 1024
 DTYPE_SIZE = {
@@ -219,6 +219,11 @@ def verify_edit(diff: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any
     ``verified`` requires that exactly the listed tensors changed, with matching shapes, dtypes,
     changed-entry counts and both hashes, and that no tensor was added, removed or reshaped.
     Header metadata differences are reported, not failed: they do not change tensor values.
+
+    The report names what it was checked against: ``manifest_sha256`` is the canonical-JSON
+    SHA-256 of ``manifest`` (``hashing.sha256_json``), so a consumer can confirm that a
+    ``verified`` report refers to the edit manifest it registered, and not to another manifest
+    for the same two files. It is a provenance link, not an authentication of who ran the check.
     """
     problems: list[str] = []
     expected = {t["name"]: t for t in manifest.get("tensors", [])}
@@ -255,4 +260,5 @@ def verify_edit(diff: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any
         "metadata_equal": diff["metadata_equal"],
         "base_file_sha256": diff["base"]["sha256"],
         "candidate_file_sha256": diff["candidate"]["sha256"],
+        "manifest_sha256": sha256_json(manifest),
     }
