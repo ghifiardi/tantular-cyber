@@ -37,7 +37,10 @@ point estimate is computed for that same quantity:
   which is reported beside it as ``item_weighted_point``;
 * ``difference_in_pooled_ratios``: for non-pairable metrics.
 
-**Method status.** Only two methods can support a passing result (``BINDING_STATUSES``):
+**Method status.** Only two methods can support a passing result (``BINDING_STATUSES``). Both
+also require ``single_sample=True``, which the caller sets from the *design* (exactly one sample
+per arm and item), never from the observed values: multi-sample items whose means happen to be
+0 or 1 are not single-sample Bernoulli outcomes.
 
 * ``exact``: one-sided Clopper-Pearson on whole counts (k of n). This assumes the n units are
   independent Bernoulli trials with a common probability, i.e. independent alerts or items.
@@ -194,6 +197,8 @@ def one_sided_bound(
     side: str,
     confidence: float,
     clusters: Mapping[str, str] | None = None,
+    *,
+    single_sample: bool = False,
 ) -> dict[str, Any]:
     """One-sided bound on the pooled ratio of the units in scope."""
     keys = [i for i in items if i in values and values[i][1] > 0]
@@ -202,7 +207,8 @@ def one_sided_bound(
         return {**base, "bound": None, "method": "no_data", "status": "no_data", "units": 0}
     num = sum(values[i][0] for i in keys)
     den = sum(values[i][1] for i in keys)
-    if clusters is None and all(_whole(values[i][0]) and _whole(values[i][1]) for i in keys):
+    whole = all(_whole(values[i][0]) and _whole(values[i][1]) for i in keys)
+    if single_sample and clusters is None and whole:
         b = clopper_pearson(int(num), int(den), confidence, side)
         return {
             **base,
@@ -232,6 +238,8 @@ def paired_improvement(
     better: int,
     confidence: float,
     clusters: Mapping[str, str] | None = None,
+    *,
+    single_sample: bool = False,
 ) -> dict[str, Any]:
     """Mean paired improvement (positive = better) over units, with its interval.
 
@@ -271,8 +279,13 @@ def paired_improvement(
     hi = clopper_pearson(math.ceil(w - 1e-9), n, tail, "upper") - clopper_pearson(
         math.floor(lo_s + 1e-9), n, tail, "lower"
     )
-    binary = clusters is None and all(
-        base[i][1] == 1.0 and base[i][0] in (0.0, 1.0) and cand[i][0] in (0.0, 1.0) for i in keys
+    binary = (
+        single_sample
+        and clusters is None
+        and all(
+            base[i][1] == 1.0 and base[i][0] in (0.0, 1.0) and cand[i][0] in (0.0, 1.0)
+            for i in keys
+        )
     )
     if binary:
         method, status = "bonferroni_clopper_pearson", "valid_by_bonferroni"

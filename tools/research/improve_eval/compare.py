@@ -34,9 +34,15 @@ minimum is not enough. A regression needs the upper bound below zero.
   established. Not satisfied; the outcome is at best inconclusive;
 * ``inconclusive``, ``descriptive_only``, ``not_declared``, ``not_evaluated``: not satisfied.
 
-**Fail-closed preconditions.** Unbalanced pairs (different samples per arm) are reported and
-make the confirmatory outcome inconclusive unless ``analysis.unbalanced_policy`` prespecified
-``exclude_listed_items``. Conflicting cluster ids, a calibration dataset without a content
+**Registered design.** The evidence must contain exactly the registered items
+(``task.dataset.expected_items_sha256``, the canonical hash of the item-id set) and, for both
+the baseline and the candidate, exactly the records ``(arm, item, sample)`` for samples
+``0 .. analysis.samples_per_item - 1``. A missing, extra or substituted item, a missing sample,
+or an unbalanced pair makes the outcome ``inconclusive`` (the rule outcome is still reported
+as ``rule_outcome_before_design_check``). There is no exclusion option. Binding methods also
+require the registered design to be single-sample.
+
+**Fail-closed preconditions.** Conflicting cluster ids, a calibration dataset without a content
 hash or with the evaluation dataset's identity or hash, and WSP evidence from a non-held-out
 split stop the comparison before any rule is applied.
 
@@ -59,7 +65,7 @@ from typing import Any
 
 from wsp_eval.hashing import sha256_json
 
-from .evidence import Evidence
+from .evidence import Evidence, item_set_sha256
 from .metrics import (
     BINDING_STATUSES,
     group,
@@ -167,11 +173,15 @@ def _summary(values: dict, keys: Sequence[str]) -> dict[str, Any]:
     return {"value": val, "numerator": num, "denominator": den}
 
 
-def _improvement(study: Study, metric: str, base, cand, keys, clusters) -> dict[str, Any]:
+def _improvement(
+    study: Study, metric: str, base, cand, keys, clusters, single_sample: bool
+) -> dict[str, Any]:
     _, better, pairable = METRICS[metric]
     a = study.analysis
     if pairable:
-        return paired_improvement(base, cand, keys, better, a["confidence"], clusters)
+        return paired_improvement(
+            base, cand, keys, better, a["confidence"], clusters, single_sample=single_sample
+        )
     return paired_difference_bootstrap(
         base,
         cand,
@@ -184,13 +194,15 @@ def _improvement(study: Study, metric: str, base, cand, keys, clusters) -> dict[
     )
 
 
-def _absolute(out: dict[str, Any], k: dict[str, Any], cand, keys, conf, clusters) -> None:
+def _absolute(
+    out: dict[str, Any], k: dict[str, Any], cand, keys, conf, clusters, single_sample: bool
+) -> None:
     op, limit = k["op"], k.get("bound")
     # "Satisfied" needs the bound on the claim side inside the limit; an "established"
     # violation needs the opposite bound beyond it. The observed point alone is not enough.
     claim_side, other_side = ("upper", "lower") if op == "<=" else ("lower", "upper")
-    b = one_sided_bound(cand, keys, claim_side, conf, clusters)
-    against = one_sided_bound(cand, keys, other_side, conf, clusters)
+    b = one_sided_bound(cand, keys, claim_side, conf, clusters, single_sample=single_sample)
+    against = one_sided_bound(cand, keys, other_side, conf, clusters, single_sample=single_sample)
     point = out["candidate"]["value"]
     out.update(op=op, bound=limit, confidence_bound=b, opposite_bound=against)
     beyond = (lambda x: x > limit) if op == "<=" else (lambda x: x < limit)
@@ -212,7 +224,7 @@ def _absolute(out: dict[str, Any], k: dict[str, Any], cand, keys, conf, clusters
         out["status"] = "inconclusive"
 
 
-def _constraint(study, k, records, cand_id, items, clusters) -> dict[str, Any]:
+def _constraint(study, k, records, cand_id, items, clusters, single_sample) -> dict[str, Any]:
     metric, scope = k["metric"], k.get("scope", "all")
     _, better, _ = METRICS[metric]
     keys = sorted(items[scope])
@@ -231,9 +243,9 @@ def _constraint(study, k, records, cand_id, items, clusters) -> dict[str, Any]:
         "baseline": _summary(base, keys),
     }
     if k["kind"] == "absolute":
-        _absolute(out, k, cand, keys, study.analysis["confidence"], clusters)
+        _absolute(out, k, cand, keys, study.analysis["confidence"], clusters, single_sample)
     elif k["kind"] == "non_regression":
-        imp = _improvement(study, metric, base, cand, keys, clusters)
+        imp = _improvement(study, metric, base, cand, keys, clusters, single_sample)
         margin = k.get("margin")
         out.update(margin=margin, improvement=imp)
         lo, hi = imp["ci"]
@@ -256,7 +268,7 @@ def _constraint(study, k, records, cand_id, items, clusters) -> dict[str, Any]:
         # An observed-count rule (docs/evaluation.md adoption rule), not a statistical claim:
         # "violated" means the declared count was exceeded in these records.
         losses = net_paired_losses(base, cand, keys, better)
-        limit, mode = k.get("max_losses"), k.get("losses", "net")
+        limit, mode = k.get("max_losses"), k.get("losses", "gross")
         out.update(max_losses=limit, losses_counted=mode, paired=losses)
         if limit is None:
             out["status"] = "not_declared"
@@ -291,6 +303,16 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         return result
     (ev,) = runs
     result["evidence_run"] = {"run_id": ev.run_id, "source": ev.source, "synthetic": ev.synthetic}
+    if study.task_kind == "accuracy" and not (
+        ev.source == "wsp" and ev.notes.get("slice_membership_verified") is True
+    ):
+        # Accuracy items carry no registered tags of their own; only evidence_from_wsp checks
+        # slice membership against the frozen study.
+        result["outcome"] = "insufficient_evidence"
+        result["reasons"].append(
+            "accuracy evidence must come through evidence_from_wsp with slice membership checked"
+        )
+        return result
     for outcome, problems in (
         ("baseline_changed_not_interpreted", _provenance(study.baseline, ev.arms.get(base_id))),
         ("candidate_provenance_mismatch", _provenance(cand, ev.arms.get(cid))),
@@ -321,6 +343,34 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         samples.setdefault((r["arm"], r["item_id"]), set()).add(r["sample"])
     unbalanced = sorted(i for i in all_items if samples.get((base_id, i)) != samples.get((cid, i)))
     paired = all_items - set(unbalanced)
+    # Registered design: exact item set, and every (arm, item, sample) record present.
+    design_problems: list[str] = []
+    expected_sha = study.raw["task"]["dataset"].get("expected_items_sha256")
+    spi = study.analysis.get("samples_per_item")
+    if expected_sha is None:
+        design_problems.append("task.dataset.expected_items_sha256 not registered")
+    elif item_set_sha256(all_items) != expected_sha:
+        design_problems.append(
+            "evaluated items differ from the registered item set (missing, extra or "
+            "substituted items)"
+        )
+    if spi is None:
+        design_problems.append("analysis.samples_per_item not registered")
+    else:
+        want = set(range(spi))
+        incomplete = sorted(
+            i
+            for i in all_items
+            if samples.get((base_id, i), set()) != want or samples.get((cid, i), set()) != want
+        )
+        if incomplete:
+            design_problems.append(
+                f"{len(incomplete)} item(s) lack the expected (arm, sample) records "
+                f"(e.g. {incomplete[0]})"
+            )
+    if unbalanced:
+        design_problems.append(f"{len(unbalanced)} item(s) have different samples in the two arms")
+    single_sample = spi == 1 and not design_problems
     tag = study.target["slice_tag"]
     target_items = {r["item_id"] for r in records if tag in r.get("tags", [])} & paired
     items = {"all": paired, "target_slice": target_items}
@@ -329,6 +379,8 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         "paired": len(paired),
         "target_slice": len(target_items),
         "unbalanced_excluded": unbalanced,
+        "design_problems": design_problems,
+        "single_sample_design": single_sample,
     }
     if study.task_kind == "alert_triage":
         result["breakdown"] = {
@@ -339,7 +391,7 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
     keys = sorted(target_items)
     base = _values(metric, records, base_id, target_items)
     candv = _values(metric, records, cid, target_items)
-    improvement = _improvement(study, metric, base, candv, keys, clusters)
+    improvement = _improvement(study, metric, base, candv, keys, clusters, single_sample)
     min_effect = study.target.get("min_meaningful_effect")
     result["target_effect"] = {
         "metric": metric,
@@ -350,16 +402,10 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         "bound_source": study.target["bound_source"],
     }
     result["constraints"] = [
-        _constraint(study, k, records, cid, items, clusters) for k in study.constraints
+        _constraint(study, k, records, cid, items, clusters, single_sample)
+        for k in study.constraints
     ]
 
-    if unbalanced:
-        result["reasons"].append(
-            f"{len(unbalanced)} item(s) have different samples in the two arms and were excluded"
-        )
-    unbalanced_blocks = bool(unbalanced) and (
-        study.analysis.get("unbalanced_policy", "inconclusive") == "inconclusive"
-    )
     statuses = [c["status"] for c in result["constraints"]]
     lo, hi = improvement["ci"]
     binding = improvement["status"] in BINDING_STATUSES
@@ -375,7 +421,6 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         result["reasons"].append("target metric is worse than baseline (interval below zero)")
     elif (
         binding
-        and not unbalanced_blocks
         and min_effect is not None
         and lo is not None
         and lo > 0
@@ -387,11 +432,6 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         rule = "inconclusive"
         if min_effect is None:
             result["reasons"].append("min_meaningful_effect not declared")
-        if unbalanced_blocks:
-            result["reasons"].append(
-                "unbalanced pairs and no prespecified missing-data rule "
-                "(analysis.unbalanced_policy): confirmatory outcome is inconclusive"
-            )
         if not binding:
             result["reasons"].append(
                 f"target interval method {improvement['method']!r} is "
@@ -415,6 +455,12 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
                 )
             elif c["status"] != "satisfied":
                 result["reasons"].append(f"constraint {c['id']} {c['status']}")
+    if design_problems:
+        # An incomplete or unbalanced run is never confirmatory, whatever the rule found.
+        result["rule_outcome_before_design_check"] = rule
+        rule = "inconclusive"
+        result["reasons"] += [f"design: {x}" for x in design_problems]
+        result["reasons"].append("incomplete or unbalanced evidence: outcome is inconclusive")
     prereg = preregistration(study, ev)
     result["preregistration"] = prereg
     result["rule_outcome"] = rule

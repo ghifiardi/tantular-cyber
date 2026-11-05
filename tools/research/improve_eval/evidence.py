@@ -27,7 +27,7 @@ Two sources exist:
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,10 +70,49 @@ def _check_records(records: Sequence[dict[str, Any]], run_id: str) -> None:
         seen.add(key)
 
 
+def item_set_sha256(item_ids: Iterable[str]) -> str:
+    """Canonical hash of a set of item ids (sorted, de-duplicated, canonical JSON)."""
+    return sha256_json(sorted(set(item_ids)))
+
+
+def triage_metadata_sha256(meta: Mapping[str, tuple[Sequence[str], str | None, str | None]]) -> str:
+    """Canonical hash of the original per-alert metadata, independent of arm outcomes.
+
+    ``meta`` maps alert id -> (tags, cluster, label). The canonical form is the sorted list of
+    ``[id, sorted(tags), cluster, label]``, encoded as canonical JSON. Features (the
+    evaluator's inputs) are covered by the dataset ``content_sha256`` at write time; this hash
+    covers what the comparison uses: slice tags, cluster ids and ground-truth labels.
+    """
+    return sha256_json(
+        sorted([i, sorted(tags), cluster, label] for i, (tags, cluster, label) in meta.items())
+    )
+
+
+def records_metadata(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, tuple[tuple[str, ...], str | None, str | None]]:
+    """Per-alert (tags, cluster, label) from records; every arm must agree, or EvidenceError."""
+    meta: dict[str, tuple[tuple[str, ...], str | None, str | None]] = {}
+    for r in records:
+        m = (tuple(sorted(r.get("tags", []))), r.get("cluster"), r.get("label"))
+        if meta.setdefault(r["item_id"], m) != m:
+            raise EvidenceError(
+                f"item {r['item_id']}: tags, cluster or label differ between records"
+            )
+    return meta
+
+
 def load_evidence(run_dir: Path, study: Study) -> Evidence:
+    """Load and verify synthetic-triage evidence. Accuracy evidence must come through
+    :func:`evidence_from_wsp`, which checks slice membership and the held-out split."""
+    if study.task_kind != "alert_triage":
+        raise EvidenceError(
+            "load_evidence accepts alert_triage studies only; accuracy evidence must come "
+            "through evidence_from_wsp (slice membership and held-out checks)"
+        )
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("source") != "synthetic_triage":
-        raise EvidenceError("use evidence_from_wsp() for WSP runs; unknown evidence source")
+    if manifest.get("source") != "synthetic_triage" or manifest.get("task_kind") != "alert_triage":
+        raise EvidenceError("load_evidence accepts synthetic_triage alert_triage evidence only")
     if manifest.get("study_sha256") != study.sha256:
         raise EvidenceError("evidence was collected under a different study (study_sha256)")
     if manifest.get("run_status") != "complete":
@@ -95,6 +134,14 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
     declared = study.raw["task"]["dataset"].get("content_sha256")
     if declared is None or manifest.get("dataset_sha256") != declared:
         raise EvidenceError("evidence dataset hash differs from (or is missing in) the study")
+    # Recompute what the comparison relies on from the records themselves: the per-alert
+    # metadata must agree across arms and match the registered canonical hash. This checks
+    # consistency with the registered dataset; it says nothing about whether labels are true.
+    declared_meta = study.raw["task"]["dataset"].get("metadata_sha256")
+    if declared_meta is None:
+        raise EvidenceError("task.dataset.metadata_sha256 not registered; metadata unverifiable")
+    if triage_metadata_sha256(records_metadata(records)) != declared_meta:
+        raise EvidenceError("alert tags, clusters or labels in the records differ from the study")
     return Evidence(
         run_id=manifest["run_id"],
         source="synthetic_triage",
@@ -190,6 +237,10 @@ def evidence_from_wsp(
         for r in wsp_records
         if r["arm"] in arm_map
     )
+    try:
+        _check_records(records, manifest["run_id"])
+    except EvidenceError as exc:
+        raise EvidenceError(f"WSP records: {exc}") from exc
     verification = {"candidate": cand["id"], "status": "no_report_supplied"}
     if edit_report is not None:
         verification = _match_edit_report(study, cand, edit_report)
@@ -207,6 +258,7 @@ def evidence_from_wsp(
             "wsp_protocol_frozen": protocol.frozen,
             "wsp_protocol_preregistered": prereg["preregistered"],
             "wsp_split": manifest.get("split"),
+            "slice_membership_verified": True,
             "edit_verification": verification,
         },
     )

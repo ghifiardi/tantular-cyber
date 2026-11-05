@@ -27,6 +27,7 @@ from wsp_eval.runner import RunError
 from wsp_eval.runner import _prepare_out_dir as prepare_out_dir
 
 from . import WORKFLOW_VERSION
+from .evidence import triage_metadata_sha256
 from .study import Study
 
 DECISIONS = ("select", "defer", "suppress")
@@ -121,6 +122,11 @@ def alerts_sha256(alerts: Sequence[Alert], labels: Mapping[str, str | None]) -> 
     return sha256_json(
         sorted([a.id, list(a.tags), a.features, a.cluster, labels[a.id]] for a in alerts)
     )
+
+
+def alerts_metadata_sha256(alerts: Sequence[Alert], labels: Mapping[str, str | None]) -> str:
+    """Registered form of the triage metadata (``task.dataset.metadata_sha256``)."""
+    return triage_metadata_sha256({a.id: (a.tags, a.cluster, labels[a.id]) for a in alerts})
 
 
 def _now() -> str:

@@ -60,11 +60,11 @@ def validate_decision(rec: dict[str, Any], study: Study, report: dict[str, Any])
     if rec["enforced_by"] != "none":
         problems.append("enforced_by must be 'none': no system enforces this record")
     who = rec["decided_by"]
-    if not (isinstance(who, str) and PSEUDONYM_RE.match(who)):
+    if not (isinstance(who, str) and PSEUDONYM_RE.fullmatch(who)):
         problems.append("decided_by must be a pseudonym")
     elif who in (study.raw["owner"], study.raw["operator"]):
         problems.append("decided_by must differ from the study owner and operator")
-    if not (isinstance(rec["decided_at"], str) and TIMESTAMP_RE.match(rec["decided_at"])):
+    if not (isinstance(rec["decided_at"], str) and TIMESTAMP_RE.fullmatch(rec["decided_at"])):
         problems.append("decided_at must be a UTC timestamp")
     if not (isinstance(rec["rationale"], str) and rec["rationale"].strip()):
         problems.append("a decision needs a rationale")

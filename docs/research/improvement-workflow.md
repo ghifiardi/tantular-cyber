@@ -85,7 +85,8 @@ escalated ten times as many alerts at the same precision would pass. Without all
 missed threats could be "fixed" by escalating or deferring everything.
 
 Bounds and interval ends are rounded **outward** to six decimals (upper bounds up, lower
-bounds down), so rounding never moves a bound across a limit in the candidate's favour.
+bounds down), so rounding cannot move a bound across a limit in the candidate's favour by
+more than about 1e-12 (a floating-point tolerance in the rounding).
 
 ## Intervals and what the report may claim
 
@@ -133,12 +134,17 @@ Constraint statuses separate what was observed from what is established:
 | Status | Meaning |
 |---|---|
 | `satisfied` | the claim-side one-sided bound is within the limit (binding method) |
-| `violated` | the **opposite** one-sided bound is beyond the limit (binding method): a statistically established violation. For `max_net_paired_losses` it means the declared count was exceeded in these records (an observed-count rule, `basis: observed_count_rule`, with `losses: net` or `gross`) |
+| `violated` | the **opposite** one-sided bound is beyond the limit (binding method): a statistically established violation. For `max_net_paired_losses` it means the declared count was exceeded in these records (an observed-count rule, `basis: observed_count_rule`, with `losses: gross` (the default: every new loss counts) or `net` (the `docs/evaluation.md` adoption rule, where fixed items offset new losses)) |
 | `point_beyond_limit` | the observed point is beyond the limit, but a violation is not established. Not satisfied; the outcome is at best inconclusive |
 | `inconclusive`, `descriptive_only`, `not_declared`, `not_evaluated` | not satisfied |
 
 Only an established (or observed-count) `violated` makes a candidate `constraint_violated`.
 `point_beyond_limit` makes it inconclusive, with that reason.
+
+**Confidence levels.** Constraint bounds are one-sided at `analysis.confidence` (e.g. 95%).
+The target's lower bound is one end of a two-sided Bonferroni interval, so it is effectively
+one-sided at 1 − α/2 (97.5% when the confidence is 95%), which is more conservative than the
+constraints.
 
 **Decision rule.** `meets_declared_criteria_pending_human_decision` needs all of:
 1. a preregistered, item-unit study;
@@ -164,18 +170,46 @@ its confirmatory outcome is inconclusive). It never proceeds on an assumption:
 | No single verified run pairs baseline and candidate; cluster-unit records lack cluster ids; one item has conflicting cluster ids | `insufficient_evidence` |
 | Baseline or candidate loaded digest (for the named file) or configuration differs from the registration | `baseline_changed_not_interpreted` / `candidate_provenance_mismatch` |
 | Weight edit without a hash-consistent `verify-edit` report naming the registered manifest; WSP evidence not from a held-out run; triage-model calibration dataset without a content hash, or with the evaluation dataset's content hash or name and revision | `prerequisite_missing` |
-| Unbalanced pairs (different samples per arm) | reported, and the confirmatory outcome is `inconclusive` unless `analysis.unbalanced_policy: exclude_listed_items` was prespecified |
-| Record arms differ from the manifest's arms; WSP slice membership not the one bound in the study | evidence refused |
+| Evaluated items differ from the registered item set (missing from both arms, extra, or substituted); any item lacks one of the expected `(arm, sample)` records; unbalanced pairs (different samples per arm) | reported, and the outcome is **`inconclusive`** (the rule outcome is shown as `rule_outcome_before_design_check`). There is no exclusion option |
+| Accuracy evidence that did not come through `evidence_from_wsp` | `insufficient_evidence` (and `load_evidence` refuses it) |
+| Record arms differ from the manifest's arms; triage tags, clusters or labels differ between arms or from the registered metadata hash; WSP slice membership not the one bound in the study; duplicate records | evidence refused |
+
+**Registered design.** A frozen study registers:
+- `task.dataset.expected_items_sha256`: the canonical hash of the evaluated item-id set,
+  `sha256_json(sorted(set(ids)))`;
+- `analysis.samples_per_item`: exactly 1 for triage.
+
+The comparison requires exactly those items and, for both the baseline and the candidate,
+every `(arm, item, sample)` record for samples `0 … samples_per_item − 1`.
+- A count alone is not used, because it could miss a substituted item.
+- Excluding unbalanced items (complete-case analysis) is **not supported**. In simulation it
+  let a candidate with a true effect of −0.05 pass, because its failures left no record. It
+  could return only with a reviewed sensitivity method such as worst-case imputation.
+- Binding methods also require the registered design to be single-sample, never a property
+  inferred from the observed values.
 
 **Calibration data.** Stable dataset identity (name, revision) and content hashes are
 checked. Hashes can show that two datasets are the same; they **cannot prove that two
 differently packaged datasets are disjoint**. That needs an item-level overlap check on the
 data itself, which is an operator task (**Op**).
 
-**Target slices.** For triage, slice tags are part of the alert dataset, so they are covered
-by its content hash. WSP items carry no tags. A frozen accuracy study therefore binds
+**Triage metadata.** A frozen triage study registers `task.dataset.metadata_sha256`, the
+canonical hash of the original per-alert metadata, independent of any arm's outcome:
+- **Canonical form:** `sha256_json(sorted([id, sorted(tags), cluster, label] for each alert))`
+  (`evidence.triage_metadata_sha256`, `soc.alerts_metadata_sha256`).
+- **At load time,** `load_evidence` rebuilds each alert's tags, cluster and label from the
+  records, refuses any disagreement between arms, recomputes the hash and refuses a mismatch.
+  A study without the hash cannot load triage evidence.
+- **What this verifies:** that the records are **consistent with the registered dataset**.
+  It does **not** verify that the labels are true; label provenance is an owner decision.
+  Features (the evaluators' inputs) are covered by `content_sha256`, which only the bundled
+  writer computes, at write time.
+
+**Target slices for accuracy studies.** WSP items carry no tags. A frozen accuracy study binds
 `target_failure.slice_membership_sha256` (`evidence.slice_membership_sha256`, over the
-evaluated item IDs and their tags), and WSP evidence with different membership is refused.
+evaluated item IDs and their tags). WSP evidence with different membership is refused.
+Accuracy evidence is accepted **only** through `evidence_from_wsp`: `load_evidence` refuses
+it, and the comparison stops any accuracy evidence without a verified slice membership.
 
 ## WSP evidence is tied to the actual comparison
 
@@ -190,7 +224,13 @@ evaluated item IDs and their tags), and WSP evidence with different membership i
 
 The supplied `verify-edit` report must also hash to the registered `report_sha256`, have
 status `verified`, name the registered baseline and candidate file digests, and name the
-registered edit manifest (`manifest_sha256` equal to `edit_manifest_sha256`). Reports without
+registered edit manifest (`manifest_sha256` equal to `edit_manifest_sha256`).
+
+**`edit_manifest_sha256` format.** 64 lowercase hex characters (validated): the
+**canonical-JSON SHA-256 of the parsed manifest** (`wsp_eval.hashing.sha256_json`, sorted
+keys, compact separators, UTF-8), exactly as emitted by `wsp.py verify-edit` in
+`manifest_sha256` (#26). It is **not** the hash of the file's bytes (`manifest_file_sha256`,
+which `sha256sum` would give); registering that hash fails closed. Reports without
 `manifest_sha256` (from the current, merged `verify-edit`) are refused, so weight-edit
 evidence cannot pass until the separate WSP change that adds the field is merged. The WSP run
 must also be from the held-out split. Only then is
@@ -243,8 +283,10 @@ Comparison gates, in order:
 4. `prerequisite_missing`;
 5. the rule outcome (`constraint_violated` > `regression_on_target` >
    `meets_declared_criteria_pending_human_decision` > `inconclusive`);
-6. `descriptive_only_not_preregistered`, unless the study was frozen before the evidence run
-   started.
+6. `inconclusive` if the registered design is incomplete or unbalanced;
+7. `descriptive_only_not_preregistered`, unless the study was frozen before the evidence run
+   started;
+8. `descriptive_only_cluster_method_unreviewed` for cluster-unit studies.
 
 The synthetic demo uses the unfrozen fixture, so its outcome is inconclusive. The tests
 freeze copies of it to exercise every path.

@@ -10,7 +10,9 @@
     "dataset": {
       "name": "synthetic-alerts",
       "revision": "fixture-1",
-      "content_sha256": "8ecb5fa69f9223a7b377225c1f785c7f4db9f401b4c22d6449c103a71757ea7d"
+      "content_sha256": "8ecb5fa69f9223a7b377225c1f785c7f4db9f401b4c22d6449c103a71757ea7d",
+      "expected_items_sha256": "a80728e694092c82e9b3fe3724d5301a58a4d567df370e2c656cbd80b4ee0824",
+      "metadata_sha256": "81466b6ef964e4c23bcfc2b3777dd18ee317b9ee7f6591825c543bef3e17fb2e"
     },
     "validity_scope": "One synthetic tenant and one synthetic alert source. Results are not assumed to transfer to other tenants, sources or feature mappings."
   },
@@ -169,7 +171,8 @@
     "bootstrap_resamples": 2000,
     "bootstrap_seed": 20261104,
     "unit": "item",
-    "unbalanced_policy": "inconclusive"
+    "unbalanced_policy": "inconclusive",
+    "samples_per_item": 1
   },
   "limitations": [
     "Synthetic alerts and scripted scorers only. The constraint-aware SOC triage paper (comparing PPO, Isolation Forest and an autoencoder under benign-escalation constraints, with threat coverage, cluster-level evaluation and cross-tenant limitations) is background for the shape of this framework; its data, code, models and results are not integrated or reproduced here."

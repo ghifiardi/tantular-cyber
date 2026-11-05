@@ -50,7 +50,10 @@ BOUND_SOURCES = ("synthetic_fixture", "declared_by_owner")
 # Precision of escalations, analyst-queue load and escalation volume (capacity) are capped
 # separately; none is inferred from another.
 REQUIRED_TRIAGE_CAPS = ("benign_escalation_fraction", "defer_rate", "escalation_rate")
-UNBALANCED_POLICIES = ("inconclusive", "exclude_listed_items")
+# Only "inconclusive" is supported: excluding unbalanced items (complete-case analysis) can pass
+# a worse candidate when missingness depends on the arm. Exclusion needs a reviewed sensitivity
+# method (e.g. worst-case imputation) before it can be offered again.
+UNBALANCED_POLICIES = ("inconclusive",)
 LOSS_COUNTS = ("net", "gross")
 
 
@@ -102,7 +105,7 @@ def _artifact(a: Any, where: str, frozen: bool) -> None:
     if sha is None:
         if frozen:
             raise StudyError(f"{where}.artifact: a frozen study needs the artifact sha256")
-    elif not (isinstance(sha, str) and SHA256_RE.match(sha)):
+    elif not (isinstance(sha, str) and SHA256_RE.fullmatch(sha)):
         raise StudyError(f"{where}.artifact.sha256 must be 64 lowercase hex")
 
 
@@ -124,15 +127,26 @@ def parse_study(raw: dict[str, Any]) -> Study:
     synthetic = _need(raw, "synthetic", bool, "study")
     for role in ("owner", "operator"):
         v = _need(raw, role, str, "study")
-        if not PSEUDONYM_RE.match(v) and not (not frozen and v == "REPLACE"):
+        if not PSEUDONYM_RE.fullmatch(v) and not (not frozen and v == "REPLACE"):
             raise StudyError(f"study.{role} must be a pseudonym")
     task = _need(raw, "task", dict, "study")
     kind = _need(task, "kind", str, "task")
     if kind not in TASK_KINDS:
         raise StudyError(f"task.kind must be one of {TASK_KINDS}")
-    _need(task, "dataset", dict, "task")
+    dataset = _need(task, "dataset", dict, "task")
     if kind == "alert_triage":
         _need(task, "validity_scope", str, "task")
+    # Registered design: which items are evaluated, and (triage) their metadata. Evidence must
+    # cover exactly these items with every expected (arm, sample) record; see compare.py.
+    for key, needed in (
+        ("expected_items_sha256", True),
+        ("metadata_sha256", kind == "alert_triage"),
+    ):
+        v = dataset.get(key)
+        if v is not None and not (isinstance(v, str) and SHA256_RE.fullmatch(v)):
+            raise StudyError(f"task.dataset.{key} must be 64 hex")
+        if frozen and needed and v is None:
+            raise StudyError(f"a frozen study registers task.dataset.{key}")
 
     baseline = _need(raw, "baseline", dict, "study")
     _need(baseline, "id", str, "baseline")
@@ -147,7 +161,7 @@ def parse_study(raw: dict[str, Any]) -> Study:
     _check_metric(target["metric"], kind, "target_failure")
     _number_or_null(target, "min_meaningful_effect", "target_failure", frozen)
     sm = target.get("slice_membership_sha256")
-    if sm is not None and not (isinstance(sm, str) and SHA256_RE.match(sm)):
+    if sm is not None and not (isinstance(sm, str) and SHA256_RE.fullmatch(sm)):
         raise StudyError("target_failure.slice_membership_sha256 must be 64 hex")
     if frozen and kind == "accuracy" and sm is None:
         # Accuracy items (WSP) carry no tags of their own, so slice membership is supplied
@@ -192,7 +206,18 @@ def parse_study(raw: dict[str, Any]) -> Study:
         if _need(analysis, key, int, "analysis") < 0:
             raise StudyError(f"analysis.{key} must be non-negative")
     if analysis.get("unbalanced_policy", "inconclusive") not in UNBALANCED_POLICIES:
-        raise StudyError(f"analysis.unbalanced_policy must be one of {UNBALANCED_POLICIES}")
+        raise StudyError(
+            f"analysis.unbalanced_policy must be one of {UNBALANCED_POLICIES}: excluding "
+            "unbalanced items is not supported without a reviewed sensitivity method"
+        )
+    spi = analysis.get("samples_per_item")
+    if spi is None:
+        if frozen:
+            raise StudyError("a frozen study declares analysis.samples_per_item")
+    elif isinstance(spi, bool) or not isinstance(spi, int) or spi < 1:
+        raise StudyError("analysis.samples_per_item must be a positive integer")
+    elif kind == "alert_triage" and spi != 1:
+        raise StudyError("alert_triage studies have exactly one decision per alert and arm")
     if analysis.get("unit", "item") not in UNITS:
         raise StudyError(f"analysis.unit must be one of {UNITS}")
     conf = _need(analysis, "confidence", float, "analysis")
@@ -205,9 +230,9 @@ def parse_study(raw: dict[str, Any]) -> Study:
         holes = contains_placeholder(raw)
         if holes:
             raise StudyError(f"frozen study still has placeholders at: {holes}")
-        if not (isinstance(raw.get("frozen_by"), str) and PSEUDONYM_RE.match(raw["frozen_by"])):
+        if not (isinstance(raw.get("frozen_by"), str) and PSEUDONYM_RE.fullmatch(raw["frozen_by"])):
             raise StudyError("a frozen study needs frozen_by (pseudonym)")
-        if not (isinstance(raw.get("frozen_at"), str) and TIMESTAMP_RE.match(raw["frozen_at"])):
+        if not (isinstance(raw.get("frozen_at"), str) and TIMESTAMP_RE.fullmatch(raw["frozen_at"])):
             raise StudyError("a frozen study needs frozen_at (UTC, e.g. 2026-11-13T10:00Z)")
     elif raw.get("frozen_by") or raw.get("frozen_at"):
         raise StudyError("an unfrozen study must not carry frozen_by / frozen_at")
@@ -267,6 +292,11 @@ def _check_candidate(c: dict[str, Any], baseline: dict[str, Any], where: str, fr
         raise StudyError(f"{where}: {itype} changes weights; its artifact must differ")
     if not spec.changes_weights and c["config"] == baseline["config"]:
         raise StudyError(f"{where}: {itype} must change the configuration it names")
+    msha = iv.get("edit_manifest_sha256")
+    if msha is not None and not (isinstance(msha, str) and SHA256_RE.fullmatch(msha)):
+        # The canonical-JSON SHA-256 of the parsed manifest (wsp_eval.hashing.sha256_json), as
+        # emitted by `wsp.py verify-edit` in `manifest_sha256`; not the file-bytes hash.
+        raise StudyError(f"{where}: edit_manifest_sha256 must be a 64-hex canonical-JSON SHA-256")
     base_sha = iv.get("base_artifact_sha256")
     if base_sha is not None and base_sha != baseline["artifact"].get("sha256"):
         raise StudyError(f"{where}: base_artifact_sha256 must be the registered baseline digest")
@@ -277,7 +307,7 @@ def _check_candidate(c: dict[str, Any], baseline: dict[str, Any], where: str, fr
                 f"{where}: edit_verification.status must be one of {EDIT_VERIFICATION_STATUSES}"
             )
         rsha = ver.get("report_sha256")
-        if rsha is not None and not (isinstance(rsha, str) and SHA256_RE.match(rsha)):
+        if rsha is not None and not (isinstance(rsha, str) and SHA256_RE.fullmatch(rsha)):
             raise StudyError(f"{where}: edit_verification.report_sha256 must be 64 hex")
         if frozen and ver["status"] == "verified" and rsha is None:
             raise StudyError(f"{where}: a verified edit names its verify-edit report_sha256")
@@ -287,7 +317,7 @@ def _check_candidate(c: dict[str, Any], baseline: dict[str, Any], where: str, fr
         if not isinstance(ds, dict) or not ds.get("name") or not ds.get("revision"):
             raise StudyError(f"{where}: calibration.dataset needs a name and revision")
         csha = ds.get("content_sha256")
-        if csha is not None and not (isinstance(csha, str) and SHA256_RE.match(csha)):
+        if csha is not None and not (isinstance(csha, str) and SHA256_RE.fullmatch(csha)):
             raise StudyError(f"{where}: calibration.dataset.content_sha256 must be 64 hex")
         if frozen and csha is None:
             raise StudyError(f"{where}: a frozen study names the calibration content_sha256")
@@ -322,7 +352,7 @@ def _check_constraint(k: dict[str, Any], kind: str, where: str, frozen: bool) ->
     else:
         if not pairable:
             raise StudyError(f"{where}: {metric} has arm-dependent denominators; not pairable")
-        if k.get("losses", "net") not in LOSS_COUNTS:
+        if k.get("losses", "gross") not in LOSS_COUNTS:
             raise StudyError(f"{where}: losses must be one of {LOSS_COUNTS}")
         v = k.get("max_losses")
         if v is None and frozen:
