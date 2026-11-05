@@ -18,7 +18,12 @@ sys.path[:0] = [str(RESEARCH), str(WSP)]
 
 import improve  # noqa: E402
 from improve_eval.decision import make_decision, validate_decision  # noqa: E402
-from improve_eval.evidence import EvidenceError, evidence_from_wsp, load_evidence  # noqa: E402
+from improve_eval.evidence import (  # noqa: E402
+    EvidenceError,
+    evidence_from_wsp,
+    load_evidence,
+    slice_membership_sha256,
+)
 from improve_eval.metrics import (  # noqa: E402
     clopper_pearson,
     item_values,
@@ -137,7 +142,7 @@ def _mutate(raw: dict, path: str, value) -> dict:
         ("target_failure.metric", "accuracy", "not defined for alert_triage"),
         ("constraints.0.kind", "max_net_paired_losses", "not pairable"),
         ("constraints.1.op", "<", "op"),
-        ("constraints.3.margin", -0.1, "margin"),
+        ("constraints.4.margin", -0.1, "margin"),
         ("analysis.confidence", 1.5, "confidence"),
     ],
 )
@@ -412,13 +417,16 @@ EDIT_REPORT = {
     "metadata_equal": True,
     "base_file_sha256": "0" * 64,
     "candidate_file_sha256": "9" * 64,
+    "manifest_sha256": "8" * 64,  # the registered edit_manifest_sha256
 }
 ARM_MAP = {"reference": "baseline", "candidate": "edit-1"}
 
 
-def _wsp_setup(tmp_path):
+def _wsp_setup(tmp_path, split="heldout"):
     raw_p = json.loads((WSP / "fixtures" / "synthetic_protocol.json").read_text())
     raw_p["analysis"]["required_limitations"] = ["WSP limitation carried into the report"]
+    if split == "heldout":  # a held-out WSP run needs a frozen protocol and a named evaluator
+        raw_p.update(frozen=True, frozen_by="lead1", frozen_at="2026-11-01T00:00Z")
     proto = parse_protocol(raw_p)
     items = load_items(WSP / "fixtures" / "synthetic_items.jsonl")
     gens = synthetic_generators(items, proto.seeds)
@@ -433,11 +441,15 @@ def _wsp_setup(tmp_path):
         gens,
         FinalAnswerGrader(),
         tmp_path / "wsp",
+        split=split,
+        heldout_authorized_by="ev1" if split == "heldout" else None,
         purpose="t",
         operator="op1",
         clock=iter(range(10_000)).__next__,
         run_id="wsp-imp",
     )
+    tags = {i.id: ["dev"] for i in items}
+    run_items = [r["item_id"] for r in res.records]
     arm = proto.arm("reference")
     config = {"inference": arm.inference, "engine": arm.engine}
     data_sha = res.manifest["dataset"]["items_file_sha256"]
@@ -468,6 +480,7 @@ def _wsp_setup(tmp_path):
             "metric": "accuracy",
             "min_meaningful_effect": 0.1,
             "bound_source": "synthetic_fixture",
+            "slice_membership_sha256": slice_membership_sha256(run_items, tags),
         },
         "candidates": [
             {
@@ -502,7 +515,6 @@ def _wsp_setup(tmp_path):
         ],
         "analysis": {"confidence": 0.95, "bootstrap_resamples": 500, "bootstrap_seed": 1},
     }
-    tags = {i.id: ["dev"] for i in items}
     return proto, res, study_raw, tags
 
 
@@ -510,15 +522,17 @@ def test_wsp_run_is_the_weight_edit_evidence_path(tmp_path) -> None:
     proto, res, study_raw, tags = _wsp_setup(tmp_path)
     study = parse_study(study_raw)
     ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report=EDIT_REPORT)
-    assert ev.notes["edit_verification"]["status"] == "matched"
+    check = ev.notes["edit_verification"]
+    assert check["status"] == "hash_consistent"
+    assert "not authenticated" in check["meaning"] and "re-verification" in check["meaning"]
     report = build_report(study, [ev])
     (r,) = report["candidates"]
     assert r["evidence_run"]["source"] == "wsp"
     assert r["target_effect"]["improvement"]["point"] > 0
     assert "WSP limitation carried into the report" in report["limitations"]
     run = report["evidence_runs"][0]
-    assert run["wsp_protocol_sha256"] == proto.sha256 and run["wsp_split"] == "development"
-    assert run["wsp_protocol_preregistered"] is False  # the WSP fixture protocol is unfrozen
+    assert run["wsp_protocol_sha256"] == proto.sha256 and run["wsp_split"] == "heldout"
+    assert run["wsp_protocol_preregistered"] is True
     assert report["evidence_class"] == "synthetic_fixture_not_a_measurement"
 
 
@@ -529,7 +543,7 @@ def test_weight_edit_needs_a_matching_verify_edit_report(tmp_path) -> None:
     ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags)
     (r,) = build_report(study, [ev])["candidates"]
     assert r["outcome"] == "prerequisite_missing"
-    assert "no verify-edit report matched" in r["reasons"][0]
+    assert "hash-consistent" in r["reasons"][0] and "not authenticated" in r["reasons"][0]
     for bad, match in (
         ({**EDIT_REPORT, "tensors_checked": ["other"]}, "report_sha256"),
         ({**EDIT_REPORT, "status": "failed"}, "report_sha256"),
@@ -745,7 +759,8 @@ def test_intervals_do_not_overstate_certainty() -> None:
     # A zero-width bootstrap is reported as not estimable.
     sel = {f"i{n}": (0.0, 1.0) for n in range(12)}
     deg = paired_difference_bootstrap(sel, sel, keys, -1, 0.95, 200, 1)
-    assert deg["ci"] == [None, None] and deg["method"] == "unit_bootstrap_degenerate"
+    assert deg["ci"] == [None, None] and deg["method"] == "percentile_bootstrap_degenerate"
+    assert deg["status"] == "approximate"
     # Clustered absolute bounds are never tighter than the independent-alert bound.
     vals = {f"a{n}": (float(n < 3), 1.0) for n in range(30)}
     exact = one_sided_bound(vals, sorted(vals), "upper", 0.95)
@@ -761,7 +776,8 @@ def test_cluster_unit_needs_cluster_ids_and_widens_the_claim(tmp_path, raw, aler
     r = _by_id(report)[THRESH]
     # Only alerts with a denominator count: the 12 target threats form 6 campaigns.
     assert r["unit"] == "cluster" and r["target_effect"]["improvement"]["units"] == 6
-    assert r["outcome"] == "inconclusive"
+    assert r["outcome"] == "descriptive_only_cluster_method_unreviewed"
+    assert r["target_effect"]["improvement"]["status"] == "cluster_method_unreviewed"
     assert "target improvement interval includes zero" in r["reasons"]
     a, labels = alerts
     no_ids = [Alert(x.id, x.tags, x.features, None) for x in a]
@@ -799,8 +815,8 @@ def test_invented_limits_are_labelled_synthetic(tmp_path, raw, alerts) -> None:
         parse_study(_mutate(raw, "target_failure.bound_source", KeyError))
     _, report = _report(tmp_path, raw, alerts)
     md = render_markdown(report)
-    assert md.count("*(synthetic fixture value)*") == 1 + 4 * 2  # target + 4 constraints x 2 arms
-    assert "no adjustment for multiple comparisons" in md
+    assert md.count("*(synthetic fixture value)*") == 1 + 5 * 2  # target + 5 constraints x 2 arms
+    assert "no multiplicity control across candidates" in md
     assert "treat alerts as independent" in md and "Validity scope:" in md
     assert "recorded, not authenticated" in md
 
@@ -828,3 +844,285 @@ def test_decision_records_say_they_are_unauthenticated_and_unenforced(tmp_path, 
     assert rec["identity_verified"] is False and rec["enforced_by"] == "none"
     assert validate_decision({**rec, "identity_verified": True}, study, report)
     assert validate_decision({**rec, "enforced_by": "release-gate"}, study, report)
+
+
+# --- independent-review fixes: estimands, binding methods, clusters, min effect --------------
+
+
+def test_binary_items_use_the_bonferroni_interval_on_the_same_estimand() -> None:
+    base = {"a": (1.0, 1.0), "b": (0.0, 1.0), "c": (1.0, 1.0), "d": (0.0, 1.0)}
+    cand = {"a": (0.0, 1.0), "b": (0.0, 1.0), "c": (1.0, 1.0), "d": (1.0, 1.0)}
+    imp = paired_improvement(base, cand, sorted(base), better=+1, confidence=0.95)
+    assert imp["estimand"] == "mean_paired_difference_per_item"
+    assert imp["status"] == "valid_by_bonferroni"
+    # Point and interval target the same quantity: the mean per-item difference, which for
+    # single-sample binary items equals the difference of pooled ratios.
+    assert imp["point"] == (2 - 2) / 4 == 0.0
+    assert imp["ci"][0] <= imp["point"] <= imp["ci"][1]
+
+
+def test_fractional_items_are_an_unreviewed_heuristic() -> None:
+    base = {"a": (0.5, 1.0), "b": (0.25, 1.0)}
+    cand = {"a": (1.0, 1.0), "b": (0.75, 1.0)}
+    imp = paired_improvement(base, cand, ["a", "b"], better=+1, confidence=0.95)
+    assert imp["status"] == "unreviewed_heuristic" and imp["method"].startswith("rounded_")
+    b = one_sided_bound(base, ["a", "b"], "upper", 0.95)
+    assert b["status"] == "unreviewed_heuristic" and b["estimand"] == "pooled_ratio"
+
+
+def test_unequal_cluster_sizes_are_descriptive_only() -> None:
+    sizes = [1, 5, 10, 2]
+    keys, clusters = [], {}
+    for c, n in enumerate(sizes):
+        for j in range(n):
+            keys.append(f"c{c}-{j}")
+            clusters[f"c{c}-{j}"] = f"c{c}"
+    base = {k: (1.0, 1.0) for k in keys}
+    cand = {k: (0.0, 1.0) for k in keys}
+    imp = paired_improvement(base, cand, keys, better=-1, confidence=0.95, clusters=clusters)
+    assert imp["units"] == 4 and imp["status"] == "cluster_method_unreviewed"
+    b = one_sided_bound(cand, keys, "upper", 0.95, clusters)
+    assert b["units"] == 4 and b["status"] == "cluster_method_unreviewed"
+    boot = paired_difference_bootstrap(base, cand, keys, -1, 0.95, 200, 1, clusters)
+    assert boot["status"] == "cluster_method_unreviewed"
+
+
+def test_cluster_and_item_weighted_effects_can_disagree() -> None:
+    # One large cluster of 9 items gets worse; four single-item clusters improve.
+    keys = [f"big-{j}" for j in range(9)] + [f"solo-{j}" for j in range(4)]
+    clusters = {k: ("big" if k.startswith("big") else k) for k in keys}
+    base = {k: (1.0 if k.startswith("big") else 0.0, 1.0) for k in keys}
+    cand = {k: (0.0 if k.startswith("big") else 1.0, 1.0) for k in keys}
+    imp = paired_improvement(base, cand, keys, better=+1, confidence=0.95, clusters=clusters)
+    assert imp["estimand"] == "mean_paired_difference_per_cluster"
+    assert imp["point"] == round((-1 + 4) / 5, 6) == 0.6  # cluster-weighted: better
+    assert imp["item_weighted_point"] == round((-9 + 4) / 13, 6)  # item-weighted: worse
+    item = paired_improvement(base, cand, keys, better=+1, confidence=0.95)
+    assert item["point"] == imp["item_weighted_point"] and item["status"] == "valid_by_bonferroni"
+
+
+def test_cluster_studies_never_meet_even_with_strong_effects(tmp_path, raw, alerts) -> None:
+    # Re-cluster so every target threat is its own cluster: item- and cluster-level coincide,
+    # yet the cluster study must stay descriptive.
+    a, labels = alerts
+    solo = [Alert(x.id, x.tags, x.features, x.id) for x in a]
+    raw_c = copy.deepcopy({**raw, **FROZEN, "analysis": {**raw["analysis"], "unit": "cluster"}})
+    raw_c["task"]["dataset"]["content_sha256"] = alerts_sha256(solo, labels)
+    study = parse_study(raw_c)
+    run = run_triage_evaluation(
+        study, solo, labels, synthetic_evaluators(study), tmp_path / "solo", operator="op1"
+    )
+    report = build_report(study, [load_evidence(run, study)])
+    r = _by_id(report)[THRESH]
+    assert r["rule_outcome"] == "inconclusive"  # cluster bounds are not binding
+    assert r["outcome"] == "descriptive_only_cluster_method_unreviewed"
+    assert all(
+        c["status"] in ("descriptive_only", "violated")
+        for c in r["constraints"]
+        if c["kind"] != "max_net_paired_losses"
+    )
+    assert report["outcome"] == "inconclusive" and report["candidates_meeting_criteria"] == []
+    assert any("Unit of analysis is cluster" in x for x in report["limitations"])
+
+
+def test_min_effect_is_a_lower_bound_criterion(tmp_path, raw, alerts) -> None:
+    _, report = _report(tmp_path, {**raw, **FROZEN}, alerts, name="probe")
+    lo = _by_id(report)[THRESH]["target_effect"]["improvement"]["ci"][0]
+    point = _by_id(report)[THRESH]["target_effect"]["improvement"]["point"]
+    assert point == 1.0 and 0 < lo < 1
+
+    at = copy.deepcopy({**raw, **FROZEN})
+    at["target_failure"]["min_meaningful_effect"] = lo  # boundary: lower bound == minimum
+    _, rep_at = _report(tmp_path, at, alerts, name="at")
+    assert _by_id(rep_at)[THRESH]["outcome"] == "meets_declared_criteria_pending_human_decision"
+
+    above = copy.deepcopy(at)
+    above["target_failure"]["min_meaningful_effect"] = round(lo + 1e-6, 6)
+    _, rep_above = _report(tmp_path, above, alerts, name="above")
+    r = _by_id(rep_above)[THRESH]
+    # The point estimate (1.0) is far above the minimum, but the bound is not: not enough.
+    assert r["outcome"] == "inconclusive"
+    assert "lower bound of the target improvement is below min_meaningful_effect" in r["reasons"]
+
+
+def test_multi_sample_wsp_items_cannot_meet_criteria(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)  # 2 samples per item: fractional
+    study = parse_study(study_raw)
+    ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report=EDIT_REPORT)
+    (r,) = build_report(study, [ev])["candidates"]
+    assert r["target_effect"]["improvement"]["status"] == "unreviewed_heuristic"
+    assert r["rule_outcome"] in ("inconclusive", "constraint_violated")
+    assert any("descriptive only" in x for x in r["reasons"])
+
+
+# --- second review round: fail-closed linkage, capacity, observed vs established ------------
+
+
+def test_wsp_slice_membership_must_be_bound_to_the_study(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    study = parse_study(study_raw)
+    in_run = res.records[0]["item_id"]
+    moved = {**tags, in_run: []}  # one evaluated item silently dropped from the slice
+    with pytest.raises(EvidenceError, match="slice membership"):
+        evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, moved, edit_report=EDIT_REPORT)
+    unbound = copy.deepcopy(study_raw)
+    del unbound["target_failure"]["slice_membership_sha256"]
+    with pytest.raises(StudyError, match="slice_membership_sha256"):
+        parse_study(unbound)  # a frozen accuracy study must bind it
+    draft = {**unbound, "frozen": False}
+    draft.pop("frozen_by"), draft.pop("frozen_at")
+    with pytest.raises(EvidenceError, match="slice membership"):
+        evidence_from_wsp(res.out_dir, proto, parse_study(draft), ARM_MAP, tags)
+
+
+def test_verify_edit_report_must_name_the_registered_manifest(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    for report, match in (
+        ({k: v for k, v in EDIT_REPORT.items() if k != "manifest_sha256"}, "no manifest_sha256"),
+        ({**EDIT_REPORT, "manifest_sha256": "7" * 64}, "different edit manifest"),
+    ):
+        raw2 = copy.deepcopy(study_raw)
+        raw2["candidates"][0]["intervention"]["edit_verification"]["report_sha256"] = sha256_json(
+            report
+        )
+        with pytest.raises(EvidenceError, match=match):
+            evidence_from_wsp(
+                res.out_dir, proto, parse_study(raw2), ARM_MAP, tags, edit_report=report
+            )
+
+
+def test_development_split_wsp_evidence_cannot_be_confirmatory(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path, split="development")
+    study = parse_study(study_raw)
+    ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report=EDIT_REPORT)
+    (r,) = build_report(study, [ev])["candidates"]
+    assert r["outcome"] == "prerequisite_missing" and "held-out" in r["reasons"][0]
+
+
+def test_calibration_identity_and_hash_are_checked(tmp_path, raw, alerts) -> None:
+    frozen = copy.deepcopy({**raw, **FROZEN})
+    cal = frozen["candidates"][1]["intervention"]["calibration"]["dataset"]
+    eval_ds = frozen["task"]["dataset"]
+    cases = [
+        ({**cal, "content_sha256": eval_ds["content_sha256"]}, "content hash"),
+        ({**cal, "name": eval_ds["name"], "revision": eval_ds["revision"]}, "name and revision"),
+    ]
+    for n, (bad, reason) in enumerate(cases):
+        study_raw = copy.deepcopy(frozen)
+        study_raw["candidates"][1]["intervention"]["calibration"]["dataset"] = bad
+        _, report = _report(tmp_path, study_raw, alerts, name=f"cal{n}")
+        r = _by_id(report)[SOC]
+        assert r["outcome"] == "prerequisite_missing" and reason in r["reasons"][0]
+    with pytest.raises(StudyError, match="calibration content_sha256"):
+        no_hash = copy.deepcopy(frozen)
+        del no_hash["candidates"][1]["intervention"]["calibration"]["dataset"]["content_sha256"]
+        parse_study(no_hash)
+    draft = copy.deepcopy(raw)
+    del draft["candidates"][1]["intervention"]["calibration"]["dataset"]["content_sha256"]
+    _, report = _report(tmp_path, draft, alerts, name="calnone")
+    assert _by_id(report)[SOC]["outcome"] == "prerequisite_missing"  # fail closed
+
+
+def test_escalation_volume_is_a_separate_required_capacity_cap(tmp_path, raw, alerts) -> None:
+    no_cap = copy.deepcopy({**raw, **FROZEN})
+    no_cap["constraints"] = [k for k in no_cap["constraints"] if k["metric"] != "escalation_rate"]
+    with pytest.raises(StudyError, match="escalation_rate"):
+        parse_study(no_cap)
+    # An arm that escalates far more at the same precision is caught by the capacity cap.
+    loud = SyntheticTriageEvaluator("loud", select_at=0.0, defer_at=0.0, artifact_sha256="1" * 64)
+    study_raw = copy.deepcopy({**raw, **FROZEN})
+    study_raw["candidates"][0]["config"] = loud.config
+    _, report = _report(tmp_path, study_raw, alerts, **{THRESH: loud})
+    r = _by_id(report)[THRESH]
+    (cap,) = [c for c in r["constraints"] if c["id"] == "escalation-capacity"]
+    assert cap["candidate"]["numerator"] == 60 and cap["status"] == "violated"
+    assert r["outcome"] == "constraint_violated"
+
+
+def test_observed_point_is_not_an_established_violation() -> None:
+    # 28/60 = 0.467 > 0.45, but the lower bound is far below 0.45: not established.
+    vals = {f"a{n}": (float(n < 28), 1.0) for n in range(60)}
+    from improve_eval.compare import _absolute
+
+    out = {"candidate": {"value": 28 / 60}}
+    _absolute(out, {"op": "<=", "bound": 0.45}, vals, sorted(vals), 0.95, None)
+    assert out["status"] == "point_beyond_limit"
+    assert out["opposite_bound"]["bound"] < 0.45 < out["candidate"]["value"]
+    # 50/60: the lower bound itself exceeds 0.45, so the violation is established.
+    vals2 = {f"a{n}": (float(n < 50), 1.0) for n in range(60)}
+    out2 = {"candidate": {"value": 50 / 60}}
+    _absolute(out2, {"op": "<=", "bound": 0.45}, vals2, sorted(vals2), 0.95, None)
+    assert out2["status"] == "violated" and out2["opposite_bound"]["bound"] > 0.45
+
+
+def test_point_beyond_limit_keeps_the_outcome_inconclusive(tmp_path, raw, alerts) -> None:
+    tight = copy.deepcopy({**raw, **FROZEN})
+    for k in tight["constraints"]:
+        if k["id"] == "defer-budget":
+            k["bound"] = 0.25  # candidate defers 16/60 = 0.267: just beyond, not established
+    _, report = _report(tmp_path, tight, alerts)
+    r = _by_id(report)[THRESH]
+    (defer,) = [c for c in r["constraints"] if c["id"] == "defer-budget"]
+    assert defer["status"] == "point_beyond_limit"
+    assert r["outcome"] == "inconclusive"
+    assert any("violation not statistically established" in x for x in r["reasons"])
+
+
+def test_unbalanced_pairs_are_reported_and_block_without_a_rule(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    drop = next(x for x in ev.records if x["arm"] == THRESH and "lateral-movement" not in x["tags"])
+    partial = dataclasses.replace(ev, records=tuple(x for x in ev.records if x is not drop))
+    r = _by_id(build_report(study, [partial]))[THRESH]
+    assert r["items"]["unbalanced_excluded"] == [drop["item_id"]]
+    assert r["outcome"] == "inconclusive"
+    assert any("no prespecified missing-data rule" in x for x in r["reasons"])
+    ruled = parse_study(
+        {
+            **raw,
+            **FROZEN,
+            "analysis": {**raw["analysis"], "unbalanced_policy": "exclude_listed_items"},
+        }
+    )
+    # Evidence is bound to its study hash, so collect it again under the ruled study.
+    _, run2 = _evidence(
+        tmp_path,
+        {
+            **raw,
+            **FROZEN,
+            "analysis": {**raw["analysis"], "unbalanced_policy": "exclude_listed_items"},
+        },
+        alerts,
+        name="ruled",
+    )
+    ev2 = load_evidence(run2, ruled)
+    drop2 = next(x for x in ev2.records if x["item_id"] == drop["item_id"] and x["arm"] == THRESH)
+    partial2 = dataclasses.replace(ev2, records=tuple(x for x in ev2.records if x is not drop2))
+    r2 = _by_id(build_report(ruled, [partial2]))[THRESH]
+    assert r2["outcome"] == "meets_declared_criteria_pending_human_decision"
+    assert any("were excluded" in x for x in r2["reasons"])
+
+
+def test_gross_loss_counting_does_not_let_fixes_offset_new_errors() -> None:
+    base = {"a": (0.0, 1.0), "b": (1.0, 1.0)}  # error_rate: b errored on the baseline
+    cand = {"a": (1.0, 1.0), "b": (0.0, 1.0)}  # a new error, b fixed
+    p = net_paired_losses(base, cand, ["a", "b"], better=-1)
+    assert p["net_losses"] == 0 and p["losses"] == 1  # net hides the new error; gross does not
+
+
+def test_conflicting_cluster_ids_fail_closed(tmp_path, raw, alerts) -> None:
+    clustered = {**raw, **FROZEN, "analysis": {**raw["analysis"], "unit": "cluster"}}
+    study, run = _evidence(tmp_path, clustered, alerts)
+    ev = load_evidence(run, study)
+    first = ev.records[0]
+    bad = tuple(dict(x, cluster="other") if x is first else x for x in ev.records)
+    r = _by_id(build_report(study, [dataclasses.replace(ev, records=bad)]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence" and "conflicting cluster ids" in r["reasons"][0]
+
+
+def test_bounds_are_rounded_against_the_claim() -> None:
+    from improve_eval.metrics import outward
+
+    assert outward(0.4500004, "upper") == 0.450001
+    assert outward(0.4500004, "lower") == 0.45
+    assert outward(0.45, "upper") == 0.45

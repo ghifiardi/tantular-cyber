@@ -15,9 +15,13 @@ Two sources exist:
   hash is the study's dataset hash; the WSP ``reference`` arm is the baseline and a
   ``candidate``-role arm is the candidate; the WSP protocol counts missing outcomes as
   incorrect (as this workflow does). A supplied ``verify-edit`` report must hash to the
-  registered ``report_sha256``, be ``verified`` and name the registered base and candidate file
-  digests; only then is the tensor verification ``matched``. The WSP protocol's required
-  limitations and preregistration status travel into the report.
+  registered ``report_sha256``, be ``verified``, and name the registered base and candidate file
+  digests and the registered edit manifest (``manifest_sha256``; reports from a ``verify-edit``
+  without that field are refused); only then is it recorded as ``hash_consistent``. Target-slice
+  membership must hash to the study's ``slice_membership_sha256``. That is a hash and provenance
+  consistency check of a report someone supplied: it does not authenticate who produced the
+  report and does not re-run the tensor comparison. The WSP protocol's required limitations
+  and preregistration status travel into the report.
 """
 
 from __future__ import annotations
@@ -81,6 +85,8 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
     if len(records) != manifest.get("expected_records"):
         raise EvidenceError("record count differs from expected_records in the manifest")
     _check_records(records, manifest["run_id"])
+    if {r["arm"] for r in records} != set(manifest["arms"]):
+        raise EvidenceError("record arms differ from the arms the manifest declares")
     unknown = sorted(set(manifest["arms"]) - set(study.arm_ids))
     if unknown:
         raise EvidenceError(f"evidence arms not registered in the study: {unknown}")
@@ -98,6 +104,12 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
         records=tuple(records),
         limitations=tuple(manifest.get("limitations", [])),
     )
+
+
+def slice_membership_sha256(item_ids: Sequence[str], item_tags: Mapping[str, Sequence[str]]) -> str:
+    """Hash of which items carry which tags, over exactly ``item_ids``. Register it in the
+    study (``target_failure.slice_membership_sha256``) before collecting evidence."""
+    return sha256_json(sorted([i, sorted(item_tags.get(i, []))] for i in set(item_ids)))
 
 
 def evidence_from_wsp(
@@ -144,6 +156,14 @@ def evidence_from_wsp(
     declared_data = study.raw["task"]["dataset"].get("content_sha256")
     if declared_data is None or manifest["dataset"].get("items_file_sha256") != declared_data:
         raise EvidenceError("WSP items hash differs from (or is missing in) the study dataset")
+    # Slice membership decides the target effect, so it must be the one fixed in the study.
+    declared_slice = study.target.get("slice_membership_sha256")
+    got_slice = slice_membership_sha256([r["item_id"] for r in wsp_records], item_tags)
+    if declared_slice is None or got_slice != declared_slice:
+        raise EvidenceError(
+            "target slice membership is not the one bound in the study "
+            "(target_failure.slice_membership_sha256 missing or different)"
+        )
     arms: dict[str, dict[str, Any]] = {}
     for a in manifest["arms"]:
         if a["id"] not in arm_map:
@@ -198,10 +218,28 @@ def _match_edit_report(
     declared = cand["intervention"]["edit_verification"].get("report_sha256")
     if declared is None or sha256_json(dict(report)) != declared:
         raise EvidenceError("verify-edit report does not hash to the registered report_sha256")
+    # The report must name the edit manifest it was checked against (wsp verify-edit
+    # manifest_sha256), and that must be the manifest this candidate registered. Reports
+    # without that field cannot be linked and are refused (fail closed).
+    if "manifest_sha256" not in report:
+        raise EvidenceError(
+            "verify-edit report has no manifest_sha256; its manifest linkage cannot be checked"
+        )
+    if report["manifest_sha256"] != cand["intervention"]["edit_manifest_sha256"]:
+        raise EvidenceError("verify-edit report was checked against a different edit manifest")
     if report.get("status") != "verified":
         raise EvidenceError(f"verify-edit report status is {report.get('status')!r}")
     if report.get("base_file_sha256") != study.baseline["artifact"].get("sha256"):
         raise EvidenceError("verify-edit base file is not the registered baseline artifact")
     if report.get("candidate_file_sha256") != cand["artifact"].get("sha256"):
         raise EvidenceError("verify-edit candidate file is not the registered candidate artifact")
-    return {"candidate": cand["id"], "status": "matched", "report_sha256": declared}
+    return {
+        "candidate": cand["id"],
+        "status": "hash_consistent",
+        "report_sha256": declared,
+        "meaning": (
+            "the supplied verify-edit report hashes to the registered value, says verified, "
+            "and names the registered base and candidate files and edit manifest; not "
+            "authenticated and not an independent re-verification"
+        ),
+    }

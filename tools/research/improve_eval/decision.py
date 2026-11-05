@@ -46,6 +46,8 @@ def validate_decision(rec: dict[str, Any], study: Study, report: dict[str, Any])
         problems.append("decision does not reference this study")
     body = {k: v for k, v in report.items() if k != "report_sha256"}
     if report.get("report_sha256") != sha256_json(body):
+        # An unkeyed self-hash: it catches accidental edits, but anyone who edits a report can
+        # recompute it, so it is not tamper-evidence, and outcomes are not re-derived here.
         problems.append("report content does not match its report_sha256 (edited after build)")
     if rec["report_sha256"] != report.get("report_sha256"):
         problems.append("decision does not reference this report")

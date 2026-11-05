@@ -57,7 +57,7 @@ any value here.
 | configuration | `prompt_or_threshold`, `feature_change` | Same artifact digest as the baseline; the configuration actually differs; `feature_change` names a feature-contract hash |
 | training | `conventional_training`, `lora` | A different artifact digest; training data, training-config hash and compute budget declared; `lora`'s `base_artifact_sha256` is the registered baseline digest |
 | soc_triage_model | `soc_triage_model` | A different artifact; model family, feature contract, training data, and a calibration dataset that is **not** the evaluation dataset |
-| weight_edit | `weight_edit` | A different artifact; `base_artifact_sha256` is the baseline digest; edit-manifest hash. Status `verified` plus a `report_sha256` is required in a frozen study, **and** the actual `verify-edit` report must be supplied with the WSP evidence and match (below) |
+| weight_edit | `weight_edit` | A different artifact; `base_artifact_sha256` is the baseline digest; edit-manifest hash. Status `verified` plus a `report_sha256` is required in a frozen study, **and** the actual `verify-edit` report must be supplied with the WSP evidence, name the registered edit manifest, and come from a held-out WSP run (below). Until `verify-edit` reports carry `manifest_sha256` (a separate WSP change), weight-edit evidence cannot pass |
 
 ## Metrics: explicit numerators and denominators
 
@@ -71,43 +71,111 @@ every triage metric can be rebuilt.
 | `benign_escalation_fraction` | selected ∧ benign | selected ∧ labelled | excluded; shown in the breakdown | not selected, so excluded | not selected | undefined (None), so the constraint is `not_evaluated`, never satisfied |
 | `threat_miss_rate` | threat ∧ (suppressed ∨ error) | labelled threat | excluded | **counted as a miss** | not a miss (an analyst sees it) | undefined if no threats |
 | `defer_rate` | deferred ∨ **error** | all alerts | included | **counted as deferred** (lands on a queue), so errors cannot make an arm look cheaper | counted | — |
+| `escalation_rate` | selected | all alerts | included | not selected | not selected | — |
 | `error_rate` | errored samples | samples | — | counted | — | — |
 | `accuracy` | correct samples (ungraded and errors count as incorrect) | samples | — | incorrect | — | — |
 
-A frozen triage study must declare absolute `<=` caps (scope `all`) on both
-`benign_escalation_fraction` and `defer_rate`. Without them, missed threats could be "fixed"
-by escalating or deferring everything.
+A frozen triage study must declare three separate absolute `<=` caps (scope `all`):
+- `benign_escalation_fraction`: the precision of escalations;
+- `defer_rate`: analyst-queue load;
+- `escalation_rate`: escalation **volume**, a capacity constraint.
+
+Volume is declared on its own, not inferred from precision or deferral. Otherwise an arm that
+escalated ten times as many alerts at the same precision would pass. Without all three caps,
+missed threats could be "fixed" by escalating or deferring everything.
+
+Bounds and interval ends are rounded **outward** to six decimals (upper bounds up, lower
+bounds down), so rounding never moves a bound across a limit in the candidate's favour.
 
 ## Intervals and what the report may claim
 
-- **Unit of analysis:**
-  - `analysis.unit` is `item` (alerts treated as independent) or `cluster`, where each record
-    carries an incident or campaign id.
-  - Only units with a non-zero denominator count.
-  - An item-unit triage report says that correlated alerts make its intervals too narrow.
-  - A cluster-unit study whose records lack cluster ids is `insufficient_evidence`.
-- **Absolute constraints:**
-  - The bound is one-sided at `analysis.confidence`.
-  - It is exact Clopper–Pearson for whole counts with item units. Otherwise it is a
-    conservative effective-n Clopper–Pearson over units.
-  - A point estimate outside the limit means `violated`. Only a bound inside the limit means
-    `satisfied`. Anything else is `inconclusive`.
-  - Zero observed events still give a non-zero upper bound.
-- **Paired improvement** (target effect and `non_regression`, pairable metrics):
-  - It uses per-unit signed differences with Bonferroni-combined Clopper–Pearson bounds on
-    the gains and the losses.
-  - This is exact for single-sample binary items and conservative otherwise.
-  - It never collapses to a zero-width interval when many items flip together. Twelve flips
-    give a lower bound of about 0.39, not 1.0; as six campaigns, the interval includes zero.
-- **Non-pairable comparisons** (benign escalation under `non_regression`): a unit bootstrap.
-  A degenerate (zero-width) bootstrap is reported as not estimable.
-- **Criteria:**
-  - `meets_declared_criteria_pending_human_decision` needs a preregistered study, the whole
-    target interval above zero, a point estimate ≥ `min_meaningful_effect`, and every
-    constraint `satisfied`.
-  - `not_declared` and `not_evaluated` constraints keep the outcome inconclusive.
-- **Multiplicity:** nothing is adjusted for several candidates and constraints, and every
-  report says so.
+The synthetic test suite checks that the code does what is described here. It does not
+validate any statistical procedure. The method choices below, especially for clustered data,
+need independent statistical review.
+
+**Estimands.** Every interval names the quantity it targets (`estimand`), and its point
+estimate is computed for that same quantity:
+
+| Estimand | Used for | Definition |
+|---|---|---|
+| `pooled_ratio` | absolute constraints | Σ numerators / Σ denominators over units in scope |
+| `mean_paired_difference_per_item` | target effect, `non_regression` (pairable metrics) | mean over items of the signed per-item difference (positive = better); for single-sample binary items, equal to the difference of pooled ratios |
+| `mean_paired_difference_per_cluster` | the same, when `analysis.unit` is `cluster` | per-cluster means, then averaged across clusters (cluster-weighted). It can differ in size **and sign** from the item-weighted value, which is shown beside it |
+| `difference_in_pooled_ratios` | `non_regression` on benign escalation (not pairable) | candidate pooled ratio − baseline pooled ratio |
+
+**Method status.** Only two methods are binding: they alone can make a constraint
+`satisfied`, or a target meet or regress.
+- `exact`: one-sided Clopper–Pearson on whole counts k of n.
+  - **Assumes** n independent Bernoulli trials with a common probability: independent alerts
+    or items with item units.
+- `valid_by_bonferroni`: the paired interval for **binary, single-sample items with
+  denominator 1**. Each item's signed difference is −1, 0 or +1.
+  - **Assumes** items are independent and identically distributed. Then W (items improved)
+    ~ Binomial(n, p₊) and L (items worsened) ~ Binomial(n, p₋), and their exact one-sided
+    Clopper–Pearson bounds hold.
+  - Taking four such bounds, each at α/4, gives simultaneous coverage ≥ 1 − α by
+    Bonferroni's inequality. That holds whatever the dependence between W and L.
+  - So [lo(p₊) − hi(p₋), hi(p₊) − lo(p₋)] covers p₊ − p₋, the mean paired difference, with
+    probability ≥ 1 − α. It is conservative, and valid only under those assumptions.
+
+Everything else is reported with its status and is **descriptive only**:
+- `unreviewed_heuristic`: Clopper–Pearson on rounded effective-n or fractional counts, such
+  as multi-sample items (WSP runs with several samples per item). No coverage guarantee has
+  been shown, and these are called neither exact nor conservative.
+- `approximate`: the percentile bootstrap, which has no finite-sample guarantee. A zero-width
+  bootstrap is reported as not estimable.
+- `cluster_method_unreviewed`: any cluster-unit interval. A cluster-unit study's candidates
+  all end as `descriptive_only_cluster_method_unreviewed`, with the rule outcome shown beside
+  it. This stays until a reviewed clustered method and its matching estimand are specified.
+
+Constraint statuses separate what was observed from what is established:
+
+| Status | Meaning |
+|---|---|
+| `satisfied` | the claim-side one-sided bound is within the limit (binding method) |
+| `violated` | the **opposite** one-sided bound is beyond the limit (binding method): a statistically established violation. For `max_net_paired_losses` it means the declared count was exceeded in these records (an observed-count rule, `basis: observed_count_rule`, with `losses: net` or `gross`) |
+| `point_beyond_limit` | the observed point is beyond the limit, but a violation is not established. Not satisfied; the outcome is at best inconclusive |
+| `inconclusive`, `descriptive_only`, `not_declared`, `not_evaluated` | not satisfied |
+
+Only an established (or observed-count) `violated` makes a candidate `constraint_violated`.
+`point_beyond_limit` makes it inconclusive, with that reason.
+
+**Decision rule.** `meets_declared_criteria_pending_human_decision` needs all of:
+1. a preregistered, item-unit study;
+2. a binding target interval;
+3. a **lower confidence bound** above zero **and at least `min_meaningful_effect`**;
+4. every constraint `satisfied`.
+
+The minimum effect is a confidence-bound criterion: the data must rule out improvements
+smaller than it, and a point estimate above it is not enough. `regression_on_target` needs a
+binding interval whose upper bound is below zero.
+
+**Multiplicity.** There is no multiplicity control across candidates or constraints. Each
+is evaluated at `analysis.confidence`, so the chance that some candidate meets the criteria by
+chance grows with the number of candidates. Every report says so.
+
+## Fail-closed preconditions
+
+When evidence is incomplete, or a precondition cannot be verified, the comparison stops (or
+its confirmatory outcome is inconclusive). It never proceeds on an assumption:
+
+| Situation | Result |
+|---|---|
+| No single verified run pairs baseline and candidate; cluster-unit records lack cluster ids; one item has conflicting cluster ids | `insufficient_evidence` |
+| Baseline or candidate loaded digest (for the named file) or configuration differs from the registration | `baseline_changed_not_interpreted` / `candidate_provenance_mismatch` |
+| Weight edit without a hash-consistent `verify-edit` report naming the registered manifest; WSP evidence not from a held-out run; triage-model calibration dataset without a content hash, or with the evaluation dataset's content hash or name and revision | `prerequisite_missing` |
+| Unbalanced pairs (different samples per arm) | reported, and the confirmatory outcome is `inconclusive` unless `analysis.unbalanced_policy: exclude_listed_items` was prespecified |
+| Record arms differ from the manifest's arms; WSP slice membership not the one bound in the study | evidence refused |
+
+**Calibration data.** Stable dataset identity (name, revision) and content hashes are
+checked. Hashes can show that two datasets are the same; they **cannot prove that two
+differently packaged datasets are disjoint**. That needs an item-level overlap check on the
+data itself, which is an operator task (**Op**).
+
+**Target slices.** For triage, slice tags are part of the alert dataset, so they are covered
+by its content hash. WSP items carry no tags. A frozen accuracy study therefore binds
+`target_failure.slice_membership_sha256` (`evidence.slice_membership_sha256`, over the
+evaluated item IDs and their tags), and WSP evidence with different membership is refused.
 
 ## WSP evidence is tied to the actual comparison
 
@@ -121,9 +189,20 @@ by escalating or deferring everything.
    accuracy definition.
 
 The supplied `verify-edit` report must also hash to the registered `report_sha256`, have
-status `verified`, and name the registered baseline and candidate file digests. Only then is
-the evidence's edit verification `matched`. Without a matched report the comparison is
-`prerequisite_missing`, whatever the study declares. Loaded digests are checked for the
+status `verified`, name the registered baseline and candidate file digests, and name the
+registered edit manifest (`manifest_sha256` equal to `edit_manifest_sha256`). Reports without
+`manifest_sha256` (from the current, merged `verify-edit`) are refused, so weight-edit
+evidence cannot pass until the separate WSP change that adds the field is merged. The WSP run
+must also be from the held-out split. Only then is
+the evidence's edit verification recorded as `hash_consistent`. Without such a report the
+comparison is `prerequisite_missing`, whatever the study declares.
+
+This is a **hash and provenance consistency check, not authenticated or independent
+verification**:
+- it does not establish who produced the report;
+- it does not re-run the tensor comparison;
+- it does not prove that the files compared were the files evaluated, beyond the digests
+  each component reports. Loaded digests are checked for the
 **named file** (`artifact.file`, required when frozen), so a tokenizer digest cannot stand in
 for the model weights.
 
@@ -137,9 +216,15 @@ always carries:
 - `enforced_by: "none"`: no system reads it to gate anything.
 
 The decider may not be the study owner or operator. Approval needs a candidate with the
-`meets_declared_criteria…` outcome. The report's hash is recomputed, so an edited report is
-refused. A decision record is a statement of human judgement, kept where the research owner
-controls writes. It is not an access-controlled approval.
+`meets_declared_criteria…` outcome.
+
+The report's `report_sha256` is recomputed when a decision is recorded. This **detects
+accidental edits; it is not tamper-evident**:
+- it is an unkeyed self-hash, which anyone who edits a report can recompute;
+- outcomes are not re-derived from the evidence at that point.
+
+A decision record is a statement of human judgement, kept where the research owner controls
+writes. It is not an access-controlled approval.
 
 ## Flow
 
@@ -173,14 +258,16 @@ infrastructure or people; not implemented or verified here.
 |---|---|---|
 | No network, subprocess, ML/data libraries, `eval`/`exec`; no promote/deploy/publish/upload names; not in the wheel | Impl + Test | Property of this code, not a sandbox |
 | Explicit denominators; errors, missing labels, deferrals, empty selections handled as tabulated | Impl + Test | Label *quality* (e.g. analyst dispositions as ground truth) is **Op** |
-| Intervals no stronger than the data; cluster unit available; multiplicity stated | Impl + Test | Choosing the right cluster definition is **Op** |
+| Only binding methods (exact CP; Bonferroni paired, binary single-sample items) can pass; others descriptive; cluster-unit results always descriptive; estimand named for every interval; multiplicity stated | Impl + Test | The *validity* of the methods is not established by tests: it needs statistical review. A clustered method, its estimand and the cluster definition are **open decisions** |
 | Baseline unchanged, checked per named file and configuration | Impl + Test | Relies on evaluators reporting loaded digests truthfully → **Op** |
 | One intervention type per candidate; family prerequisites | Impl + Test | Truth of declared training and calibration data is **Op** |
-| Weight edits tied to a matching `verify-edit` report, WSP protocol, arms and dataset | Impl + Test | Running `verify-edit` on real files is **Op** |
+| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol, arms, dataset, slice membership and held-out split | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, and trusting who ran it, is **Op**. Manifest linkage needs the separate WSP change |
 | Invented limits labelled `synthetic_fixture`; real studies cannot use them | Impl + Test | Who sets real limits, and when, is **Op** |
 | Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated |
 | Evidence bound to study and dataset; tampered, aborted or mixed runs refused | Impl + Test | Protects against accidents, not against rewriting both records and manifest |
-| Decision recorded; no self-approval; marked unauthenticated and unenforced | Impl + Test | Write access to decision files and any real approval system are **Op** |
+| Decision recorded; no self-approval; marked unauthenticated and unenforced; report self-hash checked | Impl + Test | The self-hash catches accidental edits only (not tamper-evident). Write access to decision files and any real approval system are **Op** |
+| Calibration not the evaluation set | Impl + Test (identity and hash) | Disjointness of differently packaged data is **Op** |
+| Escalation volume capped separately from precision and deferral | Impl + Test | Real capacity numbers are an owner decision |
 | WSP limitations and human gates preserved | Impl + Test | WSP's own gates (freeze, tolerance approval, license review, downloads) are unchanged |
 | Real triage adapter, alert data access, SIEM write-back, shadow mode, drift monitoring | **Op / not built** | `TriageEvaluator` is the extension point; only `SyntheticTriageEvaluator` exists |
 

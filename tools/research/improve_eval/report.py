@@ -38,10 +38,19 @@ def _multiplicity(study: Study) -> str:
     n_c, n_k = len(study.candidates), len(study.constraints)
     return (
         f"{n_c} candidate(s) and {n_k} constraint(s) are evaluated, each at "
-        f"{study.analysis['confidence']:.0%} confidence, with no adjustment for multiple "
-        "comparisons. The chance that at least one candidate meets the criteria by chance is "
-        "higher than for a single test."
+        f"{study.analysis['confidence']:.0%} confidence. There is no multiplicity control "
+        "across candidates (or constraints): the chance that at least one candidate meets the "
+        "criteria by chance is higher than for a single test."
     )
+
+
+METHOD_NOTE = (
+    "Only two interval methods can support a passing result: exact Clopper-Pearson on whole "
+    "counts, and the Bonferroni paired interval for binary single-sample items. Both assume "
+    "independent, identically distributed units (items or alerts). Every other interval "
+    "(rounded effective-n or fractional Clopper-Pearson, bootstrap, any cluster-unit method) "
+    "is labelled with its status and is descriptive only."
+)
 
 
 def build_report(
@@ -54,12 +63,19 @@ def build_report(
     for e in evidence:
         limitations += [x for x in e.limitations if x not in limitations]
     limitations.append(_multiplicity(study))
+    limitations.append(METHOD_NOTE)
     unit = study.analysis.get("unit", "item")
     if study.task_kind == "alert_triage" and unit == "item":
         limitations.append(
-            "Intervals treat alerts as independent (unit: item). Correlated alerts from one "
-            "incident or campaign make these intervals too narrow; use unit: cluster when "
-            "cluster ids exist."
+            "Intervals treat alerts as independent (unit: item). If alerts from one incident "
+            "or campaign are correlated, these intervals are too narrow. Cluster-unit analysis "
+            "exists only as a descriptive option until a reviewed clustered method is specified."
+        )
+    if unit == "cluster":
+        limitations.append(
+            "Unit of analysis is cluster: every result is descriptive only "
+            "(descriptive_only_cluster_method_unreviewed). The cluster-weighted estimand can "
+            "differ from the item-weighted one; both are shown."
         )
     if synthetic:
         limitations.insert(0, EVIDENCE_LIMIT)
@@ -122,27 +138,37 @@ def _src(source: str) -> str:
     )
 
 
+def _interval(x: dict[str, Any]) -> str:
+    extra = ""
+    if x.get("item_weighted_point") is not None:
+        extra = f"; item-weighted point {_fmt(x['item_weighted_point'])}"
+    return f"{x['estimand']}; {x['method']}, {x['status']}, {x['units']} units{extra}"
+
+
 def _constraint_value(c: dict[str, Any]) -> str:
     cand, base = _frac(c["candidate"]), _frac(c["baseline"])
     if c["kind"] == "absolute":
-        b = c["confidence_bound"]
+        b, o = c["confidence_bound"], c["opposite_bound"]
         return (
-            f"candidate {cand}; one-sided bound {_fmt(b['bound'])} ({b['method']}, "
-            f"{b['units']} units) {c['op']} {_fmt(c.get('bound'))}{_src(c['bound_source'])}; "
-            f"baseline {base}"
+            f"candidate {cand}; claim-side bound {_fmt(b['bound'])} ({_interval(b)}), "
+            f"opposite bound {_fmt(o['bound'])}; limit {c['op']} {_fmt(c.get('bound'))}"
+            f"{_src(c['bound_source'])}; baseline {base}"
         )
     if c["kind"] == "non_regression":
         imp = c["improvement"]
         return (
-            f"improvement {_fmt(imp['point'])} {_ci(imp['ci'])} ({imp['method']}, "
-            f"{imp['units']} units) ≥ −{_fmt(c.get('margin'))}{_src(c['bound_source'])}; "
-            f"candidate {cand}, baseline {base}"
+            f"improvement {_fmt(imp['point'])} {_ci(imp['ci'])} ({_interval(imp)}) "
+            f"≥ −{_fmt(c.get('margin'))}{_src(c['bound_source'])}; candidate {cand}, "
+            f"baseline {base}"
         )
     p = c.get("paired") or {}
+    net = c.get("losses_counted") == "net"
+    counted = "net losses" if net else "losses (gross)"
+    value = p.get("net_losses") if net else p.get("losses")
     return (
-        f"net paired losses {_fmt(p.get('net_losses'))} ({_fmt(p.get('losses'))} lost, "
-        f"{_fmt(p.get('wins'))} won of {_fmt(p.get('items'))}) ≤ {_fmt(c.get('max_losses'))}"
-        f"{_src(c['bound_source'])}"
+        f"observed-count rule: {counted} {_fmt(value)} "
+        f"({_fmt(p.get('losses'))} lost, {_fmt(p.get('wins'))} won of {_fmt(p.get('items'))}) "
+        f"≤ {_fmt(c.get('max_losses'))}{_src(c['bound_source'])}"
     )
 
 
@@ -184,20 +210,29 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Baseline `{report['baseline']['id']}`: `{report['baseline']['artifact']['name']}`, "
         "registered as unchanged.",
         f"- Target failure `{t['id']}`: {t['description']} (metric `{t['metric']}` on slice "
-        f"`{t['slice_tag']}`, minimum meaningful improvement "
-        f"{_fmt(t.get('min_meaningful_effect'))}{_src(t['bound_source'])}).",
+        f"`{t['slice_tag']}`). Criterion: the lower confidence bound of the improvement must "
+        f"be above zero and at least {_fmt(t.get('min_meaningful_effect'))}"
+        f"{_src(t['bound_source'])}; a point estimate above it is not enough.",
         "",
         "## Candidates",
         "",
-        "| Candidate | Intervention | Outcome | Target improvement [CI] (method, units) |",
+        "| Candidate | Intervention | Outcome | Target improvement [CI] (estimand; method, "
+        "status, units) |",
         "|---|---|---|---|",
     ]
-    none = {"point": None, "ci": [None, None], "method": "—", "units": 0}
+    none = {
+        "point": None,
+        "ci": [None, None],
+        "estimand": "—",
+        "method": "—",
+        "status": "—",
+        "units": 0,
+    }
     for r in report["candidates"]:
         imp = (r.get("target_effect") or {}).get("improvement") or none
         lines.append(
             f"| `{r['candidate']}` | {r['intervention_type']} | `{r['outcome']}` | "
-            f"{_fmt(imp['point'])} {_ci(imp['ci'])} ({imp['method']}, {imp['units']}) |"
+            f"{_fmt(imp['point'])} {_ci(imp['ci'])} ({_interval(imp)}) |"
         )
     for r in report["candidates"]:
         lines += ["", f"### `{r['candidate']}` ({r['intervention_type']})", ""]

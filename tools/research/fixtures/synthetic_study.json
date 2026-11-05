@@ -76,7 +76,8 @@
         "calibration": {
           "dataset": {
             "name": "synthetic-calibration",
-            "revision": "fixture-1"
+            "revision": "fixture-1",
+            "content_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
           }
         }
       },
@@ -137,12 +138,22 @@
       "bound_source": "synthetic_fixture"
     },
     {
+      "id": "escalation-capacity",
+      "metric": "escalation_rate",
+      "kind": "absolute",
+      "op": "<=",
+      "bound": 0.35,
+      "scope": "all",
+      "bound_source": "synthetic_fixture"
+    },
+    {
       "id": "no-new-errors",
       "metric": "error_rate",
       "kind": "max_net_paired_losses",
       "max_losses": 0,
       "scope": "all",
-      "bound_source": "synthetic_fixture"
+      "bound_source": "synthetic_fixture",
+      "losses": "gross"
     },
     {
       "id": "no-miss-regression",
@@ -157,7 +168,8 @@
     "confidence": 0.95,
     "bootstrap_resamples": 2000,
     "bootstrap_seed": 20261104,
-    "unit": "item"
+    "unit": "item",
+    "unbalanced_policy": "inconclusive"
   },
   "limitations": [
     "Synthetic alerts and scripted scorers only. The constraint-aware SOC triage paper (comparing PPO, Isolation Forest and an autoencoder under benign-escalation constraints, with threat coverage, cluster-level evaluation and cross-tenant limitations) is background for the shape of this framework; its data, code, models and results are not integrated or reproduced here."

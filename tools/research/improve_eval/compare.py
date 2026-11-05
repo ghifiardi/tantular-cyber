@@ -9,18 +9,42 @@ Gates, in order; the first that fails decides the candidate's outcome:
    when named) or configuration differs from the registration, or is not recorded.
 3. ``candidate_provenance_mismatch``: the same check for the candidate.
 4. ``prerequisite_missing``: an intervention-specific precondition is unmet (a weight edit
-   without a ``verify-edit`` report matched to this evidence; a triage model calibrated on the
-   evaluation dataset).
+   without a ``verify-edit`` report that is hash-consistent with this evidence; a triage model
+   calibrated on the evaluation dataset).
 5. Metrics are computed. Constraints and the target effect are evaluated; then
    ``constraint_violated`` > ``regression_on_target`` >
    ``meets_declared_criteria_pending_human_decision`` > ``inconclusive``.
 6. If the study was not frozen before the evidence run started, the outcome is replaced by
-   ``descriptive_only_not_preregistered`` and the rule outcome is kept beside it.
+   ``descriptive_only_not_preregistered``. Otherwise, if the study's unit is ``cluster``, it is
+   replaced by ``descriptive_only_cluster_method_unreviewed``: no reviewed clustered method
+   or matching estimand has been specified. In both cases the rule outcome is kept beside it.
 
-Claims are only as strong as the intervals (``metrics.py``): the target improvement must have
-its whole two-sided interval above zero and a point estimate at least the declared minimum;
-constraints are judged on one-sided bounds. Units are items or, if declared, clusters.
-Nothing is adjusted for testing several candidates and constraints; the report says so.
+**Decision rule.** The target criterion is a confidence-bound criterion: the *lower* bound of
+the improvement interval must be above zero and at least ``min_meaningful_effect``, i.e. the
+data must rule out improvements smaller than the declared minimum. A point estimate above the
+minimum is not enough. A regression needs the upper bound below zero.
+
+**Constraints** distinguish what was observed from what is established:
+
+* ``satisfied``: the claim-side one-sided bound is within the limit (binding method);
+* ``violated``: the *opposite* one-sided bound is beyond the limit (binding method), i.e. a
+  violation is statistically established. For ``max_net_paired_losses`` it means the declared
+  count was exceeded in these records: an observed-count rule, not a statistical claim;
+* ``point_beyond_limit``: the observed point is beyond the limit but a violation is not
+  established. Not satisfied; the outcome is at best inconclusive;
+* ``inconclusive``, ``descriptive_only``, ``not_declared``, ``not_evaluated``: not satisfied.
+
+**Fail-closed preconditions.** Unbalanced pairs (different samples per arm) are reported and
+make the confirmatory outcome inconclusive unless ``analysis.unbalanced_policy`` prespecified
+``exclude_listed_items``. Conflicting cluster ids, a calibration dataset without a content
+hash or with the evaluation dataset's identity or hash, and WSP evidence from a non-held-out
+split stop the comparison before any rule is applied.
+
+**Binding methods only.** A bound can make a constraint ``satisfied``, or a target meet or
+regress, only if its method status is in ``metrics.BINDING_STATUSES`` (exact Clopper-Pearson
+on independent units, or the Bonferroni paired interval for binary single-sample items).
+Any other method yields ``descriptive_only``. Nothing is adjusted for testing several
+candidates and constraints; the report says so.
 
 ``meets_declared_criteria_pending_human_decision`` is the strongest outcome. It promotes or
 deploys nothing; a person records a decision (``decision.py``), and any deployment needs its
@@ -37,6 +61,7 @@ from wsp_eval.hashing import sha256_json
 
 from .evidence import Evidence
 from .metrics import (
+    BINDING_STATUSES,
     group,
     item_values,
     net_paired_losses,
@@ -53,6 +78,10 @@ RULE_OUTCOMES = (
     "regression_on_target",
     "meets_declared_criteria_pending_human_decision",
     "inconclusive",
+)
+DESCRIPTIVE_OUTCOMES = (
+    "descriptive_only_not_preregistered",
+    "descriptive_only_cluster_method_unreviewed",
 )
 GATE_OUTCOMES = (
     "insufficient_evidence",
@@ -103,13 +132,29 @@ def _prerequisites(study: Study, cand: dict[str, Any], ev: Evidence) -> list[str
     if iv["type"] == "weight_edit":
         if iv["edit_verification"].get("status") != "verified":
             return [f"edit verification is {iv['edit_verification'].get('status')!r}, not verified"]
-        matched = ev.notes.get("edit_verification", {})
-        if matched.get("candidate") != cand["id"] or matched.get("status") != "matched":
-            return ["no verify-edit report matched to this candidate's evidence"]
+        check = ev.notes.get("edit_verification", {})
+        if check.get("candidate") != cand["id"] or check.get("status") != "hash_consistent":
+            return [
+                "no verify-edit report that is hash-consistent with this candidate's evidence "
+                "(a consistency check, not authenticated verification)"
+            ]
     if iv["type"] == "soc_triage_model":
-        cal = iv["calibration"].get("dataset")
-        if cal == study.raw["task"]["dataset"]:
-            return ["operating point calibrated on the evaluation dataset"]
+        # Identity and content hashes can show that calibration and evaluation data are the
+        # same; they cannot prove that two differently packaged datasets are disjoint (that
+        # needs item-level overlap checks on the data itself, an operator task).
+        cal = iv["calibration"]["dataset"]
+        evd = study.raw["task"]["dataset"]
+        if not cal.get("content_sha256"):
+            return ["calibration dataset content_sha256 not declared; identity cannot be checked"]
+        if cal["content_sha256"] == evd.get("content_sha256"):
+            return ["calibration dataset has the evaluation dataset's content hash"]
+        if (cal.get("name"), cal.get("revision")) == (evd.get("name"), evd.get("revision")):
+            return ["calibration dataset has the evaluation dataset's name and revision"]
+    if ev.source == "wsp" and ev.notes.get("wsp_split") != "heldout":
+        return [
+            f"WSP evidence is from the {ev.notes.get('wsp_split')!r} split; a confirmatory "
+            "comparison needs a held-out run"
+        ]
     return []
 
 
@@ -139,6 +184,34 @@ def _improvement(study: Study, metric: str, base, cand, keys, clusters) -> dict[
     )
 
 
+def _absolute(out: dict[str, Any], k: dict[str, Any], cand, keys, conf, clusters) -> None:
+    op, limit = k["op"], k.get("bound")
+    # "Satisfied" needs the bound on the claim side inside the limit; an "established"
+    # violation needs the opposite bound beyond it. The observed point alone is not enough.
+    claim_side, other_side = ("upper", "lower") if op == "<=" else ("lower", "upper")
+    b = one_sided_bound(cand, keys, claim_side, conf, clusters)
+    against = one_sided_bound(cand, keys, other_side, conf, clusters)
+    point = out["candidate"]["value"]
+    out.update(op=op, bound=limit, confidence_bound=b, opposite_bound=against)
+    beyond = (lambda x: x > limit) if op == "<=" else (lambda x: x < limit)
+    within = (lambda x: x <= limit) if op == "<=" else (lambda x: x >= limit)
+    binding = b["status"] in BINDING_STATUSES
+    if limit is None:
+        out["status"] = "not_declared"
+    elif point is None or b["bound"] is None:
+        out["status"] = "not_evaluated"  # e.g. nothing selected: the fraction is undefined
+    elif binding and against["bound"] is not None and beyond(against["bound"]):
+        out["status"] = "violated"
+    elif beyond(point):
+        out["status"] = "point_beyond_limit"
+    elif not binding:
+        out["status"] = "descriptive_only"
+    elif within(b["bound"]):
+        out["status"] = "satisfied"
+    else:
+        out["status"] = "inconclusive"
+
+
 def _constraint(study, k, records, cand_id, items, clusters) -> dict[str, Any]:
     metric, scope = k["metric"], k.get("scope", "all")
     _, better, _ = METRICS[metric]
@@ -151,49 +224,47 @@ def _constraint(study, k, records, cand_id, items, clusters) -> dict[str, Any]:
         "scope": scope,
         "kind": k["kind"],
         "bound_source": k["bound_source"],
+        "basis": "observed_count_rule"
+        if k["kind"] == "max_net_paired_losses"
+        else ("confidence_bound"),
         "candidate": _summary(cand, keys),
         "baseline": _summary(base, keys),
     }
     if k["kind"] == "absolute":
-        side = "upper" if k["op"] == "<=" else "lower"
-        b = one_sided_bound(cand, keys, side, study.analysis["confidence"], clusters)
-        point, bound, limit = out["candidate"]["value"], b["bound"], k.get("bound")
-        out.update(op=k["op"], bound=limit, confidence_bound=b)
-        if limit is None:
-            out["status"] = "not_declared"
-        elif point is None or bound is None:
-            out["status"] = "not_evaluated"  # e.g. nothing selected: the fraction is undefined
-        elif (point > limit) if k["op"] == "<=" else (point < limit):
-            out["status"] = "violated"
-        elif (bound <= limit) if k["op"] == "<=" else (bound >= limit):
-            out["status"] = "satisfied"
-        else:
-            out["status"] = "inconclusive"
+        _absolute(out, k, cand, keys, study.analysis["confidence"], clusters)
     elif k["kind"] == "non_regression":
         imp = _improvement(study, metric, base, cand, keys, clusters)
         margin = k.get("margin")
         out.update(margin=margin, improvement=imp)
-        lo = imp["ci"][0]
+        lo, hi = imp["ci"]
+        binding = imp["status"] in BINDING_STATUSES
         if margin is None:
             out["status"] = "not_declared"
-        elif imp["point"] is None or lo is None:
+        elif imp["point"] is None:
             out["status"] = "not_evaluated"
-        elif imp["point"] < -margin:
+        elif binding and hi is not None and hi < -margin:
             out["status"] = "violated"
-        elif lo >= -margin:
+        elif imp["point"] < -margin:
+            out["status"] = "point_beyond_limit"
+        elif not binding:
+            out["status"] = "descriptive_only"
+        elif lo is not None and lo >= -margin:
             out["status"] = "satisfied"
         else:
             out["status"] = "inconclusive"
     else:
+        # An observed-count rule (docs/evaluation.md adoption rule), not a statistical claim:
+        # "violated" means the declared count was exceeded in these records.
         losses = net_paired_losses(base, cand, keys, better)
-        limit = k.get("max_losses")
-        out.update(max_losses=limit, paired=losses)
+        limit, mode = k.get("max_losses"), k.get("losses", "net")
+        out.update(max_losses=limit, losses_counted=mode, paired=losses)
         if limit is None:
             out["status"] = "not_declared"
         elif losses is None:
             out["status"] = "not_evaluated"
         else:
-            out["status"] = "satisfied" if losses["net_losses"] <= limit else "violated"
+            count = losses["net_losses"] if mode == "net" else losses["losses"]
+            out["status"] = "satisfied" if count <= limit else "violated"
     return out
 
 
@@ -238,7 +309,12 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
             result["outcome"] = "insufficient_evidence"
             result["reasons"].append("cluster-level analysis declared but records lack cluster ids")
             return result
-        clusters = {r["item_id"]: r["cluster"] for r in records}
+        clusters = {}
+        for r in records:
+            if clusters.setdefault(r["item_id"], r["cluster"]) != r["cluster"]:
+                result["outcome"] = "insufficient_evidence"
+                result["reasons"].append(f"item {r['item_id']} has conflicting cluster ids")
+                return result
     all_items = {r["item_id"] for r in records}
     samples: dict[tuple[str, str], set[int]] = {}
     for r in records:
@@ -277,8 +353,16 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         _constraint(study, k, records, cid, items, clusters) for k in study.constraints
     ]
 
+    if unbalanced:
+        result["reasons"].append(
+            f"{len(unbalanced)} item(s) have different samples in the two arms and were excluded"
+        )
+    unbalanced_blocks = bool(unbalanced) and (
+        study.analysis.get("unbalanced_policy", "inconclusive") == "inconclusive"
+    )
     statuses = [c["status"] for c in result["constraints"]]
     lo, hi = improvement["ci"]
+    binding = improvement["status"] in BINDING_STATUSES
     if "violated" in statuses:
         rule = "constraint_violated"
         result["reasons"] += [
@@ -286,14 +370,16 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
             for c in result["constraints"]
             if c["status"] == "violated"
         ]
-    elif hi is not None and hi < 0:
+    elif binding and hi is not None and hi < 0:
         rule = "regression_on_target"
         result["reasons"].append("target metric is worse than baseline (interval below zero)")
     elif (
-        min_effect is not None
+        binding
+        and not unbalanced_blocks
+        and min_effect is not None
         and lo is not None
         and lo > 0
-        and improvement["point"] >= min_effect
+        and lo >= min_effect
         and all(s == "satisfied" for s in statuses)
     ):
         rule = "meets_declared_criteria_pending_human_decision"
@@ -301,23 +387,46 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         rule = "inconclusive"
         if min_effect is None:
             result["reasons"].append("min_meaningful_effect not declared")
+        if unbalanced_blocks:
+            result["reasons"].append(
+                "unbalanced pairs and no prespecified missing-data rule "
+                "(analysis.unbalanced_policy): confirmatory outcome is inconclusive"
+            )
+        if not binding:
+            result["reasons"].append(
+                f"target interval method {improvement['method']!r} is "
+                f"{improvement['status']}: descriptive only"
+            )
         if lo is None:
             result["reasons"].append(
                 f"target effect could not be estimated ({improvement['method']})"
             )
         elif not lo > 0:
             result["reasons"].append("target improvement interval includes zero")
-        elif improvement["point"] < (min_effect or 0):
-            result["reasons"].append("target improvement below min_meaningful_effect")
+        elif min_effect is not None and lo < min_effect:
+            result["reasons"].append(
+                "lower bound of the target improvement is below min_meaningful_effect"
+            )
         for c in result["constraints"]:
-            if c["status"] != "satisfied":
+            if c["status"] == "point_beyond_limit":
+                result["reasons"].append(
+                    f"constraint {c['id']}: observed point beyond the limit, violation not "
+                    "statistically established"
+                )
+            elif c["status"] != "satisfied":
                 result["reasons"].append(f"constraint {c['id']} {c['status']}")
     prereg = preregistration(study, ev)
     result["preregistration"] = prereg
     result["rule_outcome"] = rule
-    if prereg["preregistered"]:
-        result["outcome"] = rule
-    else:
+    if not prereg["preregistered"]:
         result["outcome"] = "descriptive_only_not_preregistered"
         result["reasons"] += prereg["reasons"]
+    elif unit == "cluster":
+        result["outcome"] = "descriptive_only_cluster_method_unreviewed"
+        result["reasons"].append(
+            "cluster-unit results are descriptive until a reviewed clustered method and "
+            "matching estimand are specified"
+        )
+    else:
+        result["outcome"] = rule
     return result

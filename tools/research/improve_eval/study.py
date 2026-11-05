@@ -41,12 +41,17 @@ METRICS: dict[str, tuple[str, int, bool]] = {
     "benign_escalation_fraction": ("alert_triage", -1, False),
     "threat_miss_rate": ("alert_triage", -1, True),
     "defer_rate": ("alert_triage", -1, True),
+    "escalation_rate": ("alert_triage", -1, True),
 }
 CONSTRAINT_KINDS = ("absolute", "non_regression", "max_net_paired_losses")
 SCOPES = ("all", "target_slice")
 UNITS = ("item", "cluster")
 BOUND_SOURCES = ("synthetic_fixture", "declared_by_owner")
-REQUIRED_TRIAGE_CAPS = ("benign_escalation_fraction", "defer_rate")
+# Precision of escalations, analyst-queue load and escalation volume (capacity) are capped
+# separately; none is inferred from another.
+REQUIRED_TRIAGE_CAPS = ("benign_escalation_fraction", "defer_rate", "escalation_rate")
+UNBALANCED_POLICIES = ("inconclusive", "exclude_listed_items")
+LOSS_COUNTS = ("net", "gross")
 
 
 class StudyError(ValueError):
@@ -141,6 +146,13 @@ def parse_study(raw: dict[str, Any]) -> Study:
         _need(target, key, str, "target_failure")
     _check_metric(target["metric"], kind, "target_failure")
     _number_or_null(target, "min_meaningful_effect", "target_failure", frozen)
+    sm = target.get("slice_membership_sha256")
+    if sm is not None and not (isinstance(sm, str) and SHA256_RE.match(sm)):
+        raise StudyError("target_failure.slice_membership_sha256 must be 64 hex")
+    if frozen and kind == "accuracy" and sm is None:
+        # Accuracy items (WSP) carry no tags of their own, so slice membership is supplied
+        # separately and must be fixed before evidence. Triage tags are in the dataset hash.
+        raise StudyError("a frozen accuracy study binds target_failure.slice_membership_sha256")
     _bound_source(target, "target_failure", synthetic)
 
     candidates = _need(raw, "candidates", list, "study")
@@ -179,6 +191,8 @@ def parse_study(raw: dict[str, Any]) -> Study:
     for key in ("bootstrap_resamples", "bootstrap_seed"):
         if _need(analysis, key, int, "analysis") < 0:
             raise StudyError(f"analysis.{key} must be non-negative")
+    if analysis.get("unbalanced_policy", "inconclusive") not in UNBALANCED_POLICIES:
+        raise StudyError(f"analysis.unbalanced_policy must be one of {UNBALANCED_POLICIES}")
     if analysis.get("unit", "item") not in UNITS:
         raise StudyError(f"analysis.unit must be one of {UNITS}")
     conf = _need(analysis, "confidence", float, "analysis")
@@ -269,8 +283,14 @@ def _check_candidate(c: dict[str, Any], baseline: dict[str, Any], where: str, fr
             raise StudyError(f"{where}: a verified edit names its verify-edit report_sha256")
     if itype == "soc_triage_model":
         cal = iv["calibration"]
-        if not isinstance(cal, dict) or not cal.get("dataset"):
-            raise StudyError(f"{where}: calibration needs a dataset reference")
+        ds = cal.get("dataset") if isinstance(cal, dict) else None
+        if not isinstance(ds, dict) or not ds.get("name") or not ds.get("revision"):
+            raise StudyError(f"{where}: calibration.dataset needs a name and revision")
+        csha = ds.get("content_sha256")
+        if csha is not None and not (isinstance(csha, str) and SHA256_RE.match(csha)):
+            raise StudyError(f"{where}: calibration.dataset.content_sha256 must be 64 hex")
+        if frozen and csha is None:
+            raise StudyError(f"{where}: a frozen study names the calibration content_sha256")
 
 
 def _bound_source(d: dict[str, Any], where: str, synthetic: bool) -> None:
@@ -302,6 +322,8 @@ def _check_constraint(k: dict[str, Any], kind: str, where: str, frozen: bool) ->
     else:
         if not pairable:
             raise StudyError(f"{where}: {metric} has arm-dependent denominators; not pairable")
+        if k.get("losses", "net") not in LOSS_COUNTS:
+            raise StudyError(f"{where}: losses must be one of {LOSS_COUNTS}")
         v = k.get("max_losses")
         if v is None and frozen:
             raise StudyError(f"{where}: a frozen study needs max_losses")
