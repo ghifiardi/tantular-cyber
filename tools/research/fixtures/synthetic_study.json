@@ -1,0 +1,165 @@
+{
+  "study_version": "synthetic-triage-0.1",
+  "description": "Synthetic workflow fixture. Not a model, not a SOC, not a dataset, not a measurement. Every limit below is an invented synthetic_fixture value, not taken from any paper or deployment.",
+  "synthetic": true,
+  "frozen": false,
+  "owner": "owner1",
+  "operator": "op1",
+  "task": {
+    "kind": "alert_triage",
+    "dataset": {
+      "name": "synthetic-alerts",
+      "revision": "fixture-1",
+      "content_sha256": "8ecb5fa69f9223a7b377225c1f785c7f4db9f401b4c22d6449c103a71757ea7d"
+    },
+    "validity_scope": "One synthetic tenant and one synthetic alert source. Results are not assumed to transfer to other tenants, sources or feature mappings."
+  },
+  "baseline": {
+    "id": "baseline",
+    "status": "unchanged",
+    "artifact": {
+      "name": "synthetic-scorer-v0",
+      "revision": "fixture-1",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "file": "synthetic-scorer"
+    },
+    "config": {
+      "select_at": 0.8,
+      "defer_at": 0.5,
+      "score_feature": "synthetic_score"
+    }
+  },
+  "target_failure": {
+    "id": "missed-lateral-movement",
+    "description": "Low-scoring threats tagged lateral-movement are suppressed instead of reaching an analyst",
+    "slice_tag": "lateral-movement",
+    "metric": "threat_miss_rate",
+    "min_meaningful_effect": 0.2,
+    "bound_source": "synthetic_fixture"
+  },
+  "candidates": [
+    {
+      "id": "threshold-defer-0.3",
+      "hypothesis": "Lowering the defer threshold routes the missed threats to an analyst within the defer budget",
+      "intervention": {
+        "type": "prompt_or_threshold",
+        "change": {
+          "defer_at": [
+            0.5,
+            0.3
+          ]
+        }
+      },
+      "artifact": {
+        "name": "synthetic-scorer-v0",
+        "revision": "fixture-1",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "file": "synthetic-scorer"
+      },
+      "config": {
+        "select_at": 0.8,
+        "defer_at": 0.3,
+        "score_feature": "synthetic_score"
+      }
+    },
+    {
+      "id": "soc-model-alt",
+      "hypothesis": "A separate synthetic triage scorer ranks the missed threats higher",
+      "intervention": {
+        "type": "soc_triage_model",
+        "model_family": "synthetic scripted scorer (no real model)",
+        "feature_contract_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "training_data": {
+          "name": "none (scripted fixture)",
+          "revision": "fixture-1"
+        },
+        "calibration": {
+          "dataset": {
+            "name": "synthetic-calibration",
+            "revision": "fixture-1"
+          }
+        }
+      },
+      "artifact": {
+        "name": "synthetic-scorer-alt",
+        "revision": "fixture-1",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "file": "synthetic-scorer"
+      },
+      "config": {
+        "select_at": 0.8,
+        "defer_at": 0.5,
+        "score_feature": "synthetic_score_alt"
+      }
+    },
+    {
+      "id": "weight-edit-unverified",
+      "hypothesis": "A weight edit changes the scorer's behaviour on the target slice",
+      "intervention": {
+        "type": "weight_edit",
+        "base_artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "edit_manifest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "edit_verification": {
+          "status": "not_run",
+          "tool": "tools/wsp/wsp.py verify-edit"
+        }
+      },
+      "artifact": {
+        "name": "synthetic-scorer-edited",
+        "revision": "fixture-1",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "file": "synthetic-scorer"
+      },
+      "config": {
+        "select_at": 0.8,
+        "defer_at": 0.5,
+        "score_feature": "synthetic_score"
+      }
+    }
+  ],
+  "constraints": [
+    {
+      "id": "benign-escalation-cap",
+      "metric": "benign_escalation_fraction",
+      "kind": "absolute",
+      "op": "<=",
+      "bound": 0.5,
+      "scope": "all",
+      "bound_source": "synthetic_fixture"
+    },
+    {
+      "id": "defer-budget",
+      "metric": "defer_rate",
+      "kind": "absolute",
+      "op": "<=",
+      "bound": 0.45,
+      "scope": "all",
+      "bound_source": "synthetic_fixture"
+    },
+    {
+      "id": "no-new-errors",
+      "metric": "error_rate",
+      "kind": "max_net_paired_losses",
+      "max_losses": 0,
+      "scope": "all",
+      "bound_source": "synthetic_fixture"
+    },
+    {
+      "id": "no-miss-regression",
+      "metric": "threat_miss_rate",
+      "kind": "non_regression",
+      "margin": 0.02,
+      "scope": "all",
+      "bound_source": "synthetic_fixture"
+    }
+  ],
+  "analysis": {
+    "confidence": 0.95,
+    "bootstrap_resamples": 2000,
+    "bootstrap_seed": 20261104,
+    "unit": "item"
+  },
+  "limitations": [
+    "Synthetic alerts and scripted scorers only. The constraint-aware SOC triage paper (comparing PPO, Isolation Forest and an autoencoder under benign-escalation constraints, with threat coverage, cluster-level evaluation and cross-tenant limitations) is background for the shape of this framework; its data, code, models and results are not integrated or reproduced here."
+  ]
+}
