@@ -803,7 +803,8 @@ def test_cluster_unit_needs_cluster_ids_and_widens_the_claim(tmp_path, raw, aler
     out = _by_id(rep)
     assert out[THRESH]["outcome"] == out[SOC]["outcome"] == "insufficient_evidence"
     assert "lack cluster ids" in out[THRESH]["reasons"][0]
-    assert out[EDIT]["outcome"] == "prerequisite_missing"  # an earlier gate
+    # The boundary and cluster checks run before prerequisites, so every candidate stops there.
+    assert out[EDIT]["outcome"] == "insufficient_evidence"
 
 
 def test_frozen_triage_study_must_cap_escalations_and_deferrals(raw) -> None:
@@ -1093,10 +1094,10 @@ def test_unbalanced_pairs_always_make_the_outcome_inconclusive(tmp_path, raw, al
     drop = next(x for x in ev.records if x["arm"] == THRESH and "lateral-movement" not in x["tags"])
     partial = dataclasses.replace(ev, records=tuple(x for x in ev.records if x is not drop))
     r = _by_id(build_report(study, [partial]))[THRESH]
-    assert r["items"]["unbalanced_excluded"] == [drop["item_id"]]
+    assert r["items"]["unbalanced_items"] == [drop["item_id"]]
     # With a design problem the run is not single-sample, so no method is binding either.
     assert r["items"]["single_sample_design"] is False
-    assert "rule_outcome_before_design_check" in r
+    assert "rule_outcome_before_design_check" not in r  # dropped: it was misleading
     assert r["outcome"] == "inconclusive"
     assert any("different samples in the two arms" in x for x in r["reasons"])
 
@@ -1115,7 +1116,9 @@ def test_conflicting_cluster_ids_fail_closed(tmp_path, raw, alerts) -> None:
     first = ev.records[0]
     bad = tuple(dict(x, cluster="other") if x is first else x for x in ev.records)
     r = _by_id(build_report(study, [dataclasses.replace(ev, records=bad)]))[THRESH]
-    assert r["outcome"] == "insufficient_evidence" and "conflicting cluster ids" in r["reasons"][0]
+    # Caught at the comparison boundary: one item's cluster differs between the arms.
+    assert r["outcome"] == "insufficient_evidence"
+    assert "differ between records" in r["reasons"][0]
 
 
 def test_bounds_are_rounded_against_the_claim() -> None:
@@ -1154,13 +1157,14 @@ def test_accuracy_evidence_cannot_bypass_slice_binding(tmp_path) -> None:
     )
     with pytest.raises(EvidenceError, match="alert_triage"):
         load_evidence(fake, study)
-    # Even an Evidence object built directly (bypassing every loader) is not interpreted.
+    # A directly built Evidence that is not WSP-sourced is not interpreted either. (Directly
+    # built WSP-sourced evidence is checked at the comparison boundary; see the tests below.)
     ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report=EDIT_REPORT)
     retagged = [dict(r, tags=["dev"]) for r in ev.records]  # post-hoc tags
     forged = dataclasses.replace(ev, source="synthetic_triage", records=tuple(retagged), notes={})
     (r,) = build_report(study, [forged])["candidates"]
     assert r["outcome"] == "insufficient_evidence"
-    assert "slice membership" in r["reasons"][0]
+    assert "WSP-sourced" in r["reasons"][0]
 
 
 def test_arm_dependent_missingness_cannot_reach_meets(tmp_path, raw, alerts) -> None:
@@ -1185,14 +1189,16 @@ def test_arm_dependent_missingness_cannot_reach_meets(tmp_path, raw, alerts) -> 
     assert any("lack the expected (arm, sample) records" in x for x in r["reasons"])
 
 
-def test_items_missing_from_both_arms_or_substituted_are_inconclusive(tmp_path, raw, alerts):
+def test_items_missing_from_both_arms_or_substituted_are_insufficient(tmp_path, raw, alerts):
+    # A different item set means the registered metadata cannot be verified, so no metric is
+    # reported at all (insufficient_evidence rather than inconclusive with unchecked tags).
     study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
     ev = load_evidence(run, study)
     gone = "syn-alert-040"
     missing = dataclasses.replace(ev, records=tuple(r for r in ev.records if r["item_id"] != gone))
     r = _by_id(build_report(study, [missing]))[THRESH]
-    assert r["outcome"] == "inconclusive"
-    assert any("differ from the registered item set" in x for x in r["reasons"])
+    assert r["outcome"] == "insufficient_evidence" and r["target_effect"] is None
+    assert "cannot be verified" in r["reasons"][0]
     swapped = dataclasses.replace(
         ev,
         records=tuple(
@@ -1200,8 +1206,7 @@ def test_items_missing_from_both_arms_or_substituted_are_inconclusive(tmp_path, 
         ),
     )
     r2 = _by_id(build_report(study, [swapped]))[THRESH]
-    assert r2["outcome"] == "inconclusive"
-    assert any("substituted" in x for x in r2["reasons"])
+    assert r2["outcome"] == "insufficient_evidence" and "substituted" in r2["reasons"][0]
 
 
 def test_missing_samples_are_incomplete_even_when_balanced(tmp_path) -> None:
@@ -1213,7 +1218,7 @@ def test_missing_samples_are_incomplete_even_when_balanced(tmp_path) -> None:
         ev, records=tuple(r for r in ev.records if not (r["item_id"] == first and r["sample"] == 1))
     )
     (r,) = build_report(study, [trimmed])["candidates"]
-    assert r["items"]["unbalanced_excluded"] == []  # both arms lost the same sample
+    assert r["items"]["unbalanced_items"] == []  # both arms lost the same sample
     assert r["outcome"] == "inconclusive"
     assert any("lack the expected (arm, sample) records" in x for x in r["reasons"])
 
@@ -1308,3 +1313,172 @@ def test_identifiers_with_trailing_newlines_are_rejected(raw) -> None:
         parse_study({**raw, "owner": "owner1\n"})
     with pytest.raises(StudyError, match="64 hex"):
         parse_study(_mutate(raw, "task.dataset.expected_items_sha256", "a" * 64 + "\n"))
+
+
+# --- fourth round: direct-call paths at the comparison boundary (third review F1, F3, F4) ----
+
+
+def test_hand_built_accuracy_evidence_with_flag_and_post_hoc_tags_is_refused(tmp_path) -> None:
+    # Third review F1: setting the verification flag on a hand-built WSP-sourced Evidence and
+    # re-tagging items after seeing outcomes used to reach "meets".
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    study = parse_study(study_raw)
+    ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report=EDIT_REPORT)
+    honest = build_report(study, [ev])["candidates"][0]
+    assert honest["outcome"] != "insufficient_evidence"
+    first = ev.records[0]["item_id"]
+    retagged = tuple(dict(r, tags=[]) if r["item_id"] == first else r for r in ev.records)
+    forged = dataclasses.replace(
+        ev,
+        source="wsp",
+        records=retagged,
+        notes={**ev.notes, "slice_membership_verified": True, "wsp_split": "heldout"},
+    )
+    (r,) = build_report(study, [forged])["candidates"]
+    assert r["outcome"] == "insufficient_evidence"
+    assert "slice" in r["reasons"][0] and "not authentication" in r["reasons"][0]
+
+
+@pytest.mark.parametrize(
+    ("change", "what"),
+    [
+        (lambda r: dict(r, tags=["lateral-movement"]), "re-tag into the target slice"),
+        (lambda r: dict(r, label="benign"), "relabel"),
+        (lambda r: dict(r, cluster="syn-campaign-1"), "re-cluster"),
+    ],
+)
+def test_hand_built_triage_evidence_with_altered_metadata_is_refused(
+    tmp_path, raw, alerts, change, what
+) -> None:
+    # Third review F1: the same records refused by load_evidence used to reach "meets" when
+    # passed to build_report directly. Both arms are altered consistently.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    target = "syn-alert-021"  # a general (non-slice) threat
+    altered = tuple(change(r) if r["item_id"] == target else r for r in ev.records)
+    r = _by_id(build_report(study, [dataclasses.replace(ev, records=altered)]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence", what
+    assert "registered metadata" in r["reasons"][0] and "not authentication" in r["reasons"][0]
+
+
+def test_hand_built_triage_evidence_with_arm_disagreement_is_refused(tmp_path, raw, alerts):
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    one_arm = tuple(
+        dict(r, label="benign") if (r["item_id"] == "syn-alert-001" and r["arm"] == THRESH) else r
+        for r in ev.records
+    )
+    r = _by_id(build_report(study, [dataclasses.replace(ev, records=one_arm)]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence" and "differ between records" in r["reasons"][0]
+
+
+def test_duplicate_records_on_the_direct_path_are_a_gate_not_a_crash(tmp_path, raw, alerts):
+    # Third review F4: a duplicate triage record used to crash build_report.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    dup = next(r for r in ev.records if r["arm"] == THRESH)
+    report = build_report(study, [dataclasses.replace(ev, records=(*ev.records, dict(dup)))])
+    r = _by_id(report)[THRESH]
+    assert r["outcome"] == "insufficient_evidence" and "duplicate record" in r["reasons"][0]
+
+
+def test_genuine_evidence_still_passes_the_boundary_checks(tmp_path, raw, alerts) -> None:
+    _, report = _report(tmp_path, {**raw, **FROZEN}, alerts)
+    assert _by_id(report)[THRESH]["outcome"] == "meets_declared_criteria_pending_human_decision"
+
+
+def test_wsp_samples_per_item_must_match_the_protocol(tmp_path) -> None:
+    # Third review F3: a mismatch used to fail closed with a misleading reason.
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    wrong = copy.deepcopy(study_raw)
+    wrong["analysis"]["samples_per_item"] = proto.samples_per_item + 1
+    with pytest.raises(EvidenceError, match="samples_per_item"):
+        evidence_from_wsp(res.out_dir, proto, parse_study(wrong), ARM_MAP, tags)
+
+
+# --- fifth round: the evidence boundary (fourth review items 1-4) ----------------------------
+
+
+def test_extra_triage_samples_are_refused_not_a_crash(tmp_path, raw, alerts) -> None:
+    # Fourth review item 1: a balanced extra sample used to crash build_report.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    extra = tuple(dict(r, sample=1) for r in ev.records if r["item_id"] == "syn-alert-001")
+    r = _by_id(build_report(study, [dataclasses.replace(ev, records=(*ev.records, *extra))]))[
+        THRESH
+    ]
+    assert r["outcome"] == "insufficient_evidence"
+    assert "outside the registered design" in r["reasons"][0]
+    # The same through the loader (records and manifest regenerated together).
+    records = [json.loads(x) for x in (run / "records.jsonl").read_text().splitlines()]
+    _rewrite_records(run, records + [dict(x) for x in extra])
+    loaded = load_evidence(run, study)
+    r2 = _by_id(build_report(study, [loaded]))[THRESH]
+    assert r2["outcome"] == "insufficient_evidence"
+
+
+def test_item_set_mismatch_reports_no_metrics_from_unchecked_tags(tmp_path, raw, alerts) -> None:
+    # Fourth review item 2: dropping one item skipped the metadata check, and the report then
+    # showed a target interval computed from re-tagged alerts.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    general_threats = {
+        r["item_id"] for r in ev.records if r["label"] == "threat" and "general" in r["tags"]
+    }
+    forged = tuple(
+        dict(r, tags=["lateral-movement"]) if r["item_id"] in general_threats else r
+        for r in ev.records
+        if r["item_id"] != "syn-alert-001"
+    )
+    r = _by_id(build_report(study, [dataclasses.replace(ev, records=forged)]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence"
+    assert r["target_effect"] is None and r["constraints"] == []
+    assert "cannot be verified" in r["reasons"][0]
+
+
+def test_unregistered_item_set_means_no_metrics(tmp_path, raw, alerts) -> None:
+    draft = copy.deepcopy(raw)
+    del draft["task"]["dataset"]["expected_items_sha256"]
+    study, run = _evidence(tmp_path, draft, alerts)
+    r = _by_id(build_report(study, [load_evidence(run, study)]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence" and "not registered" in r["reasons"][0]
+
+
+def test_boundary_runs_before_provenance(tmp_path, raw, alerts) -> None:
+    # Fourth review item 3: the documented gate order now matches the code.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    dup = next(r for r in ev.records if r["arm"] == THRESH)
+    arms = {**ev.arms, "baseline": {**ev.arms["baseline"], "config_sha256": "0" * 64}}
+    forged = dataclasses.replace(ev, records=(*ev.records, dict(dup)), arms=arms)
+    r = _by_id(build_report(study, [forged]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence" and "duplicate record" in r["reasons"][0]
+
+
+class _LyingTags(list):
+    """Iterates as the registered tags but claims membership of anything."""
+
+    def __contains__(self, item) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda r: dict(r, tags="lateral-movement"), "list of strings"),
+        (lambda r: dict(r, tags=[1]), "list of strings"),
+        (lambda r: dict(r, tags=_LyingTags(r["tags"])), "list of strings"),
+        (lambda r: dict(r, label=1), "label must be a string"),
+        (lambda r: dict(r, cluster=["c"]), "cluster must be a string"),
+        (lambda r: dict(r, sample=True), "sample must be an integer"),
+        (lambda r: dict(r, item_id=7), "item_id must be strings"),
+    ],
+)
+def test_ordinary_input_types_are_validated(tmp_path, raw, alerts, change, message) -> None:
+    # Fourth review item 4: what is hashed and what the metrics read must be the same plain
+    # data. These validate ordinary input; caller-supplied evidence is still unauthenticated.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    altered = tuple(change(r) if r["item_id"] == "syn-alert-021" else r for r in ev.records)
+    r = _by_id(build_report(study, [dataclasses.replace(ev, records=altered)]))[THRESH]
+    assert r["outcome"] == "insufficient_evidence" and message in r["reasons"][0]

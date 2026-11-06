@@ -167,12 +167,14 @@ its confirmatory outcome is inconclusive). It never proceeds on an assumption:
 
 | Situation | Result |
 |---|---|
-| No single verified run pairs baseline and candidate; cluster-unit records lack cluster ids; one item has conflicting cluster ids | `insufficient_evidence` |
+| No single verified run pairs baseline and candidate; cluster-unit records lack cluster ids (cluster ids differing between arms are caught at the boundary, below) | `insufficient_evidence` |
 | Baseline or candidate loaded digest (for the named file) or configuration differs from the registration | `baseline_changed_not_interpreted` / `candidate_provenance_mismatch` |
 | Weight edit without a hash-consistent `verify-edit` report naming the registered manifest; WSP evidence not from a held-out run; triage-model calibration dataset without a content hash, or with the evaluation dataset's content hash or name and revision | `prerequisite_missing` |
-| Evaluated items differ from the registered item set (missing from both arms, extra, or substituted); any item lacks one of the expected `(arm, sample)` records; unbalanced pairs (different samples per arm) | reported, and the outcome is **`inconclusive`** (the rule outcome is shown as `rule_outcome_before_design_check`). There is no exclusion option |
-| Accuracy evidence that did not come through `evidence_from_wsp` | `insufficient_evidence` (and `load_evidence` refuses it) |
-| Record arms differ from the manifest's arms; triage tags, clusters or labels differ between arms or from the registered metadata hash; WSP slice membership not the one bound in the study; duplicate records | evidence refused |
+| Evaluated items differ from the registered item set (missing from both arms, extra, or substituted) | **`insufficient_evidence`**: the registered metadata cannot be verified, so no metric is reported |
+| With the registered item set: any item lacks one of the expected `(arm, sample)` records; unbalanced pairs (different samples per arm) | reported (`items.unbalanced_items`, `items.design_problems`), and the outcome is **`inconclusive`**. There is no exclusion option. The descriptive metrics use the balanced items (same samples in both arms), which may include incomplete ones |
+| Accuracy evidence that is not WSP-sourced | `insufficient_evidence` (and `load_evidence` refuses it) |
+| At the comparison boundary, on every path including direct calls: a record with an unexpected type; duplicate `(arm, item, sample)` records; a sample outside the registered design (triage: exactly one per alert and arm); an item's tags, cluster or label differing between arms; an unregistered item set or metadata hash; triage metadata or accuracy slice membership not matching the registered hash | `insufficient_evidence` |
+| In the loaders: record arms differ from the manifest's arms; records, run, study or dataset hashes differ; triage metadata or WSP slice membership not as registered | evidence refused |
 
 **Registered design.** A frozen study registers:
 - `task.dataset.expected_items_sha256`: the canonical hash of the evaluated item-id set,
@@ -180,7 +182,8 @@ its confirmatory outcome is inconclusive). It never proceeds on an assumption:
 - `analysis.samples_per_item`: exactly 1 for triage.
 
 The comparison requires exactly those items and, for both the baseline and the candidate,
-every `(arm, item, sample)` record for samples `0 … samples_per_item − 1`.
+every `(arm, item, sample)` record for samples `0 … samples_per_item − 1`. A different item set
+is `insufficient_evidence`; a missing sample or an unbalanced pair is `inconclusive`.
 - A count alone is not used, because it could miss a substituted item.
 - Excluding unbalanced items (complete-case analysis) is **not supported**. In simulation it
   let a candidate with a true effect of −0.05 pass, because its failures left no record. It
@@ -208,8 +211,54 @@ canonical hash of the original per-alert metadata, independent of any arm's outc
 **Target slices for accuracy studies.** WSP items carry no tags. A frozen accuracy study binds
 `target_failure.slice_membership_sha256` (`evidence.slice_membership_sha256`, over the
 evaluated item IDs and their tags). WSP evidence with different membership is refused.
-Accuracy evidence is accepted **only** through `evidence_from_wsp`: `load_evidence` refuses
-it, and the comparison stops any accuracy evidence without a verified slice membership.
+Accuracy evidence is accepted **only** through `evidence_from_wsp`; `load_evidence` refuses
+it. The comparison also recomputes the slice-membership hash from the records it compares
+(see below). A directly built `Evidence` with re-tagged items is therefore refused, whatever
+its `notes` claim. If its item set differs from the registered one, the membership cannot be
+verified, and it is refused for that reason instead.
+
+## Direct calls and what is recomputed at the comparison boundary
+
+`compare_candidate` and `build_report` can be called with `Evidence` objects built directly
+(for example in a notebook), bypassing the loaders. Before provenance or prerequisites, from
+the records actually compared, they check (→ `insufficient_evidence` on any failure, with no
+metric reported):
+- ordinary input types: `arm` and `item_id` strings, integer `sample` (not a boolean),
+  `tags` a list of strings, `cluster` and `label` a string or null;
+- no duplicate `(arm, item, sample)` records, and samples inside the registered design
+  (triage: exactly one per alert and arm);
+- tags, cluster and label identical for an item in every arm;
+- the registered item set, then the canonical triage metadata hash or the accuracy
+  slice-membership hash. The target slice is then taken from these verified tags.
+
+After that they check the registered samples and balance (→ `inconclusive`), arm provenance
+against the registration, prerequisites, the cluster-descriptive rule, preregistration
+timing and the decision rules.
+
+The type checks validate ordinary input; they are not a defence against deliberately
+deceptive Python objects. All of these are **consistency checks against the registered
+study, not authentication**: caller-supplied evidence remains unauthenticated. On the direct
+path, the following remain as asserted by whoever built the object:
+- record outcomes (`correct`, `decision`, `status`, `error_class`);
+- `source` (for accuracy, the only source check is the declared string `"wsp"`) and
+  `synthetic` (which decides whether a report is labelled `measured`);
+- `run_id` and `limitations`;
+- `notes` (WSP split, edit-verification result);
+- `started_at`;
+- each arm's reported artifact digests and configuration hash.
+
+Only the loaders also check the run, records, study and dataset hashes and the `verify-edit`
+report. A report from a direct call is only as trustworthy as the code that built its
+evidence.
+
+**Open notes (not fixed):**
+- *Registered hashes are not cross-checked when the study is parsed.* `expected_items_sha256`
+  is not compared with the item ids inside `metadata_sha256` (triage) or
+  `slice_membership_sha256` (accuracy). An inconsistent frozen study fails closed, but only
+  once evidence is compared.
+- *The metadata canonical form is a sorted list, not a set.* Duplicate tags (`["a", "a"]`
+  vs `["a"]`) hash differently, which can only cause a false refusal. (The type half of this
+  note is closed: the comparison boundary now requires `tags` to be a list of strings.)
 
 ## WSP evidence is tied to the actual comparison
 
@@ -277,13 +326,15 @@ writes. It is not an access-controlled approval.
 ```
 
 Comparison gates, in order:
-1. `insufficient_evidence`;
+1. `insufficient_evidence` (no single run pairs baseline and candidate; accuracy evidence not
+   WSP-sourced; any comparison-boundary check fails; cluster-unit records lack cluster ids).
+   All of these run before steps 2–4;
 2. `baseline_changed_not_interpreted`;
 3. `candidate_provenance_mismatch`;
 4. `prerequisite_missing`;
 5. the rule outcome (`constraint_violated` > `regression_on_target` >
    `meets_declared_criteria_pending_human_decision` > `inconclusive`);
-6. `inconclusive` if the registered design is incomplete or unbalanced;
+6. `inconclusive` if, with the registered item set, samples are missing or pairs unbalanced;
 7. `descriptive_only_not_preregistered`, unless the study was frozen before the evidence run
    started;
 8. `descriptive_only_cluster_method_unreviewed` for cluster-unit studies.

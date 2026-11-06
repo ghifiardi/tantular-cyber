@@ -3,8 +3,12 @@
 Gates, in order; the first that fails decides the candidate's outcome:
 
 1. ``insufficient_evidence``: no single verified evidence run contains both the baseline and
-   the candidate (comparisons are always paired within one run), or a cluster-level study's
-   records lack cluster ids.
+   the candidate (comparisons are always paired within one run); accuracy evidence that is not
+   WSP-sourced; any comparison-boundary consistency check fails (record types, duplicate
+   records, a sample outside the registered design, tags/cluster/label differing between
+   arms, an evaluated item set that differs from the registered one, triage metadata or
+   accuracy slice membership not matching the registered hash); or a cluster-level study's
+   records lack cluster ids. These all run before steps 2-4.
 2. ``baseline_changed_not_interpreted``: the baseline's loaded artifact (the registered file,
    when named) or configuration differs from the registration, or is not recorded.
 3. ``candidate_provenance_mismatch``: the same check for the candidate.
@@ -37,12 +41,29 @@ minimum is not enough. A regression needs the upper bound below zero.
 **Registered design.** The evidence must contain exactly the registered items
 (``task.dataset.expected_items_sha256``, the canonical hash of the item-id set) and, for both
 the baseline and the candidate, exactly the records ``(arm, item, sample)`` for samples
-``0 .. analysis.samples_per_item - 1``. A missing, extra or substituted item, a missing sample,
-or an unbalanced pair makes the outcome ``inconclusive`` (the rule outcome is still reported
-as ``rule_outcome_before_design_check``). There is no exclusion option. Binding methods also
+``0 .. analysis.samples_per_item - 1``. A missing, extra or substituted item is
+``insufficient_evidence`` (the registered metadata cannot then be verified, so no metric is
+reported). With the registered item set, a missing sample or an unbalanced pair makes the
+outcome ``inconclusive``; its descriptive metrics use the balanced items (same samples in both
+arms), which may include incomplete ones. There is no exclusion option. Binding methods also
 require the registered design to be single-sample.
 
-**Fail-closed preconditions.** Conflicting cluster ids, a calibration dataset without a content
+**Comparison-boundary consistency checks.** Before provenance or prerequisites,
+``compare_candidate`` recomputes from the records it actually uses: ordinary types (``arm``
+and ``item_id`` strings, integer ``sample``, ``tags`` a list of strings, ``cluster`` and
+``label`` string or null); no duplicate ``(arm, item, sample)`` records; samples inside the
+registered design (exactly one per alert and arm for triage); identical tags, cluster and
+label for an item in every arm; the registered item set; and the canonical triage metadata
+hash (``metadata_sha256``) or accuracy slice-membership hash (``slice_membership_sha256``).
+The target slice is then taken from those verified tags. Any failure is
+``insufficient_evidence``. These are **consistency checks against the registered study, not
+authentication**: caller-supplied evidence remains unauthenticated. Record outcomes
+(``correct``, ``decision``, ``status``, ``error_class``), ``source``, ``synthetic``,
+``run_id``, ``limitations``, ``notes`` (WSP split, edit verification), ``started_at`` and the
+arms' reported digests and configuration remain as asserted by whoever built the object.
+Only the loaders also check run, records, study and dataset hashes.
+
+**Fail-closed preconditions.** A calibration dataset without a content
 hash or with the evaluation dataset's identity or hash, and WSP evidence from a non-held-out
 split stop the comparison before any rule is applied.
 
@@ -65,7 +86,14 @@ from typing import Any
 
 from wsp_eval.hashing import sha256_json
 
-from .evidence import Evidence, item_set_sha256
+from .evidence import (
+    Evidence,
+    EvidenceError,
+    item_set_sha256,
+    records_metadata,
+    slice_membership_sha256,
+    triage_metadata_sha256,
+)
 from .metrics import (
     BINDING_STATUSES,
     group,
@@ -280,6 +308,91 @@ def _constraint(study, k, records, cand_id, items, clusters, single_sample) -> d
     return out
 
 
+Meta = dict[str, tuple[tuple[str, ...], str | None, str | None]]
+
+
+def _type_problem(r: Any) -> str | None:
+    """Ordinary-input validation of a record's identifying fields (not authentication)."""
+    if not isinstance(r, dict):
+        return "a record is not an object"
+    if not (isinstance(r.get("arm"), str) and isinstance(r.get("item_id"), str)):
+        return "record arm and item_id must be strings"
+    if isinstance(r.get("sample"), bool) or not isinstance(r.get("sample"), int):
+        return f"item {r.get('item_id')}: sample must be an integer"
+    tags = r.get("tags", [])
+    if type(tags) not in (list, tuple) or not all(type(t) is str for t in tags):
+        return f"item {r['item_id']}: tags must be a list of strings"
+    for key in ("cluster", "label"):
+        v = r.get(key)
+        if v is not None and type(v) is not str:
+            return f"item {r['item_id']}: {key} must be a string or null"
+    return None
+
+
+def _boundary_problems(study: Study, records: Sequence[dict[str, Any]]) -> tuple[list[str], Meta]:
+    """Consistency checks recomputed from the records actually compared.
+
+    These check the records against the registered study; they do not authenticate them.
+    Returns (problems, canonical per-item metadata). Any problem means insufficient_evidence:
+    no metric is reported from records whose metadata could not be verified.
+    """
+    spi = study.analysis.get("samples_per_item")
+    if study.task_kind == "alert_triage":
+        allowed = {0}  # one decision per alert and arm
+    else:
+        allowed = set(range(spi)) if isinstance(spi, int) else None
+    seen: set[tuple[str, str, int]] = set()
+    for r in records:
+        problem = _type_problem(r)
+        if problem:
+            return [problem], {}
+        key = (r["arm"], r["item_id"], r["sample"])
+        if key in seen:
+            return [f"duplicate record for arm/item/sample {key}"], {}
+        seen.add(key)
+        if allowed is not None and r["sample"] not in allowed:
+            return [
+                f"item {r['item_id']}: sample {r['sample']} is outside the registered design"
+            ], {}
+    try:
+        meta = records_metadata(records)
+    except EvidenceError as exc:
+        return [str(exc)], {}
+    ds = study.raw["task"]["dataset"]
+    expected = ds.get("expected_items_sha256")
+    if expected is None:
+        return [
+            "task.dataset.expected_items_sha256 not registered; metadata cannot be verified"
+        ], {}
+    if item_set_sha256(meta) != expected:
+        # Missing, extra or substituted items: the registered metadata (which covers the whole
+        # registered item set) cannot be verified, so no metric is reported.
+        return [
+            "evaluated items differ from the registered item set (missing, extra or substituted "
+            "items); tags, clusters and labels cannot be verified"
+        ], {}
+    if study.task_kind == "alert_triage":
+        registered = ds.get("metadata_sha256")
+        if registered is None:
+            return ["task.dataset.metadata_sha256 not registered; metadata cannot be verified"], {}
+        if triage_metadata_sha256(meta) != registered:
+            return [
+                "tags, clusters or labels in the compared records differ from the registered "
+                "metadata (consistency check, not authentication)"
+            ], {}
+    else:
+        registered = study.target.get("slice_membership_sha256")
+        if registered is None:
+            return ["target_failure.slice_membership_sha256 not registered"], {}
+        tags = {i: m[0] for i, m in meta.items()}
+        if slice_membership_sha256(list(meta), tags) != registered:
+            return [
+                "target-slice membership in the compared records differs from the registered "
+                "slice (consistency check, not authentication)"
+            ], {}
+    return [], meta
+
+
 def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evidence]) -> dict:
     cid, base_id = cand["id"], study.baseline["id"]
     result: dict[str, Any] = {
@@ -303,16 +416,25 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         return result
     (ev,) = runs
     result["evidence_run"] = {"run_id": ev.run_id, "source": ev.source, "synthetic": ev.synthetic}
-    if study.task_kind == "accuracy" and not (
-        ev.source == "wsp" and ev.notes.get("slice_membership_verified") is True
-    ):
-        # Accuracy items carry no registered tags of their own; only evidence_from_wsp checks
-        # slice membership against the frozen study.
+    if study.task_kind == "accuracy" and ev.source != "wsp":
         result["outcome"] = "insufficient_evidence"
-        result["reasons"].append(
-            "accuracy evidence must come through evidence_from_wsp with slice membership checked"
-        )
+        result["reasons"].append("accuracy evidence must be WSP-sourced (evidence_from_wsp)")
         return result
+    records = [r for r in ev.records if r["arm"] in (base_id, cid)]
+    boundary, meta = _boundary_problems(study, records)
+    if boundary:
+        result["outcome"] = "insufficient_evidence"
+        result["reasons"] += boundary
+        return result
+    unit = study.analysis.get("unit", "item")
+    clusters = None
+    if unit == "cluster":
+        if any(m[1] is None for m in meta.values()):
+            result["outcome"] = "insufficient_evidence"
+            result["reasons"].append("cluster-level analysis declared but records lack cluster ids")
+            return result
+        # Cluster ids already agree between arms (checked at the boundary).
+        clusters = {i: m[1] for i, m in meta.items()}
     for outcome, problems in (
         ("baseline_changed_not_interpreted", _provenance(study.baseline, ev.arms.get(base_id))),
         ("candidate_provenance_mismatch", _provenance(cand, ev.arms.get(cid))),
@@ -323,20 +445,6 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
             result["reasons"].extend(problems)
             return result
 
-    records = [r for r in ev.records if r["arm"] in (base_id, cid)]
-    unit = study.analysis.get("unit", "item")
-    clusters = None
-    if unit == "cluster":
-        if any(not r.get("cluster") for r in records):
-            result["outcome"] = "insufficient_evidence"
-            result["reasons"].append("cluster-level analysis declared but records lack cluster ids")
-            return result
-        clusters = {}
-        for r in records:
-            if clusters.setdefault(r["item_id"], r["cluster"]) != r["cluster"]:
-                result["outcome"] = "insufficient_evidence"
-                result["reasons"].append(f"item {r['item_id']} has conflicting cluster ids")
-                return result
     all_items = {r["item_id"] for r in records}
     samples: dict[tuple[str, str], set[int]] = {}
     for r in records:
@@ -344,16 +452,9 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
     unbalanced = sorted(i for i in all_items if samples.get((base_id, i)) != samples.get((cid, i)))
     paired = all_items - set(unbalanced)
     # Registered design: exact item set, and every (arm, item, sample) record present.
+    # (The item set itself was verified at the boundary.)
     design_problems: list[str] = []
-    expected_sha = study.raw["task"]["dataset"].get("expected_items_sha256")
     spi = study.analysis.get("samples_per_item")
-    if expected_sha is None:
-        design_problems.append("task.dataset.expected_items_sha256 not registered")
-    elif item_set_sha256(all_items) != expected_sha:
-        design_problems.append(
-            "evaluated items differ from the registered item set (missing, extra or "
-            "substituted items)"
-        )
     if spi is None:
         design_problems.append("analysis.samples_per_item not registered")
     else:
@@ -372,13 +473,13 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         design_problems.append(f"{len(unbalanced)} item(s) have different samples in the two arms")
     single_sample = spi == 1 and not design_problems
     tag = study.target["slice_tag"]
-    target_items = {r["item_id"] for r in records if tag in r.get("tags", [])} & paired
+    target_items = {i for i, m in meta.items() if tag in m[0]} & paired  # canonical tags
     items = {"all": paired, "target_slice": target_items}
     result["unit"] = unit
     result["items"] = {
         "paired": len(paired),
         "target_slice": len(target_items),
-        "unbalanced_excluded": unbalanced,
+        "unbalanced_items": unbalanced,
         "design_problems": design_problems,
         "single_sample_design": single_sample,
     }
@@ -457,7 +558,6 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
                 result["reasons"].append(f"constraint {c['id']} {c['status']}")
     if design_problems:
         # An incomplete or unbalanced run is never confirmatory, whatever the rule found.
-        result["rule_outcome_before_design_check"] = rule
         rule = "inconclusive"
         result["reasons"] += [f"design: {x}" for x in design_problems]
         result["reasons"].append("incomplete or unbalanced evidence: outcome is inconclusive")

@@ -194,6 +194,11 @@ def evidence_from_wsp(
         raise EvidenceError("WSP evidence is the weight-edit path; the candidate is not one")
     if cand["intervention"].get("evaluation", {}).get("protocol_sha256") != protocol.sha256:
         raise EvidenceError("the weight-edit candidate must register this WSP protocol_sha256")
+    if study.analysis.get("samples_per_item") != protocol.samples_per_item:
+        raise EvidenceError(
+            f"study analysis.samples_per_item ({study.analysis.get('samples_per_item')}) differs "
+            f"from the WSP protocol's samples_per_item ({protocol.samples_per_item})"
+        )
     if protocol.analysis.get("missing_policy") != "count_as_incorrect":
         raise EvidenceError("the WSP protocol must count missing outcomes as incorrect, as here")
     try:
@@ -258,7 +263,6 @@ def evidence_from_wsp(
             "wsp_protocol_frozen": protocol.frozen,
             "wsp_protocol_preregistered": prereg["preregistered"],
             "wsp_split": manifest.get("split"),
-            "slice_membership_verified": True,
             "edit_verification": verification,
         },
     )
