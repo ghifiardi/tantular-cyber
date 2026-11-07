@@ -20,11 +20,11 @@ real graders, prompts, dataset adapters and inference adapters.
 | Path | Purpose |
 |---|---|
 | `tools/wsp/wsp.py` | CLI: `protocol`, `dataset`, `ledger`, `diff`, `verify-edit`, `smoke`, `analyze`, `drift` |
-| `wsp_eval/protocol.py` | Arms, inference settings, seeds, grader, analysis plan; canonical `protocol_sha256`; frozen ⇒ no `REPLACE`; replication arms must share inference settings |
+| `wsp_eval/protocol.py` | Arms, inference settings, seeds, grader, analysis plan, optional `execution` block (`order`, `shards`); canonical `protocol_sha256`; frozen ⇒ no `REPLACE`; replication arms must share inference settings |
 | `wsp_eval/dataset.py` | Items with stable IDs and content hashes; duplicate-ID, cross-split leakage and within-split duplicate checks |
-| `wsp_eval/generation.py` | Provider-neutral `Generator` protocol (`describe()` reports the real provider/model/revision/engine); `SyntheticGenerator` only |
+| `wsp_eval/generation.py` | Provider-neutral `Generator` protocol, plus `BatchGenerator` (`generate_batch`, `close`) and `ArmLoader` for sequential runs (`describe()` reports the real provider/model/revision/engine); `SyntheticGenerator` only |
 | `wsp_eval/grading.py` | `Grader` protocol; `None` = explicit "ungraded"; a synthetic final-answer grader, **not** the authors' evaluator |
-| `wsp_eval/runner.py` | Paired, interleaved arm execution: one record per (item, sample, arm), adapter/grader/finish failures recorded as error rows, output hashed, raw text opt-in, immutable output dir outside the repo; `records_sha256`, `run_status` (aborted runs still write what exists) and `verify_run` |
+| `wsp_eval/runner.py` | Paired arm execution, interleaved (default) or `per_arm_sequential` (one arm loaded at a time through an `ArmLoader`, items sent in shards via `generate_batch`, closed before the next load): one record per (item, sample, arm), adapter/grader/finish failures recorded as error rows, output hashed, raw text opt-in, immutable output dir outside the repo; `records_sha256`, `run_status` (aborted runs still write what exists) and `verify_run` |
 | `wsp_eval/analysis.py` | Per-arm counts/accuracy/limit hits/length; item-level paired difference (duplicates raise, unbalanced items excluded), seeded item-cluster bootstrap 95% CI, exact McNemar for single samples; decision rule binding only when preregistered (`preregistration`) |
 | `wsp_eval/drift.py` | Reload/drift policy: exact identity checks (pass/fail/not_recorded) separate from stochastic reproducibility (pair categories, item-clustered CIs for accuracy, token-limit and error-rate differences); a tolerance applies only if approved in a frozen protocol before the run |
 | `wsp_eval/ledger.py` | Validates evidence-ledger records ([ledger-template.json](ledger-template.json), JSON form of the package's YAML) |
@@ -33,7 +33,7 @@ real graders, prompts, dataset adapters and inference adapters.
 | `docs/wsp/exp8-replication-protocol.md`, `docs/wsp/protocols/exp8-replication-draft.json` | Draft Experiment 8 replication protocol (unfrozen; drift tolerance and minimum effect unset) |
 | `docs/wsp/ledger/` | Ledger records. `exp8-source-pins-2026-11-03.json`: public-metadata pins for Experiment A (status `planned`) |
 | `docs/wsp/run-readiness.md` | Decisions, infrastructure and harness work required before a real run |
-| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py` | 81 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
+| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py`, `tests/test_wsp_sequential.py` | 111 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
 
 ```bash
 .venv/bin/python tools/wsp/wsp.py smoke --output ~/wsp-research/runs/smoke-$(date +%s)
@@ -161,6 +161,19 @@ manifest once, so the parsed content and `manifest_file_sha256` describe the sam
 base and candidate checkpoint digests are still computed after their tensors are compared (a
 separate read-then-hash follow-up). A manifest with NaN or Infinity fails with an error rather
 than a report.
+
+2026-11-07: sequential per-arm loading and shard batching (run-readiness C4), with stub
+engines only. A protocol may declare `execution: {"order": "per_arm_sequential", "shards": k}`
+(absent means `interleaved`, so existing protocols and hashes are unchanged; when present it is
+hashed). The runner then loads one arm at a time in protocol order through a loader, checks
+that every load reports a distinct `load_id`, sends the arm's items in `k` batches (shard `i`
+holds the selected items `[i::k]` in dataset file order, like the authors' `rows[i::10]`), and
+closes the generator before the next load. Every request still gets its own records (with
+`shard` and `batch_size`); a request that fails inside a batch errors only its own rows; a
+batch that raises or returns the wrong number of entries errors every request in it; a load,
+load-identity or close failure, or an interrupt, aborts the run, which keeps the records so far
+and is refused by `verify_run`. The manifest records each load's position, `load_id` and
+status. No inference adapter exists yet (C1); nothing here touches a model or a GPU.
 
 ## Readiness (unchanged from the package)
 

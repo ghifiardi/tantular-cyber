@@ -71,6 +71,11 @@ artifact.
    *Needed:* a sequential-per-arm (or per-load) mode, with a batch request type if R7 keeps
    the shard batching. Pairing by (item, sample) is unaffected; the drift identity checks
    already expect separate loads.
+   *Status 2026-11-07:* the harness side is implemented and tested with stub engines only
+   (`execution: per_arm_sequential` with `shards`, `ArmLoader`, `BatchGenerator`; see
+   [harness.md](harness.md)). The real inference adapter (C1) that implements these
+   interfaces is not written, and no protocol in this repository declares the mode yet
+   (adding it to the Experiment 8 draft is part of R7).
 5. **Checkpoint checks** on the downloaded files: `wsp.py diff` / `verify-edit` against
    `exp8_math/runs/p50c/edit/manifest.json`, file SHA-256 against the ledger, and a tokenizer
    and chat-template comparison (protocol §2). These have run on synthetic files only.

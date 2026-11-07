@@ -3,10 +3,22 @@
 Every (item, sample, arm) request produces exactly one record, whatever happens: graded,
 ungraded (grader could not decide) or error (adapter raised, returned something that is not a
 :class:`Generation`, reported an abnormal or self-contradictory finish, returned the wrong
-number of samples, or the grader itself raised). Arms are interleaved per item
-and sample in protocol order, with the protocol's seed for that sample, so arms see the same
-prompts under the same seeds. Raw outputs are hashed; their text is written only when
-``keep_outputs`` is set, because model output belongs in access-controlled research storage.
+number of samples, or the grader itself raised). Arms see the same prompts under the same
+seeds. Two execution orders exist (``protocol.execution_order``):
+
+* ``interleaved`` (default): every arm's generator is loaded up front and requests are
+  interleaved per item and sample in protocol order.
+* ``per_arm_sequential``: one arm at a time, in protocol order. Each arm is loaded by its own
+  loader (a separate load with a distinct ``load_id``, checked), its items are sent in
+  ``protocol.shards`` batches (shard ``k`` holds the selected items ``[k::shards]`` in dataset
+  file order, like the authors' ``rows[i::10]``), and the generator is closed before the next
+  arm is loaded. Each record keeps its own row and also carries ``shard`` and ``batch_size``;
+  its ``latency_s`` is the wall time of the batch call it was part of. A batch that raises, or
+  returns the wrong number of entries, produces error rows for every request in it; a load,
+  load-identity or close failure aborts the run.
+
+Raw outputs are hashed; their text is written only when ``keep_outputs`` is set, because model
+output belongs in access-controlled research storage.
 
 Outputs go to a new or empty directory (runs are immutable) that is, by default, outside
 this repository checkout so research artifacts are not committed by accident.
@@ -20,6 +32,7 @@ run directory against its protocol before anything is analyzed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import platform
 import sys
@@ -34,7 +47,7 @@ from typing import Any
 
 from . import HARNESS_VERSION
 from .dataset import Item, check_items, dataset_sha256
-from .generation import Generation, GenerationRequest, Generator
+from .generation import ArmLoader, Generation, GenerationRequest, Generator
 from .grading import Grader
 from .hashing import harness_code_sha256, sha256_bytes, sha256_file
 from .protocol import Protocol
@@ -75,10 +88,11 @@ def _prepare_out_dir(out_dir: Path, allow_in_repo: bool) -> Path:
 def run_paired(
     protocol: Protocol,
     items: Sequence[Item],
-    generators: Mapping[str, Generator],
+    generators: Mapping[str, Generator] | None,
     grader: Grader,
     out_dir: Path,
     *,
+    loaders: Mapping[str, ArmLoader] | None = None,
     split: str = "development",
     purpose: str,
     operator: str,
@@ -93,14 +107,28 @@ def run_paired(
             raise RunError("held-out evaluation requires a frozen protocol")
         if not heldout_authorized_by:
             raise RunError("held-out evaluation requires heldout_authorized_by (evaluator)")
-    if protocol.synthetic is False and any(
-        g.describe().get("synthetic") for g in generators.values()
-    ):
-        raise RunError("synthetic generators may only be used with a synthetic protocol")
-    missing = [a.id for a in protocol.arms if a.id not in generators]
-    extra = sorted(set(generators) - {a.id for a in protocol.arms})
+    sequential = protocol.execution_order == "per_arm_sequential"
+    if sequential:
+        if generators is not None or loaders is None:
+            raise RunError(
+                "a per_arm_sequential protocol takes loaders (one per arm), not generators"
+            )
+        given: Mapping[str, Any] = loaders
+        if not all(callable(f) for f in loaders.values()):
+            raise RunError("every loader must be callable and return a freshly loaded generator")
+    else:
+        if loaders is not None or generators is None:
+            raise RunError("an interleaved protocol takes loaded generators, not loaders")
+        given = generators
+        if protocol.synthetic is False and any(
+            g.describe().get("synthetic") for g in generators.values()
+        ):
+            raise RunError("synthetic generators may only be used with a synthetic protocol")
+    missing = [a.id for a in protocol.arms if a.id not in given]
+    extra = sorted(set(given) - {a.id for a in protocol.arms})
     if missing or extra:
-        raise RunError(f"generators must match protocol arms (missing {missing}, extra {extra})")
+        kind = "loaders" if sequential else "generators"
+        raise RunError(f"{kind} must match protocol arms (missing {missing}, extra {extra})")
     if grader.id != protocol.grader.get("id") or grader.revision != protocol.grader.get("revision"):
         raise RunError("grader id/revision differ from the protocol")
 
@@ -146,21 +174,32 @@ def run_paired(
             latency_s=latency,
         )
 
-    def execute(item: Item, arm: Any, samples: list[tuple[int, int]]) -> None:
-        n = len(samples)
+    def request(item: Item, arm: Any, samples: list[tuple[int, int]]) -> GenerationRequest:
         seed = samples[0][1]
-        req = GenerationRequest(arm.id, item.id, item.prompt, dict(arm.inference), seed, n)
-        recs = [record(item, arm, k, s, n) for k, s in samples]
+        return GenerationRequest(
+            arm.id, item.id, item.prompt, dict(arm.inference), seed, len(samples)
+        )
+
+    def execute(item: Item, arm: Any, samples: list[tuple[int, int]]) -> None:
+        req = request(item, arm, samples)
+        recs = [record(item, arm, k, s, len(samples)) for k, s in samples]
         t0 = clock()
         try:
-            result = generators[arm.id].generate(req)
+            result: Any = generators[arm.id].generate(req)  # type: ignore[index]
         except Exception as exc:  # recorded, never dropped: one error row per requested sample
-            latency = round(clock() - t0, 6)
+            result = exc
+        process(item, arm, recs, result, round(clock() - t0, 6))
+
+    def process(
+        item: Item, arm: Any, recs: list[dict[str, Any]], result: Any, latency: float
+    ) -> None:
+        """Turn one request's result (or the exception that failed it) into its records."""
+        n = len(recs)
+        if isinstance(result, Exception):
             for rec in recs:
-                failed(rec, type(exc).__name__, str(exc), latency)
+                failed(rec, type(result).__name__, str(result), latency)
             records.extend(recs)
             return
-        latency = round(clock() - t0, 6)
         gens = result if isinstance(result, list) else [result]
         if len(gens) != n:
             for rec in recs:
@@ -228,9 +267,105 @@ def run_paired(
                     {"arm": arm.id, "item_id": item.id, "sample": rec["sample"], "text": gen.text}
                 )
 
+    def units(shard_items: list[Item]) -> list[tuple[Item, list[tuple[int, int]]]]:
+        if protocol.sampling_mode == "n_per_request":
+            batch = [(k, protocol.seeds[0]) for k in range(protocol.samples_per_item)]
+            return [(item, batch) for item in shard_items]
+        return [
+            (item, [(sample, seed)])
+            for item in shard_items
+            for sample, seed in enumerate(protocol.seeds)
+        ]
+
+    def run_arm(arm: Any, gen: Any) -> None:
+        in_file_order = [i for i in items if i.split == split]
+        for shard_index in range(protocol.shards):
+            shard_items = in_file_order[shard_index :: protocol.shards]
+            if not shard_items:
+                continue
+            todo = units(shard_items)
+            reqs = [request(item, arm, samples) for item, samples in todo]
+            recs_per = []
+            for item, samples in todo:
+                recs = [record(item, arm, k, sd, len(samples)) for k, sd in samples]
+                for rec in recs:
+                    rec.update(shard=shard_index, batch_size=len(reqs))
+                recs_per.append(recs)
+            t0 = clock()
+            try:
+                results: Any = gen.generate_batch(reqs)
+            except Exception as exc:  # the whole batch failed: an error row for every request
+                results = [exc] * len(reqs)
+            latency = round(clock() - t0, 6)
+            if not isinstance(results, list | tuple) or len(results) != len(reqs):
+                got = len(results) if isinstance(results, list | tuple) else type(results).__name__
+                mismatch = RuntimeError(f"batch of {len(reqs)} requests returned {got}")
+                results = [mismatch] * len(reqs)
+                mismatch_class = "BatchSizeMismatch"
+            else:
+                mismatch_class = None
+            for (item, _samples), recs, res in zip(todo, recs_per, results, strict=True):
+                if mismatch_class is not None:
+                    for rec in recs:
+                        failed(rec, mismatch_class, str(res), latency)
+                    records.extend(recs)
+                else:
+                    process(item, arm, recs, res, latency)
+
+    described: dict[str, dict[str, Any] | None] = {a.id: None for a in protocol.arms}
+    loads: list[dict[str, Any]] = []
+
+    def run_sequential() -> None:
+        seen: set[str] = set()
+        for position, arm in enumerate(protocol.arms):
+            entry: dict[str, Any] = {
+                "arm": arm.id,
+                "position": position,
+                "status": "load_failed",  # until the loader returns
+                "loaded_at": _now(),
+            }
+            loads.append(entry)
+            gen = loaders[arm.id]()  # type: ignore[index]  # a load failure aborts the run
+            entry["status"] = "running"
+            try:
+                desc = gen.describe()
+                if not isinstance(desc, dict):
+                    raise RunError(f"arm {arm.id}: describe() must return an object")
+                described[arm.id] = desc
+                entry["load_id"] = desc.get("load_id")
+                if protocol.synthetic is False and desc.get("synthetic"):
+                    raise RunError(
+                        "synthetic generators may only be used with a synthetic protocol"
+                    )
+                load_id = desc.get("load_id")
+                if not isinstance(load_id, str) or not load_id:
+                    raise RunError(f"arm {arm.id}: the loaded generator must report a load_id")
+                if load_id in seen:
+                    raise RunError(
+                        f"arm {arm.id}: load_id {load_id!r} was already used; every arm must be "
+                        "a separate load"
+                    )
+                seen.add(load_id)
+                if not callable(getattr(gen, "generate_batch", None)):
+                    raise RunError(
+                        f"arm {arm.id}: a per_arm_sequential generator needs generate_batch"
+                    )
+                run_arm(arm, gen)
+            except BaseException:
+                _close_quietly(gen)
+                entry.update(status="failed", finished_at=_now())
+                raise
+            close = getattr(gen, "close", None)
+            if callable(close):
+                entry["status"] = "close_failed"
+                close()  # a close failure aborts the run: the next load may not have the GPU
+            entry.update(status="complete", closed=callable(close), finished_at=_now())
+
     abort: BaseException | None = None
     try:
-        for item in selected:
+        if sequential:
+            run_sequential()
+        for item in [] if sequential else selected:
             if protocol.sampling_mode == "n_per_request":
                 batch = [(k, protocol.seeds[0]) for k in range(protocol.samples_per_item)]
                 for arm in protocol.arms:
@@ -248,6 +383,7 @@ def run_paired(
         "run_id": run_id,
         "run_status": "aborted" if abort is not None else "complete",
         "abort_reason": None if abort is None else type(abort).__name__,
+        "abort_message": None if abort is None else str(abort)[:_MAX_ERROR_CHARS],
         "harness_version": HARNESS_VERSION,
         "harness_code_sha256": harness_code_sha256(),
         "purpose": purpose,
@@ -274,12 +410,17 @@ def run_paired(
                 "checkpoint": a.checkpoint,
                 "inference": a.inference,
                 "engine": a.engine,
-                "generator": generators[a.id].describe(),
+                "generator": described[a.id] if sequential else generators[a.id].describe(),
             }
             for a in protocol.arms
         ],
         "seeds": list(protocol.seeds),
         "sampling_mode": protocol.sampling_mode,
+        "execution": {
+            "order": protocol.execution_order,
+            "shards": protocol.shards,
+            "loads": loads if sequential else None,
+        },
         "samples_per_item": protocol.samples_per_item,
         "drift_policy": protocol.drift,
         "environment": {
@@ -310,6 +451,15 @@ def run_paired(
     if len(records) != expected:  # defensive: execute() always writes one row per sample
         raise RunError(f"run wrote {len(records)} records, expected {expected}")
     return RunResult(run_id, out, manifest, records)
+
+
+def _close_quietly(gen: Any) -> None:
+    # Called only while another exception is propagating: release the engine if possible, but
+    # never let a second failure hide the first.
+    close = getattr(gen, "close", None)
+    if callable(close):
+        with contextlib.suppress(Exception):  # the original failure is the one reported
+            close()
 
 
 def _keep_reported(rec: dict[str, Any], gen: Generation) -> None:
