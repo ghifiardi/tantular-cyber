@@ -2041,7 +2041,7 @@ def test_a_requested_run_that_fails_to_load_prevents_a_pass_and_an_approval(
         and "cannot support an approval" in (report["limitations"][0])
     )
     t = _by_id(report)[THRESH]
-    assert t["outcome"] == "inconclusive" and t["rule_outcome"] == MEETS
+    assert t["outcome"] == "inconclusive" and t["rule_outcome"] == "inconclusive"  # J2
     assert any("failed to load" in x for x in t["reasons"])
     assert "failed to load" in (tmp_path / "r" / "report.md").read_text()
     assert _decide_approve(study_path, tmp_path / "r" / "report.json", tmp_path / "d.json") == 1
@@ -2218,3 +2218,152 @@ def test_wsp_synthetic_label_must_be_a_boolean(tmp_path, value) -> None:
 def test_wsp_synthetic_boolean_is_kept(tmp_path) -> None:
     proto, res, study_raw, tags = _wsp_setup(tmp_path)
     assert evidence_from_wsp(res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags).synthetic
+
+
+# --- ninth round: one materialization of load errors; decision report shape (J1-J6) ------
+
+
+class _BadRepr:
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr")
+
+
+@pytest.mark.parametrize(
+    ("errors", "expected"),
+    [
+        # J1: a generator used to be consumed by the first read, leaving the JSON empty.
+        ((e for e in ["b: records.jsonl is missing"]), ["b: records.jsonl is missing"]),
+        # J3: a bare string used to become one error per character.
+        ("b: records.jsonl is missing", ["b: records.jsonl is missing"]),
+        # J3: non-string entries used to raise TypeError.
+        ([1], ["non-string evidence error entry (int): 1"]),
+        ([None], ["non-string evidence error entry (NoneType): None"]),
+        ([_BadRepr()], ["non-string evidence error entry (_BadRepr): <unprintable>"]),
+        (5, ["evidence_errors was not a list of strings (int)"]),
+        (("a", "b"), ["a", "b"]),
+    ],
+)
+def test_load_errors_are_materialized_once_and_kept_readable(
+    tmp_path, raw, alerts, errors, expected
+) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    report = build_report(study, [_load(run, study)], errors)
+    assert report["evidence_errors"] == expected
+    assert report["evidence_complete"] is False
+    assert report["outcome"] == "inconclusive" and report["candidates_meeting_criteria"] == []
+    assert f"{len(expected)} requested evidence run(s) failed to load" in report["limitations"][0]
+    t = _by_id(report)[THRESH]
+    assert t["outcome"] == t["rule_outcome"] == "inconclusive"  # J2: no pass shown anywhere
+    md = render_markdown(report)
+    assert "## Evidence not used" in md and expected[0] in md
+    assert "if it were binding" not in md
+
+
+def test_no_load_errors_means_complete(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    for errors in (None, [], (), (e for e in [])):
+        report = build_report(study, [_load(run, study)], errors)
+        assert report["evidence_complete"] is True and report["evidence_errors"] == []
+        assert report["outcome"].startswith("candidates_meet")
+
+
+def test_rule_outcome_wording_does_not_suggest_a_binding_result(tmp_path, raw, alerts) -> None:
+    # J2: an unfrozen study's rule outcome is shown beside the outcome, without "if it were
+    # binding" (which implied only one gate stood in the way).
+    _, report = _report(tmp_path, raw, alerts)
+    md = render_markdown(report)
+    assert "if it were binding" not in md
+    assert "is not this candidate's result" in md
+
+
+@pytest.mark.parametrize(
+    ("report", "message"),
+    [
+        ([], "not a report object"),
+        ("x", "not a report object"),
+        ({"candidates": [1]}, "candidates are not a list"),
+        ({"candidates": "x"}, "candidates are not a list"),
+        ({"candidates": [{"candidate": 1, "outcome": "x"}]}, "candidates are not a list"),
+        ({"candidates": [], "evidence_errors": "x"}, "evidence_errors is not a list"),
+    ],
+)
+def test_decision_refuses_a_malformed_report(tmp_path, raw, alerts, report, message) -> None:
+    # J4: these raised AttributeError or TypeError from make_decision / decide.
+    study, _ = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    kw = {"decided_at": "2026-11-05T09:00Z", "rationale": "r", "decided_by": "reviewer1"}
+    for decision in ("reject", "approve_further_evaluation"):
+        with pytest.raises(ValueError, match=message):
+            make_decision(study, report, candidate=THRESH, decision=decision, **kw)
+    assert message in validate_decision({}, study, report)[0]
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("[]", "not a report object"),
+        ('{"candidates": [1]}', "candidates are not a list"),
+        ("{", "is not valid JSON"),
+        ("[" * 50_000 + "]" * 50_000, "nested too deeply"),
+    ],
+)
+def test_decide_cli_refuses_a_malformed_report_file(
+    tmp_path, raw, alerts, capsys, content, message
+) -> None:
+    study_path, _, _ = _frozen_cli_runs(tmp_path, raw, alerts)
+    bad = tmp_path / "report.json"
+    bad.write_text(content)
+    for decision in ("reject", "approve_further_evaluation"):
+        argv = [
+            "decide",
+            "--study",
+            str(study_path),
+            "--report",
+            str(bad),
+            "--candidate",
+            THRESH,
+            "--decision",
+            decision,
+            "--decided-by",
+            "reviewer1",
+            "--rationale",
+            "r",
+            "--output",
+            str(tmp_path / f"{decision}.json"),
+        ]
+        assert improve.main(argv) == 1
+        assert message in capsys.readouterr().err
+        assert not (tmp_path / f"{decision}.json").exists()
+
+
+def test_cli_load_errors_name_the_run_as_given(tmp_path, raw, alerts, capsys) -> None:
+    # J5: `x/run` and `y/run` used to both appear as `run: ...`.
+    study_path, (a,), (ha,) = _frozen_cli_runs(tmp_path, raw, alerts)
+    other = tmp_path / "y" / a.name
+    code, out = _cli_report(
+        capsys,
+        [
+            "report",
+            "--study",
+            str(study_path),
+            "--evidence",
+            str(a),
+            str(other),
+            "--expected-run-manifest-sha256",
+            ha,
+            "0" * 64,
+            "--output",
+            str(tmp_path / "r"),
+        ],
+    )
+    assert code == 0
+    (err,) = out["evidence_errors"]
+    assert err.startswith(f"{other}: ")
+
+
+def test_run_manifest_identifier_labels_are_distinct_from_the_edit_manifest_hash() -> None:
+    # J6: user-facing text names the run-manifest identifier as such.
+    from improve_eval.report import TRUST_NOTE
+
+    assert "run-manifest identifier" in TRUST_NOTE
+    doc = (ROOT / "docs" / "research" / "improvement-workflow.md").read_text()
+    assert "| Manifest identifier" not in doc and "Two different hashes" in doc

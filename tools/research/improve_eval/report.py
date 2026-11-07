@@ -33,7 +33,7 @@ MALFORMED_LIMIT = (
 )
 TRUST_NOTE = (
     "Checks in this report are integrity and consistency checks against the registered study "
-    "and, where recorded, an external manifest identifier. None of them authenticates who "
+    "and, where recorded, an external run-manifest identifier. None of them authenticates who "
     "produced the evidence or the truth of its outcomes, labels, timestamps or artifact claims."
 )
 DECISION_NOTE = (
@@ -62,6 +62,34 @@ METHOD_NOTE = (
 )
 
 
+def _evidence_errors(errors: Any) -> list[str]:
+    """Materialize and validate caller-supplied load errors exactly once.
+
+    Every requested run that failed to load must stay visible as one readable entry, whatever
+    shape the caller passed: a generator is read once, a bare string is one error (not one per
+    character), and a non-string entry is kept as a described error rather than raising.
+    """
+    if errors is None:
+        return []
+    if type(errors) is str:
+        return [errors]
+    try:
+        items = list(errors)
+    except TypeError:
+        return [f"evidence_errors was not a list of strings ({type(errors).__name__})"]
+    out = []
+    for e in items:
+        if type(e) is str:
+            out.append(e)
+        else:
+            try:
+                shown = repr(e)[:200]
+            except Exception:  # a broken __repr__ must not hide the error
+                shown = "<unprintable>"
+            out.append(f"non-string evidence error entry ({type(e).__name__}): {shown}")
+    return out
+
+
 def build_report(
     study: Study, evidence: Sequence[Evidence], evidence_errors: Sequence[str] = ()
 ) -> dict[str, Any]:
@@ -69,11 +97,17 @@ def build_report(
     # Requested evidence that failed to load (passed in by the caller, e.g. the CLI) means the
     # report is not built from everything that was asked for: no candidate may meet the
     # declared criteria, whatever the remaining runs show. The errors stay listed verbatim.
-    not_loaded = list(evidence_errors)
+    not_loaded = _evidence_errors(evidence_errors)
     if not_loaded:
         for r in results:
-            if r["outcome"] == "meets_declared_criteria_pending_human_decision":
-                r["outcome"] = "inconclusive"
+            # Neither the outcome nor the rule outcome may show a pass computed from the runs
+            # that happened to load.
+            downgraded = False
+            for key in ("outcome", "rule_outcome"):
+                if r.get(key) == "meets_declared_criteria_pending_human_decision":
+                    r[key] = "inconclusive"
+                    downgraded = True
+            if downgraded:
                 r["reasons"].append(
                     f"{len(not_loaded)} requested evidence run(s) failed to load (see "
                     "evidence_errors); a report missing requested evidence cannot meet the "
@@ -82,7 +116,7 @@ def build_report(
     meets = [r["candidate"] for r in results if r["outcome"].startswith("meets_declared")]
     # A malformed evidence object already makes every candidate insufficient_evidence; it is
     # listed as an error and not read further, and the report's evidence_class says so.
-    shaped, evidence_errors = [], list(evidence_errors)
+    shaped, evidence_errors = [], list(not_loaded)
     if type(evidence) not in (list, tuple):
         evidence_errors.append("evidence must be a list of Evidence objects")
         evidence = [None]  # counted as malformed below
@@ -300,7 +334,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines += ["", f"### `{r['candidate']}` ({r['intervention_type']})", ""]
         lines.append(f"Hypothesis: {r['hypothesis']}")
         if r.get("rule_outcome") and r["rule_outcome"] != r["outcome"]:
-            lines.append(f"Rule outcome if it were binding: `{r['rule_outcome']}`.")
+            lines.append(
+                f"Declared rules applied to this evidence alone gave `{r['rule_outcome']}`. "
+                "That is not this candidate's result: the outcome above also reflects the "
+                "gates in the reasons below (for example preregistration timing, a "
+                "cluster-unit study or an unreviewed method)."
+            )
         eff = r.get("target_effect")
         if eff:
             lines.append(

@@ -604,7 +604,7 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
     ):
         # The start time (preregistration), arm artifact claims and WSP split come from the
         # run's manifest, which no hash in the run directory binds. Without a comparison with
-        # an externally recorded manifest identifier, post-run edits are undetectable.
+        # an externally recorded run-manifest identifier, post-run edits are undetectable.
         rule = "inconclusive"
         result["reasons"].append(
             "evidence manifest not checked against an externally recorded run_manifest_sha256: "

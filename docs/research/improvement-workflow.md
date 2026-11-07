@@ -259,6 +259,18 @@ records `evidence_complete: false`, and no candidate can meet the declared crite
 `approve_further_evaluation` on such a report. Otherwise, dropping one of two runs that both
 pair a candidate would turn `insufficient_evidence` into a pass.
 
+Load errors are kept exactly once, as strings: a generator is read once, a bare string is one
+error, and a non-string entry is kept as a described error. When evidence is incomplete,
+neither a candidate's `outcome` nor its `rule_outcome` shows a pass. `decide` refuses a report
+file that is not valid JSON or not a report object (exit 1).
+
+**Known race, out of scope.** `evidence_from_wsp` takes its values from the manifest that
+`verify_run` parsed and computes the run-manifest identifier from a second read of the same
+file. A file replaced between those two reads would be identified by different bytes than
+were used. That is concurrent modification of the run directory, not ordinary input; like any
+post-run change, it needs separately controlled storage for real runs (see the readiness
+plan). The triage loader reads the manifest once.
+
 **CLI flags.** `--evidence` and `--expected-run-manifest-sha256` may each be given once, with
 every value after it; a repeated flag is a usage error (exit 2), not a silent overwrite. The
 *i*-th identifier is checked against the *i*-th run, and a count mismatch exits 2. JSON nested
@@ -450,7 +462,7 @@ infrastructure or people; not implemented or verified here.
 | Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol, arms, dataset, slice membership and held-out split | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, and trusting who ran it, is **Op**. Manifest linkage needs the separate WSP change. Enforced by the loader only; a hand-built object can assert it |
 | Invented limits labelled `synthetic_fixture`; real studies cannot use them | Impl + Test | Who sets real limits, and when, is **Op** |
 | Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated. The evidence start time comes from the manifest and is bound only by an external manifest record |
-| Manifest identifier; `meets` needs a match with an externally recorded value | Impl + Test | Detects post-run edits only if the external record is itself protected (independent access control or signatures) → **Op**; not authentication |
+| Run-manifest identifier; `meets` needs a match with an externally recorded value | Impl + Test | Detects post-run edits only if the external record is itself protected (independent access control or signatures) → **Op**; not authentication |
 | Evidence bound to study and dataset; tampered, aborted or mixed runs refused | Impl + Test | Protects records against accidents, not against rewriting both records and manifest. The manifest's own fields are bound only by an external record (row below). Loader only; on direct calls only shapes, design and metadata are rechecked |
 | Decision recorded; no self-approval; marked unauthenticated and unenforced; report self-hash checked | Impl + Test | The self-hash catches accidental edits only (not tamper-evident). Write access to decision files and any real approval system are **Op** |
 | Calibration not the evaluation set | Impl + Test (identity and hash) | Disjointness of differently packaged data is **Op** |

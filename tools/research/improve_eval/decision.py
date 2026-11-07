@@ -38,7 +38,26 @@ FIELDS = {
 }
 
 
-def validate_decision(rec: dict[str, Any], study: Study, report: dict[str, Any]) -> list[str]:
+def _report_problem(report: Any) -> str | None:
+    """Ordinary-input check that a parsed report file has the shape decisions read."""
+    if type(report) is not dict:
+        return "the report file is not a report object"
+    cands = report.get("candidates")
+    if type(cands) is not list or not all(
+        type(c) is dict and type(c.get("candidate")) is str and type(c.get("outcome")) is str
+        for c in cands
+    ):
+        return "the report's candidates are not a list of candidate results"
+    errs = report.get("evidence_errors", [])
+    if type(errs) is not list:
+        return "the report's evidence_errors is not a list"
+    return None
+
+
+def validate_decision(rec: dict[str, Any], study: Study, report: Any) -> list[str]:
+    problem = _report_problem(report)
+    if problem:
+        return [problem]
     problems = []
     if set(rec) != FIELDS:
         return [f"decision record must have exactly {sorted(FIELDS)}"]
@@ -98,6 +117,9 @@ def make_decision(
     decided_at: str,
     rationale: str,
 ) -> dict[str, Any]:
+    problem = _report_problem(report)
+    if problem:
+        raise ValueError(problem)
     rec = {
         "study_sha256": study.sha256,
         "report_sha256": report.get("report_sha256"),

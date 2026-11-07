@@ -170,14 +170,19 @@ def main(argv: list[str] | None = None) -> int:
                         load_evidence(run, study, expected[i] if expected is not None else None)
                     )
                 except (EvidenceError, OSError, ValueError, RecursionError) as exc:
-                    errors.append(f"{run.name}: {exc}")  # recorded in the report, not dropped
+                    errors.append(f"{run}: {exc}")  # the run as given; recorded, not dropped
             report = build_report(study, evidence, errors)
             out = _write_report(report, args.output, args.allow_in_repo)
             _print({"report": str(out), "outcome": report["outcome"], "evidence_errors": errors})
             return 0
         if args.cmd == "decide":
             study = load_study(args.study)
-            report = json.loads(args.report.read_text(encoding="utf-8"))
+            try:
+                report = json.loads(args.report.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                raise ValueError(f"{args.report} is not valid JSON") from exc
+            except RecursionError as exc:
+                raise ValueError(f"{args.report} is nested too deeply to parse") from exc
             now = datetime.now(UTC).isoformat(timespec="minutes").replace("+00:00", "Z")
             rec = make_decision(
                 study,
