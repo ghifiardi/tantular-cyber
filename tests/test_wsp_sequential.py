@@ -649,3 +649,137 @@ def test_interleaved_returned_exception_is_still_invalid_generation(tmp_path, ra
     )
     rows = [r for r in res.records if r["arm"] == "candidate"]
     assert {r["error_class"] for r in rows} == {"InvalidGeneration"}
+
+
+# --- engine reference lifetime (short check of de6571a) -----------------------------------
+
+
+def test_previous_engine_can_be_collected_before_the_next_load(tmp_path, raw, items) -> None:
+    # The runner keeps only weak references to earlier engines and drops its own strong one
+    # after close(), so a backend that frees memory on collection can do so before the next
+    # load. This checks Python reference lifetime with stub engines; it does not show that a
+    # real engine frees GPU memory.
+    import gc
+    import weakref
+
+    proto = parse_protocol({**raw, **SEQ})
+    templates = synthetic_generators(items, proto.seeds)
+    refs: list = []
+    alive_at_load: list = []
+    events: list = []
+
+    class FreshErrors(StubEngine):
+        # The shared fixture table stores exception instances; raising a stored instance
+        # attaches a traceback that references this engine and would keep it alive through the
+        # fixture. Raise a fresh copy instead, so only the runner's own references are tested
+        # (including that it keeps no exception, and so no traceback, from a failed request).
+        def _lookup(self, key):
+            entry = self.table.get(key)
+            if isinstance(entry, Exception):
+                raise type(entry)(*entry.args)
+            return super()._lookup(key)
+
+    def make(arm_id):
+        def load():
+            gc.collect()
+            alive_at_load.append([r() is not None for r in refs])
+            gen = FreshErrors(templates[arm_id], f"{arm_id}-gc", events)
+            refs.append(weakref.ref(gen))
+            return gen  # the test keeps no strong reference
+
+        return load
+
+    loaders = {a.id: make(a.id) for a in proto.arms}
+    _, res, _ = _run(tmp_path, {**raw, **SEQ}, items, loaders=loaders, events=events)
+    assert res.manifest["run_status"] == "complete"
+    assert any(r["status"] == "error" for r in res.records)  # a failed request was included
+    assert alive_at_load == [[], [False], [False, False]]
+
+
+def test_reuse_of_any_earlier_engine_is_detected(tmp_path, raw, items) -> None:
+    # Weak references must not weaken reuse detection to the previous arm only: the third arm
+    # handing back the first arm's (still alive) engine is refused.
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+    templates = synthetic_generators(items, proto.seeds)
+    first = StubEngine(templates["reference"], "first-1", events)  # kept alive by the test
+
+    def third():
+        first.load_id = "first-relabelled"
+        return first
+
+    loaders = _loaders(
+        items, proto.seeds, events, overrides={"reference": lambda: first, "reload": third}
+    )
+    manifest, _ = _assert_aborted(tmp_path, raw, items, loaders, events, RunError, "already used")
+    loads = manifest["execution"]["loads"]
+    assert [x["status"] for x in loads] == ["complete", "complete", "failed"]
+    assert loads[2]["closed"] == "not_attempted_reused"  # the earlier arm already closed it
+    closes = [e for e in events if e[0] == "close"]
+    assert closes.count(("close", "first-1")) == 1  # closed once, by its own arm
+    assert ("close", "first-relabelled") not in closes  # not closed again when reused
+
+
+def test_an_engine_that_cannot_be_weak_referenced_is_refused(tmp_path, raw, items) -> None:
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+
+    class Slotted:
+        __slots__ = ("closed",)
+
+        def __init__(self):
+            self.closed = False
+
+        def describe(self):
+            return {"load_id": "slotted-1", "synthetic": True}
+
+        def generate_batch(self, requests):
+            raise AssertionError("not reached")
+
+        def close(self):
+            self.closed = True
+            events.append(("close", "slotted-1"))
+
+    loaders = _loaders(items, proto.seeds, events, overrides={"reference": Slotted})
+    manifest, records = _assert_aborted(
+        tmp_path, raw, items, loaders, events, RunError, "weak references"
+    )
+    assert records == [] and ("close", "slotted-1") in events  # refused, then released
+    assert manifest["execution"]["loads"][0]["closed"] is True
+
+
+def test_a_close_failure_on_success_is_recorded(tmp_path, raw, items) -> None:
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+    templates = synthetic_generators(items, proto.seeds)
+
+    class NoRelease(StubEngine):
+        def close(self):
+            raise RuntimeError("engine did not release the GPU")
+
+    loaders = _loaders(
+        items,
+        proto.seeds,
+        events,
+        overrides={"reference": lambda: NoRelease(templates["reference"], "ref-y", events)},
+    )
+    manifest, _ = _assert_aborted(tmp_path, raw, items, loaders, events, RuntimeError, "GPU")
+    entry = manifest["execution"]["loads"][0]
+    assert (entry["status"], entry["closed"]) == ("close_failed", False)
+
+
+def test_one_bad_entry_fails_the_whole_batch(tmp_path, raw, items) -> None:
+    # Documented: a single entry that answers another request makes every request of that
+    # batch an error, because the batch's mapping can no longer be trusted.
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+
+    def one_wrong(self, requests):
+        out = SyntheticGenerator.generate_batch(self, requests)
+        return [out[1], *out[1:]]  # first entry duplicates the second
+
+    loaders = _with(items, proto.seeds, events, "candidate", one_wrong)
+    _, res, _ = _run(tmp_path, {**raw, **SEQ}, items, loaders=loaders, events=events)
+    for shard in (0, 1):
+        rows = [r for r in res.records if r["arm"] == "candidate" and r["shard"] == shard]
+        assert rows and {r["error_class"] for r in rows} == {"BatchOrderMismatch"}

@@ -37,6 +37,7 @@ import platform
 import sys
 import time
 import uuid
+import weakref
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -336,7 +337,11 @@ def run_paired(
 
     def run_sequential() -> None:
         seen: set[str] = set()
-        engines: list[Any] = []  # kept so a reused engine object is recognised (not just its id)
+        # Weak references only: every earlier engine is still recognised if a loader hands it
+        # back (reuse detection covers all earlier arms, not just the previous one), but the
+        # runner itself never keeps an engine alive after its arm. An engine that cannot be
+        # weak-referenced is refused, because tracking it would need a strong reference.
+        earlier: list[weakref.ref[Any]] = []
         for position, arm in enumerate(protocol.arms):
             entry: dict[str, Any] = {
                 "arm": arm.id,
@@ -345,16 +350,23 @@ def run_paired(
                 "load_started_at": _now(),
             }
             loads.append(entry)
-            gen = loaders[arm.id]()  # type: ignore[index]  # a load failure aborts the run
+            gen: Any = loaders[arm.id]()  # type: ignore[index]  # a load failure aborts the run
             entry["status"] = "running"
-            reused = any(gen is e for e in engines)
-            engines.append(gen)
+            reused = any(ref() is gen for ref in earlier)
             try:
                 if reused:
                     raise RunError(
                         f"arm {arm.id}: the loader returned an engine object already used by an "
                         "earlier arm; every arm must be a separate load"
                     )
+                try:
+                    earlier.append(weakref.ref(gen))
+                except TypeError as exc:
+                    raise RunError(
+                        f"arm {arm.id}: the engine ({type(gen).__name__}) does not support weak "
+                        "references; the runner tracks engines only weakly so it never keeps one "
+                        "alive after its arm"
+                    ) from exc
                 desc = gen.describe()
                 if not isinstance(desc, dict):
                     raise RunError(f"arm {arm.id}: describe() must return an object")
@@ -384,13 +396,21 @@ def run_paired(
                     )
                 run_arm(arm, gen)
             except BaseException:
-                if not reused:
-                    entry["closed"] = _close_quietly(gen)
+                # A reused engine belongs to an earlier arm, which already closed it; it is not
+                # closed a second time, and the manifest says so.
+                entry["closed"] = "not_attempted_reused" if reused else _close_quietly(gen)
                 entry.update(status="failed", finished_at=_now())
                 raise
-            entry["status"] = "close_failed"
-            gen.close()  # a close failure aborts the run: the next load may not have the GPU
+            try:
+                gen.close()  # a close failure aborts the run: the next load may not have the GPU
+            except BaseException:
+                entry.update(status="close_failed", closed=False, finished_at=_now())
+                raise
             entry.update(status="complete", closed=True, finished_at=_now())
+            # Drop the runner's last strong reference before the next loader runs, so a backend
+            # that frees memory only when its objects are collected can do so. (Whether real GPU
+            # memory is freed also depends on the backend and on references held elsewhere.)
+            gen = None
 
     abort: BaseException | None = None
     try:
@@ -503,14 +523,15 @@ def _batch_problem(results: Any, reqs: Sequence[GenerationRequest]) -> tuple[str
 def _close_quietly(gen: Any) -> bool | None:
     """Release the engine while another failure propagates; never hide that failure.
 
-    Returns True if ``close()`` succeeded, False if it raised, None if there is no ``close``.
+    Returns True if ``close()`` succeeded, False if it raised (even an interrupt: the original
+    failure is the one reported), None if the engine has no ``close``.
     """
     close = getattr(gen, "close", None)
     if not callable(close):
         return None
     try:
         close()
-    except Exception:
+    except BaseException:
         return False
     return True
 
