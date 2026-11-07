@@ -611,9 +611,18 @@ def test_wsp_evidence_is_tied_to_protocol_dataset_arms_and_policy(tmp_path) -> N
         evidence_from_wsp(
             res.out_dir, proto, study, {"reference": "baseline", "reload": "edit-1"}, tags
         )
+    # A Protocol object edited in memory no longer describes its protocol_sha256 (W4).
     excl = dataclasses.replace(proto, analysis={**proto.analysis, "missing_policy": "exclude_item"})
-    with pytest.raises(EvidenceError, match="incorrect"):
+    with pytest.raises(EvidenceError, match="differs from the parse of its own raw text"):
         evidence_from_wsp(res.out_dir, excl, study, ARM_MAP, tags)
+    # A genuinely parsed exclude_item protocol, registered by the study, is still refused.
+    excl_raw = copy.deepcopy(proto.raw)
+    excl_raw["analysis"]["missing_policy"] = "exclude_item"
+    excl = parse_protocol(excl_raw)
+    reg = copy.deepcopy(study_raw)
+    reg["candidates"][0]["intervention"]["evaluation"]["protocol_sha256"] = excl.sha256
+    with pytest.raises(EvidenceError, match="incorrect"):
+        evidence_from_wsp(res.out_dir, excl, parse_study(reg), ARM_MAP, tags)
     path = res.out_dir / "records.jsonl"
     path.write_text(path.read_text() + "\n{}\n")
     with pytest.raises(EvidenceError, match="verification"):
@@ -2427,3 +2436,194 @@ def test_run_manifest_identifier_labels_are_distinct_from_the_edit_manifest_hash
     assert "run-manifest identifier" in TRUST_NOTE
     doc = (ROOT / "docs" / "research" / "improvement-workflow.md").read_text()
     assert "| Manifest identifier" not in doc and "Two different hashes" in doc
+
+
+# --- WSP loader review: edit scope, synthetic evidence, protocol consistency (W1-W6) ------
+
+
+def _wsp_with_artifacts(tmp_path, cand_extra=None, ref_extra=None, cand_override=None):
+    """_wsp_setup with chosen loaded-file digests for the reference and candidate arms."""
+    raw_p = json.loads((WSP / "fixtures" / "synthetic_protocol.json").read_text())
+    raw_p["analysis"]["required_limitations"] = ["WSP limitation carried into the report"]
+    raw_p.update(frozen=True, frozen_by="lead1", frozen_at="2026-11-01T00:00Z")
+    proto = parse_protocol(raw_p)
+    items = load_items(WSP / "fixtures" / "synthetic_items.jsonl")
+    gens = synthetic_generators(items, proto.seeds)
+    ref, cand = gens["reference"], gens["candidate"]
+    ref_art = {"model.safetensors": "0" * 64, "tokenizer.json": "1" * 64, **(ref_extra or {})}
+    cand_art = {"model.safetensors": "9" * 64, "tokenizer.json": "1" * 64, **(cand_extra or {})}
+    cand_art.update(cand_override or {})
+    gens["reference"] = SyntheticGenerator(
+        ref.name, ref.table, load_id=ref.load_id, artifacts_sha256=ref_art
+    )
+    gens["candidate"] = SyntheticGenerator(
+        cand.name, cand.table, load_id=cand.load_id, artifacts_sha256=cand_art
+    )
+    res = run_paired(
+        proto,
+        items,
+        gens,
+        FinalAnswerGrader(),
+        tmp_path / "wsp",
+        split="heldout",
+        heldout_authorized_by="ev1",
+        purpose="t",
+        operator="op1",
+        clock=iter(range(10_000)).__next__,
+        run_id="wsp-imp",
+    )
+    _, _, study_raw, tags = _wsp_setup(tmp_path / "template")
+    study_raw["candidates"][0]["intervention"]["evaluation"]["protocol_sha256"] = proto.sha256
+    return proto, res, study_raw, tags
+
+
+def _wsp_outcome(proto, res, study_raw, tags):
+    study = parse_study(study_raw)
+    ev = evidence_from_wsp(
+        res.out_dir,
+        proto,
+        study,
+        ARM_MAP,
+        tags,
+        edit_report=EDIT_REPORT,
+        expected_run_manifest_sha256=run_manifest_sha256(res.out_dir),
+    )
+    (r,) = build_report(study, [ev])["candidates"]
+    return r
+
+
+def test_weight_edit_with_only_the_registered_file_changed_reaches_the_rules(tmp_path) -> None:
+    r = _wsp_outcome(*_wsp_with_artifacts(tmp_path))
+    assert r["outcome"] != "prerequisite_missing", r["reasons"]
+    assert r["rule_outcome"] is not None
+
+
+@pytest.mark.parametrize(
+    ("kw", "message"),
+    [
+        # W1 example 1: a different tokenizer in the candidate only.
+        (
+            {"cand_override": {"tokenizer.json": "f" * 64}},
+            "differ between arms: ['tokenizer.json']",
+        ),
+        # W1 example 2: the second weight shard differs between the arms.
+        (
+            {
+                "ref_extra": {"model-00002-of-00002.safetensors": "d" * 64},
+                "cand_extra": {"model-00002-of-00002.safetensors": "e" * 64},
+            },
+            "differ between arms: ['model-00002-of-00002.safetensors']",
+        ),
+        # W1 example 3: an extra adapter loaded only by the candidate.
+        (
+            {"cand_extra": {"adapter_model.safetensors": "c" * 64}},
+            "only candidate: ['adapter_model.safetensors']",
+        ),
+        (
+            {"ref_extra": {"extra.bin": "b" * 64}},
+            "only baseline: ['extra.bin']",
+        ),
+    ],
+)
+def test_weight_edit_must_differ_only_in_the_registered_file(tmp_path, kw, message) -> None:
+    # W1: each of these reached meets_declared_criteria with a hash-consistent verify-edit
+    # report and a matched run-manifest record, although the effect need not come from the
+    # verified edit.
+    r = _wsp_outcome(*_wsp_with_artifacts(tmp_path, **kw))
+    assert r["outcome"] == "prerequisite_missing"
+    assert r["reasons"][0].startswith("weight edit:") and message in r["reasons"][0]
+    assert r["target_effect"] is None
+
+
+def test_weight_edit_needs_loaded_files_reported_by_both_arms(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    study = parse_study(study_raw)
+    ev = evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report=EDIT_REPORT)
+    no_files = dataclasses.replace(
+        ev, arms={**ev.arms, "baseline": {**ev.arms["baseline"], "artifacts": {}}}
+    )
+    r = compare_candidate(study, study.candidate("edit-1"), [no_files])
+    assert r["outcome"] in ("baseline_changed_not_interpreted", "prerequisite_missing")
+    assert r["outcome"] != MEETS
+
+
+def _real(study_raw: dict) -> dict:
+    """A non-synthetic copy of a study: owner-declared bounds instead of fixture values."""
+    real = json.loads(json.dumps(study_raw).replace('"synthetic_fixture"', '"declared_by_owner"'))
+    real["synthetic"] = False
+    return real
+
+
+def test_real_study_refuses_synthetic_wsp_evidence(tmp_path) -> None:
+    # W2: a non-synthetic study reached meets on a synthetic protocol's run.
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    real = parse_study(_real(study_raw))
+    with pytest.raises(EvidenceError, match="non-synthetic study cannot use evidence from a"):
+        evidence_from_wsp(res.out_dir, proto, real, ARM_MAP, tags, edit_report=EDIT_REPORT)
+
+
+def test_real_study_refuses_synthetic_triage_evidence(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    real = dataclasses.replace(study, synthetic=False)
+    with pytest.raises(EvidenceError, match="non-synthetic study cannot use synthetic"):
+        load_evidence(run, real, expected_run_manifest_sha256=EXTERNAL_RECORD[run])
+
+
+def test_synthetic_evidence_cannot_support_approval_of_a_real_study(tmp_path, raw, alerts) -> None:
+    # W2 approval path: synthetic evidence must not support approving a real-study candidate,
+    # whether it reaches build_report directly or a passing report is presented to decide.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = _load(run, study)
+    real = dataclasses.replace(study, synthetic=False)
+    kw = {"decided_at": "2026-11-05T09:00Z", "rationale": "r", "decided_by": "reviewer1"}
+    # Directly compared: downgraded, so there is nothing to approve.
+    report = build_report(real, [ev])
+    t = _by_id(report)[THRESH]
+    assert t["outcome"] == "inconclusive"
+    assert any("synthetic evidence cannot support a non-synthetic study" in x for x in t["reasons"])
+    assert report["evidence_class"] == "synthetic_fixture_not_a_measurement"
+    with pytest.raises(ValueError, match="cannot approve"):
+        make_decision(real, report, candidate=THRESH, decision="approve_further_evaluation", **kw)
+    # A synthetic study's passing report presented for the real study: refused on its class.
+    passing = build_report(study, [ev])
+    assert _by_id(passing)[THRESH]["outcome"] == MEETS
+    with pytest.raises(ValueError, match="evidence class is 'synthetic_fixture_not_a_measurement'"):
+        make_decision(real, passing, candidate=THRESH, decision="approve_further_evaluation", **kw)
+    # Recording a rejection stays possible; a synthetic study can still be approved for
+    # further synthetic evaluation, as before.
+    assert make_decision(real, passing, candidate=THRESH, decision="reject", **kw)
+    assert make_decision(
+        study, passing, candidate=THRESH, decision="approve_further_evaluation", **kw
+    )
+
+
+def test_wsp_protocol_object_must_be_the_parse_of_its_raw_text(tmp_path) -> None:
+    # W4: attributes edited in memory, or raw text edited after parsing, are refused.
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    study = parse_study(study_raw)
+    for bad in (
+        dataclasses.replace(proto, samples_per_item=proto.samples_per_item + 1),
+        dataclasses.replace(proto, synthetic=False),
+        dataclasses.replace(proto, raw={**proto.raw, "protocol_version": "other"}),
+    ):
+        with pytest.raises(EvidenceError, match="protocol"):
+            evidence_from_wsp(res.out_dir, bad, study, ARM_MAP, tags)
+    with pytest.raises(EvidenceError, match="parsed WSP Protocol"):
+        evidence_from_wsp(res.out_dir, proto.raw, study, ARM_MAP, tags)
+
+
+@pytest.mark.parametrize("field", ["inference", "engine"])
+def test_wsp_arm_settings_must_match_the_protocol(tmp_path, field) -> None:
+    # W6: the configuration hash was built from the manifest's recorded settings only.
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+
+    def change(m):
+        for a in m["arms"]:
+            if a["id"] == "candidate":
+                a[field] = {**a[field], "tampered_setting": 1}
+
+    _edit_manifest(res.out_dir, change)
+    with pytest.raises(EvidenceError, match=f"recorded {field} settings differ"):
+        evidence_from_wsp(
+            res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags, edit_report=EDIT_REPORT
+        )

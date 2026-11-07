@@ -363,17 +363,50 @@ caller-supplied evidence remains unauthenticated.
 ## WSP evidence is tied to the actual comparison
 
 `evidence_from_wsp` raises unless:
+0. the `Protocol` object is exactly the parse of its own raw text and hashes to the
+   `protocol_sha256` it carries; everything below is read from that re-parse, not from
+   attributes set in memory;
 1. the study candidate is a `weight_edit` that registered this WSP `protocol_sha256`;
 2. the WSP `reference` arm maps to the baseline, and a WSP arm with role `candidate` maps to
    that candidate (the no-edit reload can never stand in for the baseline);
 3. the WSP run passes `verify_run` (protocol hash, complete, records hash, run IDs, count);
 4. the WSP items hash equals the study's dataset `content_sha256`;
 5. the WSP protocol uses `missing_policy: count_as_incorrect`, matching this workflow's
-   accuracy definition.
+   accuracy definition;
+6. each mapped arm's recorded `inference` and `engine` settings equal that arm's settings in
+   the protocol (the WSP runner writes them from the protocol), so the configuration hash
+   compared with the registration is the registered protocol's, not only the manifest's;
+7. a non-synthetic study is given neither a synthetic protocol nor a synthetic run.
 
 The supplied `verify-edit` report must also hash to the registered `report_sha256`, have
 status `verified`, name the registered baseline and candidate file digests, and name the
 registered edit manifest (`manifest_sha256` equal to `edit_manifest_sha256`).
+
+**`report_sha256` format.** The canonical-JSON SHA-256 (`wsp_eval.hashing.sha256_json`) of
+the **entire** `wsp.py verify-edit` output object, every field included
+(`manifest_file_sha256` too). It is not the hash of a saved report file's bytes;
+registering `sha256sum report.json` fails closed.
+
+**Only the registered file may differ (edit scope).** A weight-edit candidate is
+`prerequisite_missing` unless both arms report the **same complete set of loaded files** and
+every file other than the registered edited file (`artifact.file`, the same name for baseline
+and candidate) has the **same digest** in both. A different tokenizer, a different second
+weight shard, or an adapter loaded by only one arm all fail this check; otherwise a
+"verified" edit could pass while the measured effect came from files the `verify-edit`
+report never covered. This first version allows exactly one edited file. An experiment that
+needs several edited shards or configuration changes needs its own explicitly registered
+and reviewed intervention design; no file is silently exempted. The check depends on the
+evaluator (adapter) **truthfully reporting every file it loaded**: a file it does not report
+is invisible here, and that truthfulness is an operator requirement, not something this
+workflow verifies.
+
+**WSP's own preregistration result is reported, not gating.** The report carries
+`wsp_protocol_preregistered` (WSP's own check: protocol frozen before the run started). The
+comparison does not gate on it, because the study registers the protocol's
+`protocol_sha256` and must itself be frozen before the evidence run started, which fixes the
+protocol content before the run. A study whose protocol was frozen after the run can
+therefore still reach `meets` here even though WSP's own analysis would call that run not
+preregistered; read the two together.
 
 **`edit_manifest_sha256` format.** 64 lowercase hex characters (validated): the
 **canonical-JSON SHA-256 of the parsed manifest** (`wsp_eval.hashing.sha256_json`, sorted
@@ -409,7 +442,10 @@ always carries:
 The decider may not be the study owner or operator. Approval needs a candidate with the
 `meets_declared_criteria…` outcome (which itself needs a preregistered study and evidence whose
 manifest matched an externally recorded run-manifest identifier) **and** a report with
-`evidence_complete: true` and no `evidence_errors`. A report that predates
+`evidence_complete: true` and no `evidence_errors`. For a non-synthetic study, approval
+also needs `evidence_class: measured_unauthenticated`: synthetic evidence never supports
+approving a real study's candidate (the loaders refuse it, the comparison downgrades it, and
+`decide` refuses it). A report that predates
 `evidence_complete` cannot support an approval and must be regenerated. `reject`,
 `request_more_evidence` and `pending` remain possible on any well-formed report.
 
@@ -465,7 +501,7 @@ infrastructure or people; not implemented or verified here.
 | Only binding methods (exact CP; Bonferroni paired, binary single-sample items) can pass; others descriptive; cluster-unit results always descriptive; estimand named for every interval; multiplicity stated | Impl + Test | The *validity* of the methods is not established by tests: it needs statistical review. A clustered method, its estimand and the cluster definition are **open decisions** |
 | Baseline unchanged, checked per named file and configuration | Impl + Test | Relies on evaluators reporting loaded digests truthfully → **Op** |
 | One intervention type per candidate; family prerequisites | Impl + Test | Truth of declared training and calibration data is **Op** |
-| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol, arms, dataset, slice membership and held-out split | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, and trusting who ran it, is **Op**. Manifest linkage needs the separate WSP change. Enforced by the loader only; a hand-built object can assert it |
+| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol (re-parsed and hash-bound; arm settings matched), arms, dataset, slice membership and held-out split; only the registered file may differ between arms | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, trusting who ran it, and the evaluator truthfully reporting every loaded file are **Op**. Manifest linkage needs the separate WSP change. Enforced by the loader only; a hand-built object can assert it |
 | Invented limits labelled `synthetic_fixture`; real studies cannot use them | Impl + Test | Who sets real limits, and when, is **Op** |
 | Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated. The evidence start time comes from the manifest and is bound only by an external manifest record |
 | Run-manifest identifier; `meets` needs a match with an externally recorded value | Impl + Test | Detects post-run edits only if the external record is itself protected (independent access control or signatures) → **Op**; not authentication |

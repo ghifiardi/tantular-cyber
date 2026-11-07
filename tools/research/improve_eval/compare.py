@@ -186,6 +186,9 @@ def _prerequisites(study: Study, cand: dict[str, Any], ev: Evidence) -> list[str
                 "no verify-edit report that is hash-consistent with this candidate's evidence "
                 "(a consistency check, not authenticated verification)"
             ]
+        problem = _edit_scope_problem(study, cand, ev)
+        if problem:
+            return [problem]
     if iv["type"] == "soc_triage_model":
         # Identity and content hashes can show that calibration and evaluation data are the
         # same; they cannot prove that two differently packaged datasets are disjoint (that
@@ -204,6 +207,44 @@ def _prerequisites(study: Study, cand: dict[str, Any], ev: Evidence) -> list[str
             "comparison needs a held-out run"
         ]
     return []
+
+
+def _edit_scope_problem(study: Study, cand: dict[str, Any], ev: Evidence) -> str | None:
+    """A weight edit may change only the registered edited file (W1).
+
+    Both arms must report the same complete set of loaded files, with equal digests for every
+    file except the one the intervention registers (``artifact.file``, the file the
+    ``verify-edit`` report covers). This version allows exactly one edited file: several edited
+    shards or configuration changes need their own registered and reviewed intervention
+    design, not an exemption. It relies on the evaluator reporting every file it loaded;
+    a file it does not report is invisible here.
+    """
+    edited = cand["artifact"].get("file")
+    if not edited or edited != study.baseline["artifact"].get("file"):
+        return (
+            "weight edit: the edited file must be registered (artifact.file) and be the same "
+            "file as the baseline's registered file"
+        )
+    base = (ev.arms.get(study.baseline["id"]) or {}).get("artifacts") or {}
+    other = (ev.arms.get(cand["id"]) or {}).get("artifacts") or {}
+    if not base or not other:
+        return (
+            "weight edit: both arms must report every loaded file; without that, the "
+            "candidate cannot be shown to differ only in the edited file"
+        )
+    if set(base) != set(other):
+        only_base, only_cand = sorted(set(base) - set(other)), sorted(set(other) - set(base))
+        return (
+            "weight edit: the arms loaded different file sets (only baseline: "
+            f"{only_base}; only candidate: {only_cand}); only {edited!r} may differ"
+        )
+    changed = sorted(f for f in base if f != edited and base[f] != other[f])
+    if changed:
+        return (
+            f"weight edit: files other than the registered edited file {edited!r} differ "
+            f"between arms: {changed}"
+        )
+    return None
 
 
 def _values(metric: str, records: Sequence[dict[str, Any]], arm: str, items: set[str]):
@@ -599,6 +640,14 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         rule = "inconclusive"
         result["reasons"] += [f"design: {x}" for x in design_problems]
         result["reasons"].append("incomplete or unbalanced evidence: outcome is inconclusive")
+    if rule == "meets_declared_criteria_pending_human_decision" and (
+        not study.synthetic and ev.synthetic
+    ):
+        # W2: synthetic-fixture evidence cannot support a real study's candidate.
+        rule = "inconclusive"
+        result["reasons"].append(
+            "synthetic evidence cannot support a non-synthetic study: outcome is inconclusive"
+        )
     if rule == "meets_declared_criteria_pending_human_decision" and (
         ev.notes.get("run_manifest_check") != "matched_external_record"
     ):

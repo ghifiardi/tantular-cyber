@@ -10,7 +10,9 @@ self-approval); the record names the exact study and report hashes; approval nee
 whose outcome is ``meets_declared_criteria_pending_human_decision`` *and* a report with
 ``evidence_complete: true`` and no ``evidence_errors`` (every requested run loaded). A
 candidate can only reach that outcome when its evidence run's manifest matched an externally
-recorded run-manifest identifier (``compare.py``). Other decisions (``reject``,
+recorded run-manifest identifier (``compare.py``). For a non-synthetic study, approval also
+needs ``evidence_class: measured_unauthenticated``: synthetic evidence never supports approval
+of a real study's candidate. Other decisions (``reject``,
 ``request_more_evidence``, ``pending``) are allowed on any well-formed report.
 
 What a record is *not*: it is not authenticated approval (``identity_verified`` is always
@@ -100,6 +102,11 @@ def validate_decision(rec: Any, study: Study, report: Any) -> list[str]:
     if cand is not None and cand not in outcomes:
         problems.append(f"unknown candidate {cand!r}")
     if rec["decision"] == "approve_further_evaluation":
+        if not study.synthetic and report.get("evidence_class") != "measured_unauthenticated":
+            problems.append(
+                "cannot approve a non-synthetic study's candidate on a report whose evidence "
+                f"class is {report.get('evidence_class')!r} (synthetic or malformed evidence)"
+            )
         if "evidence_complete" not in report:
             problems.append(
                 "cannot approve on this report: it predates the evidence_complete field, so "

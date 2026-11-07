@@ -54,7 +54,7 @@ from typing import Any
 
 from wsp_eval.analysis import preregistration as wsp_preregistration
 from wsp_eval.hashing import sha256_file, sha256_json
-from wsp_eval.protocol import Protocol
+from wsp_eval.protocol import Protocol, ProtocolError, parse_protocol
 from wsp_eval.runner import RunError, verify_run
 
 from .study import Study
@@ -375,6 +375,8 @@ def load_evidence(
         raise EvidenceError("manifest limitations must be a list of strings")
     if type(manifest.get("synthetic", True)) is not bool:
         raise EvidenceError("manifest synthetic must be a boolean")
+    if not study.synthetic and manifest.get("synthetic", True):
+        raise EvidenceError("a non-synthetic study cannot use synthetic evidence")
     _check_records(records, manifest["run_id"])
     if {r["arm"] for r in records} != set(manifest["arms"]):
         raise EvidenceError("record arms differ from the arms the manifest declares")
@@ -447,6 +449,25 @@ def evidence_from_wsp(
         raise EvidenceError("edit_report must be a plain JSON object")
     if study.task_kind != "accuracy":
         raise EvidenceError("WSP evidence is accuracy evidence; the study task differs")
+    # W4: use only the protocol as parsed from its own raw text, and require that parse to be
+    # exactly the object passed in and to hash to the protocol_sha256 it carries. Roles,
+    # samples_per_item, missing_policy, arm settings and the synthetic flag are then read from
+    # text the registered protocol_sha256 binds, not from attributes set in memory.
+    if not isinstance(protocol, Protocol):
+        raise EvidenceError("protocol must be a parsed WSP Protocol")
+    try:
+        reparsed = parse_protocol(protocol.raw)
+    except ProtocolError as exc:
+        raise EvidenceError(f"WSP protocol does not parse from its raw text: {exc}") from exc
+    if reparsed.sha256 != protocol.sha256 or reparsed != protocol:
+        raise EvidenceError(
+            "WSP protocol object differs from the parse of its own raw text (protocol_sha256 "
+            "would not describe it)"
+        )
+    protocol = reparsed
+    # W2: synthetic-fixture evidence cannot support a real (non-synthetic) study.
+    if not study.synthetic and protocol.synthetic:
+        raise EvidenceError("a non-synthetic study cannot use evidence from a synthetic protocol")
     if not all(
         type(i) is str and type(t) in (list, tuple) and all(type(x) is str for x in t)
         for i, t in item_tags.items()
@@ -484,6 +505,8 @@ def evidence_from_wsp(
         raise EvidenceError("WSP manifest is not an object")
     if type(manifest.get("synthetic", True)) is not bool:
         raise EvidenceError("WSP manifest synthetic must be a boolean")
+    if not study.synthetic and manifest.get("synthetic", True):
+        raise EvidenceError("a non-synthetic study cannot use a synthetic WSP run")
     check = _run_manifest_check(
         _read_json(Path(run_dir) / "manifest.json"), expected_run_manifest_sha256
     )
@@ -499,9 +522,22 @@ def evidence_from_wsp(
             "(target_failure.slice_membership_sha256 missing or different)"
         )
     arms: dict[str, dict[str, Any]] = {}
+    specs = {a.id: a for a in protocol.arms}
     for a in manifest["arms"]:
         if a["id"] not in arm_map:
             continue
+        # W6: the recorded inference and engine settings must be the protocol's registered
+        # settings for that arm (the WSP runner writes them from the protocol). This binds the
+        # configuration hash to the registered protocol, not only to the run's manifest.
+        spec = specs.get(a["id"])
+        if spec is None or sha256_json(a["inference"]) != sha256_json(spec.inference):
+            raise EvidenceError(
+                f"WSP arm {a['id']!r}: recorded inference settings differ from the protocol's"
+            )
+        if sha256_json(a["engine"]) != sha256_json(spec.engine):
+            raise EvidenceError(
+                f"WSP arm {a['id']!r}: recorded engine settings differ from the protocol's"
+            )
         loaded = a.get("generator", {}).get("artifacts_sha256") or {}
         arms[arm_map[a["id"]]] = {
             "artifacts": dict(loaded),
