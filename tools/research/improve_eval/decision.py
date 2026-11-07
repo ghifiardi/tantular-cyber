@@ -73,6 +73,11 @@ def validate_decision(rec: dict[str, Any], study: Study, report: dict[str, Any])
     if cand is not None and cand not in outcomes:
         problems.append(f"unknown candidate {cand!r}")
     if rec["decision"] == "approve_further_evaluation":
+        if report.get("evidence_errors") or report.get("evidence_complete") is not True:
+            problems.append(
+                "cannot approve on a report whose requested evidence did not all load "
+                f"(evidence_errors: {report.get('evidence_errors')!r})"
+            )
         if cand is None:
             problems.append("approval names one candidate")
         elif outcomes.get(cand) != "meets_declared_criteria_pending_human_decision":

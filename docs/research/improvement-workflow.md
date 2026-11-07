@@ -220,21 +220,28 @@ verified, and it is refused for that reason instead.
 ## Trust assumptions of the loader workflow
 
 The supported workflow is: the bundled writer (or the WSP harness) produces a run directory;
-the operator records its manifest identifier **outside** that directory; a reader loads the
-run through `load_evidence` / `evidence_from_wsp`, passing the recorded identifier; the report
-is built from what the loaders return. What each step establishes:
+the operator records its run-manifest identifier **outside** that directory; a reader loads
+the run through `load_evidence` / `evidence_from_wsp`, passing the recorded identifier; the
+report is built from what the loaders return. What each step establishes:
+
+> **Two different hashes.** The **run-manifest identifier** (`run_manifest_sha256`, checked
+> against `expected_run_manifest_sha256` / `--expected-run-manifest-sha256`) identifies an
+> evidence run's `manifest.json`. The **edit-manifest hash** (`edit_manifest_sha256` in the
+> study, `manifest_sha256` in a `verify-edit` report) identifies the weight-edit manifest a
+> candidate registered. They are unrelated; supplying one where the other is expected only
+> causes a refusal.
 
 | Step | Establishes | Does not establish |
 |---|---|---|
 | Records hash (`records_sha256`), record count, run ids, duplicates | `records.jsonl` matches what its manifest says | Anything about the manifest itself, or who wrote either file |
 | Study, dataset, metadata and slice hashes | The evidence is consistent with the registered study and dataset | That labels, tags or outcomes are true |
-| Manifest identifier (`manifest_sha256`, canonical JSON of the parsed `manifest.json`) | A deterministic integrity and provenance identifier for the run | Anything on its own: a hash kept with the manifest can be recomputed by whoever edits it, so none is stored there |
-| Identifier compared with an externally recorded value (`expected_manifest_sha256`; evidence marked `manifest_check: matched_external_record`) | The manifest's start time, arm artifact digests and configuration, `synthetic`, `limitations` and (WSP) `split` are unchanged since the value was recorded | Authentication. The check is only as strong as whatever protects the external record. Unless that record is under independently enforced access controls or signatures (not provided here), someone who can change both can make them agree |
+| Run-manifest identifier (`run_manifest_sha256`, canonical JSON of the parsed `manifest.json`) | A deterministic integrity and provenance identifier for the run | Anything on its own: a hash kept with the manifest can be recomputed by whoever edits it, so none is stored there |
+| Identifier compared with an externally recorded value (`expected_run_manifest_sha256`; evidence marked `run_manifest_check: matched_external_record`) | The manifest's start time, arm artifact digests and configuration, `synthetic`, and (WSP) `split`, and for triage runs its `limitations`, are unchanged since the value was recorded. (WSP limitations come from the protocol, which the protocol hash binds.) | Authentication. The check is only as strong as whatever protects the external record. Unless that record is under independently enforced access controls or signatures (not provided here), someone who can change both can make them agree |
 | WSP `verify_run` and the `verify-edit` report linkage | The WSP run matches its protocol and records hashes; the supplied report hashes to the registered value and names the registered files and edit manifest | Who ran WSP or `verify-edit`, or that the tensor comparison was re-run |
 
 **Consequence in the decision rule.** The start time (preregistration), artifact claims and
 WSP split all come from the manifest. `meets_declared_criteria_pending_human_decision`
-therefore also requires `manifest_check: matched_external_record`. Without it the rule
+therefore also requires `run_manifest_check: matched_external_record`. Without it the rule
 outcome is `inconclusive`, with a reason saying so, and the report adds a limitation per
 unchecked run. In synthetic tests the "external record" is a dictionary in the test process;
 that shows the mechanism, not a control.
@@ -243,6 +250,20 @@ The report's `evidence_class` is `synthetic_fixture_not_a_measurement`, or, for 
 non-synthetic study and evidence, `measured_unauthenticated` (or
 `not_interpreted_malformed_evidence` if a malformed object was supplied). Every report states
 that its checks are integrity and consistency checks, not authentication.
+
+**Requested evidence that fails to load.** Every run named in a report request must load.
+If any fails (including a run-manifest mismatch, a missing directory or malformed JSON), its
+error is kept verbatim in `evidence_errors` and at the top of the limitations, the report
+records `evidence_complete: false`, and no candidate can meet the declared criteria: a
+`meets` result from the remaining runs becomes `inconclusive` with a reason. `decide` refuses
+`approve_further_evaluation` on such a report. Otherwise, dropping one of two runs that both
+pair a candidate would turn `insufficient_evidence` into a pass.
+
+**CLI flags.** `--evidence` and `--expected-run-manifest-sha256` may each be given once, with
+every value after it; a repeated flag is a usage error (exit 2), not a silent overwrite. The
+*i*-th identifier is checked against the *i*-th run, and a count mismatch exits 2. JSON nested
+too deeply to parse is an `EvidenceError` (exit 1 from `run-manifest-hash`; an entry in
+`evidence_errors` from `report`).
 
 **Scope of this review cycle.** The checks are designed for the loader workflow above and
 its documented assumptions. They validate ordinary input, including hand-built objects with
@@ -266,7 +287,7 @@ simply assert.
 | Item set, design, arm agreement, metadata or slice hash | Checked | Rechecked from the records compared | Nothing |
 | Run, records, study and dataset hashes; record count; `run_status` | Checked | Not checked (there is no run to check) | Everything |
 | `verify-edit` report linkage, WSP protocol | Checked | Not checked; read from `notes` | `notes["edit_verification"]` |
-| Manifest fields: `started_at`, arm artifact digests and configuration, `synthetic`, `limitations`, WSP `split` | Read from `manifest.json`; unchanged since recording **only if** `manifest_check` is `matched_external_record` (not authentication) | Type-checked; `meets` requires `notes["manifest_check"] == "matched_external_record"` | The values, and `notes["manifest_check"]` itself |
+| Manifest fields: `started_at`, arm artifact digests and configuration, `synthetic`, WSP `split`, triage `limitations` | Read from `manifest.json`; unchanged since recording **only if** `run_manifest_check` is `matched_external_record` (not authentication) | Type-checked; `meets` requires `notes["run_manifest_check"] == "matched_external_record"` | The values, and `notes["run_manifest_check"]` itself |
 | Record outcomes (`correct`, `decision`, `status`, `error_class`) | Read from `records.jsonl` (bound by `records_sha256`) | Type-checked only | The values |
 | `source`, `run_id` | Set by the loader | Type-checked only | The values |
 
@@ -289,8 +310,8 @@ reported):
    ISO-8601 with a time zone and representable in UTC, `limitations` a list of strings, and
    `arms` and `notes` plain JSON objects with string keys: each arm's `artifacts` maps file
    names to digest strings, `artifact_sha256s` is a list of strings, `config_sha256` a string
-   or null; `notes["edit_verification"]` is an object and `wsp_split`, `manifest_check` and
-   `manifest_sha256` strings or null. Types are checked exactly, so ordinary subclasses that
+   or null; `notes["edit_verification"]` is an object and `wsp_split`, `run_manifest_check` and
+   `run_manifest_sha256` strings or null. Types are checked exactly, so ordinary subclasses that
    change hashing, equality or membership are refused (see the scope note above for what
    this does not cover). The `evidence` argument itself must be a list or tuple. One
    malformed object makes every candidate `insufficient_evidence`; `build_report` lists it
@@ -387,9 +408,9 @@ writes. It is not an access-controlled approval.
 ```bash
 .venv/bin/python tools/research/improve.py validate tools/research/fixtures/synthetic_study.json
 .venv/bin/python tools/research/improve.py demo --output ~/research/runs/demo-$(date +%s)
-.venv/bin/python tools/research/improve.py manifest-hash RUN_DIR   # record outside the run
+.venv/bin/python tools/research/improve.py run-manifest-hash RUN_DIR   # record outside the run
 .venv/bin/python tools/research/improve.py report --study STUDY.json --evidence RUN_DIR... \
-    --expected-manifest-sha256 SHA... --output DIR
+    --expected-run-manifest-sha256 SHA... --output DIR
 .venv/bin/python tools/research/improve.py decide --study STUDY.json --report DIR/report.json \
     --decision request_more_evidence --decided-by reviewer1 --rationale "..." --output DECISION.json
 ```

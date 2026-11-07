@@ -31,7 +31,7 @@ the improvement interval must be above zero and at least ``min_meaningful_effect
 data must rule out improvements smaller than the declared minimum. A point estimate above the
 minimum is not enough. A regression needs the upper bound below zero. ``meets`` also needs
 evidence whose manifest matched an externally recorded identifier
-(``notes["manifest_check"] == "matched_external_record"``): the start time, artifact claims
+(``notes["run_manifest_check"] == "matched_external_record"``): the start time, artifact claims
 and WSP split come from the manifest. Otherwise the rule outcome is ``inconclusive``. A match
 is an integrity check against that record, not authentication.
 
@@ -600,14 +600,14 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         result["reasons"] += [f"design: {x}" for x in design_problems]
         result["reasons"].append("incomplete or unbalanced evidence: outcome is inconclusive")
     if rule == "meets_declared_criteria_pending_human_decision" and (
-        ev.notes.get("manifest_check") != "matched_external_record"
+        ev.notes.get("run_manifest_check") != "matched_external_record"
     ):
         # The start time (preregistration), arm artifact claims and WSP split come from the
         # run's manifest, which no hash in the run directory binds. Without a comparison with
         # an externally recorded manifest identifier, post-run edits are undetectable.
         rule = "inconclusive"
         result["reasons"].append(
-            "evidence manifest not checked against an externally recorded manifest_sha256: "
+            "evidence manifest not checked against an externally recorded run_manifest_sha256: "
             "its start time, artifact claims and split are as written in the run directory; "
             "outcome is inconclusive (a match would still not be authentication)"
         )

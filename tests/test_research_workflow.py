@@ -97,7 +97,7 @@ EXTERNAL_RECORD: dict[Path, str] = {}
 
 def _load(run, study):
     """Load with the manifest checked against the external record (the confirmatory path)."""
-    return load_evidence(run, study, expected_manifest_sha256=EXTERNAL_RECORD[run])
+    return load_evidence(run, study, expected_run_manifest_sha256=EXTERNAL_RECORD[run])
 
 
 def _report(tmp_path, raw, alerts, **kw):
@@ -1691,13 +1691,13 @@ def _edit_manifest(run: Path, change) -> None:
 
 def _manifest_cases(run, study):
     """The three ways a reader can load an edited manifest."""
-    with pytest.raises(EvidenceError, match="externally recorded manifest_sha256"):
-        load_evidence(run, study, expected_manifest_sha256=EXTERNAL_RECORD[run])
+    with pytest.raises(EvidenceError, match="externally recorded run_manifest_sha256"):
+        load_evidence(run, study, expected_run_manifest_sha256=EXTERNAL_RECORD[run])
     unchecked = load_evidence(run, study)
     # Someone who can edit the manifest can also recompute its hash: a value taken *after* the
     # edit matches, so it protects nothing. Only a value recorded before, outside the run
     # directory and under independent control, detects the edit.
-    recomputed = load_evidence(run, study, expected_manifest_sha256=run_manifest_sha256(run))
+    recomputed = load_evidence(run, study, expected_run_manifest_sha256=run_manifest_sha256(run))
     return unchecked, recomputed
 
 
@@ -1710,11 +1710,11 @@ def test_edited_start_time_is_caught_only_by_an_external_record(tmp_path, raw, a
     _edit_manifest(run, lambda m: m.update(started_at="2999-02-01T00:00Z"))
     unchecked, recomputed = _manifest_cases(run, study)
     r = _by_id(build_report(study, [unchecked]))[THRESH]
-    assert unchecked.notes["manifest_check"] == "not_checked"
+    assert unchecked.notes["run_manifest_check"] == "not_checked"
     assert r["outcome"] == "inconclusive" and r["rule_outcome"] == "inconclusive"
     assert any("not checked against an externally recorded" in x for x in r["reasons"])
     # The documented limit: a recomputed hash "matches", and the edit then passes.
-    assert recomputed.notes["manifest_check"] == "matched_external_record"
+    assert recomputed.notes["run_manifest_check"] == "matched_external_record"
     assert _by_id(build_report(study, [recomputed]))[THRESH]["outcome"] == MEETS
 
 
@@ -1759,21 +1759,21 @@ def test_edited_wsp_split_is_caught_only_by_an_external_record(tmp_path) -> None
             ARM_MAP,
             tags,
             edit_report=EDIT_REPORT,
-            expected_manifest_sha256=expected,
+            expected_run_manifest_sha256=expected,
         )
 
     (honest,) = build_report(study, [load(recorded)])["candidates"]
     assert honest["outcome"] == "prerequisite_missing" and "held-out" in honest["reasons"][0]
     _edit_manifest(res.out_dir, lambda m: m.update(split="heldout"))
-    with pytest.raises(EvidenceError, match="externally recorded manifest_sha256"):
+    with pytest.raises(EvidenceError, match="externally recorded run_manifest_sha256"):
         load(recorded)
     unchecked = load()
     assert unchecked.notes["wsp_split"] == "heldout"  # read from the edited manifest
-    assert unchecked.notes["manifest_check"] == "not_checked"
+    assert unchecked.notes["run_manifest_check"] == "not_checked"
     (r,) = build_report(study, [unchecked])["candidates"]
     assert r["outcome"] != MEETS
     recomputed = load(run_manifest_sha256(res.out_dir))
-    assert recomputed.notes["manifest_check"] == "matched_external_record"  # the limit
+    assert recomputed.notes["run_manifest_check"] == "matched_external_record"  # the limit
 
 
 def test_manifest_identifier_is_deterministic_and_validated(tmp_path, raw, alerts) -> None:
@@ -1783,28 +1783,30 @@ def test_manifest_identifier_is_deterministic_and_validated(tmp_path, raw, alert
     assert run_manifest_sha256(run) == before
     for bad in (before.upper(), before + "\n", "x" * 64, 5):
         with pytest.raises(EvidenceError, match="64 lowercase hex"):
-            load_evidence(run, study, expected_manifest_sha256=bad)
+            load_evidence(run, study, expected_run_manifest_sha256=bad)
 
 
 def test_cli_prints_and_checks_the_manifest_identifier(tmp_path, capsys) -> None:
     assert improve.main(["demo", "--output", str(tmp_path / "demo")]) == 0
     capsys.readouterr()
     run = tmp_path / "demo" / "evidence"
-    assert improve.main(["manifest-hash", str(run)]) == 0
-    sha = json.loads(capsys.readouterr().out)["manifest_sha256"]
+    assert improve.main(["run-manifest-hash", str(run)]) == 0
+    sha = json.loads(capsys.readouterr().out)["run_manifest_sha256"]
     assert sha == run_manifest_sha256(run)
     base = ["report", "--study", str(FIX / "synthetic_study.json"), "--evidence", str(run)]
     assert (
-        improve.main([*base, "--output", str(tmp_path / "r1"), "--expected-manifest-sha256", sha])
+        improve.main(
+            [*base, "--output", str(tmp_path / "r1"), "--expected-run-manifest-sha256", sha]
+        )
         == 0
     )
     capsys.readouterr()
     report = json.loads((tmp_path / "r1" / "report.json").read_text())
-    assert report["evidence_runs"][0]["manifest_check"] == "matched_external_record"
-    out = [*base, "--output", str(tmp_path / "r2"), "--expected-manifest-sha256", "0" * 64]
+    assert report["evidence_runs"][0]["run_manifest_check"] == "matched_external_record"
+    out = [*base, "--output", str(tmp_path / "r2"), "--expected-run-manifest-sha256", "0" * 64]
     assert improve.main(out) == 0
     assert "externally recorded" in json.loads(capsys.readouterr().out)["evidence_errors"][0]
-    two = [*base, "--output", str(tmp_path / "r3"), "--expected-manifest-sha256", sha, sha]
+    two = [*base, "--output", str(tmp_path / "r3"), "--expected-run-manifest-sha256", sha, sha]
     assert improve.main(two) == 2
 
 
@@ -1969,3 +1971,250 @@ def test_malformed_object_in_a_non_synthetic_report_is_not_called_synthetic(
     clean = build_report(real, [ev])
     assert clean["evidence_class"] == "measured_unauthenticated"
     assert any("None of them authenticates" in x for x in clean["limitations"])
+
+
+# --- eighth round: report completeness, CLI flags, deep JSON (H1-H5) ------------------------
+
+
+def _frozen_cli_runs(tmp_path, raw, alerts, names=("a",)):
+    """A frozen study file plus honest runs under it, with their externally recorded ids."""
+    frozen = {**raw, **FROZEN}
+    study_path = tmp_path / "study.json"
+    study_path.write_text(json.dumps(frozen))
+    runs = []
+    for n in names:
+        _, run = _evidence(tmp_path, frozen, alerts, name=n)
+        runs.append(run)
+    return study_path, runs, [EXTERNAL_RECORD[r] for r in runs]
+
+
+def _cli_report(capsys, argv):
+    code = improve.main(argv)
+    out = json.loads(capsys.readouterr().out) if code == 0 else None
+    return code, out
+
+
+def _decide_approve(study_path, report_path, out):
+    return improve.main(
+        [
+            "decide",
+            "--study",
+            str(study_path),
+            "--report",
+            str(report_path),
+            "--candidate",
+            THRESH,
+            "--decision",
+            "approve_further_evaluation",
+            "--decided-by",
+            "reviewer1",
+            "--rationale",
+            "synthetic fixture review",
+            "--output",
+            str(out),
+        ]
+    )
+
+
+@pytest.mark.parametrize("failure", ["wrong_record", "missing_run"])
+def test_a_requested_run_that_fails_to_load_prevents_a_pass_and_an_approval(
+    tmp_path, raw, alerts, capsys, failure
+) -> None:
+    # H1: both runs pair the candidate, so together they are insufficient_evidence; dropping
+    # one used to let the other produce a passing report.
+    study_path, (a, b), (ha, hb) = _frozen_cli_runs(tmp_path, raw, alerts, names=("a", "b"))
+    if failure == "missing_run":
+        b = tmp_path / "nope"
+    hashes = [ha, "0" * 64 if failure == "wrong_record" else hb]
+    argv = ["report", "--study", str(study_path), "--evidence", str(a), str(b)]
+    code, out = _cli_report(
+        capsys, [*argv, "--expected-run-manifest-sha256", *hashes, "--output", str(tmp_path / "r")]
+    )
+    assert code == 0 and out["outcome"] == "inconclusive"
+    report = json.loads((tmp_path / "r" / "report.json").read_text())
+    (err,) = report["evidence_errors"]
+    expected = "externally recorded run_manifest_sha256" if failure == "wrong_record" else "nope"
+    assert expected in err  # the specific load error stays visible
+    assert report["evidence_complete"] is False
+    assert (
+        expected in report["limitations"][0]
+        and "cannot support an approval" in (report["limitations"][0])
+    )
+    t = _by_id(report)[THRESH]
+    assert t["outcome"] == "inconclusive" and t["rule_outcome"] == MEETS
+    assert any("failed to load" in x for x in t["reasons"])
+    assert "failed to load" in (tmp_path / "r" / "report.md").read_text()
+    assert _decide_approve(study_path, tmp_path / "r" / "report.json", tmp_path / "d.json") == 1
+    assert "evidence did not all load" in capsys.readouterr().err
+    assert not (tmp_path / "d.json").exists()
+
+
+def test_build_report_and_decision_refuse_incomplete_evidence(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    complete = build_report(study, [_load(run, study)])
+    assert complete["evidence_complete"] is True and complete["outcome"].startswith(
+        "candidates_meet"
+    )
+    partial = build_report(study, [_load(run, study)], ["other: records.jsonl is missing"])
+    assert partial["outcome"] == "inconclusive" and partial["candidates_meeting_criteria"] == []
+    kw = {"decided_at": "2026-11-05T09:00Z", "rationale": "r", "decided_by": "reviewer1"}
+    with pytest.raises(ValueError, match="did not all load"):
+        make_decision(study, partial, candidate=THRESH, decision="approve_further_evaluation", **kw)
+    # Recording that more evidence is needed stays possible.
+    make_decision(study, partial, candidate=THRESH, decision="request_more_evidence", **kw)
+    # A report from before this field existed cannot support an approval either.
+    old = {k: v for k, v in complete.items() if k != "evidence_complete"}
+    assert any(
+        "did not all load" in x
+        for x in validate_decision(
+            make_decision(
+                study, complete, candidate=THRESH, decision="approve_further_evaluation", **kw
+            ),
+            study,
+            old,
+        )
+    )
+
+
+@pytest.mark.parametrize("flag", ["--evidence", "--expected-run-manifest-sha256"])
+def test_repeated_cli_flags_are_refused_not_overwritten(tmp_path, raw, alerts, capsys, flag):
+    # H2: `--evidence A ... --evidence B` used to keep only B.
+    study_path, (a, b), (ha, hb) = _frozen_cli_runs(tmp_path, raw, alerts, names=("a", "b"))
+    argv = [
+        "report",
+        "--study",
+        str(study_path),
+        "--evidence",
+        str(a),
+        "--expected-run-manifest-sha256",
+        ha,
+        flag,
+        str(b) if flag == "--evidence" else hb,
+        "--output",
+        str(tmp_path / "r"),
+    ]
+    with pytest.raises(SystemExit) as exc:
+        improve.main(argv)
+    assert exc.value.code == 2
+    assert "given more than once" in capsys.readouterr().err
+    assert not (tmp_path / "r").exists()
+
+
+@pytest.mark.parametrize("hashes_first", [False, True])
+def test_hash_to_run_mapping_holds_in_both_flag_orders(
+    tmp_path, raw, alerts, capsys, hashes_first
+) -> None:
+    study_path, (a, b), (ha, hb) = _frozen_cli_runs(tmp_path, raw, alerts, names=("a", "b"))
+
+    def run(evidence, hashes, out):
+        e = ["--evidence", *map(str, evidence)]
+        h = ["--expected-run-manifest-sha256", *hashes]
+        middle = [*h, *e] if hashes_first else [*e, *h]
+        return _cli_report(
+            capsys,
+            ["report", "--study", str(study_path), *middle, "--output", str(tmp_path / out)],
+        )
+
+    # One run, its own record: matched, and the frozen study's candidate meets.
+    code, out = run([a], [ha], "one")
+    assert code == 0 and out["evidence_errors"] == []
+    assert out["outcome"] == "candidates_meet_declared_criteria_pending_human_decision"
+    report = json.loads((tmp_path / "one" / "report.json").read_text())
+    assert report["evidence_runs"][0]["run_manifest_check"] == "matched_external_record"
+    # Two runs in order: both load (and then two runs pair the candidate: insufficient).
+    code, out = run([a, b], [ha, hb], "two")
+    assert code == 0 and out["evidence_errors"] == []
+    assert (
+        _by_id(json.loads((tmp_path / "two" / "report.json").read_text()))[THRESH]["outcome"]
+        == "insufficient_evidence"
+    )
+    # Swapped: each run is checked against the other's record, so both are refused.
+    code, out = run([a, b], [hb, ha], "swapped")
+    assert code == 0 and len(out["evidence_errors"]) == 2 and out["outcome"] == "inconclusive"
+    assert all("externally recorded" in x for x in out["evidence_errors"])
+    # Count mismatch is a usage error.
+    assert (
+        improve.main(
+            [
+                "report",
+                "--study",
+                str(study_path),
+                "--evidence",
+                str(a),
+                str(b),
+                "--expected-run-manifest-sha256",
+                ha,
+                "--output",
+                str(tmp_path / "count"),
+            ]
+        )
+        == 2
+    )
+
+
+DEEP = "[" * 50_000 + "]" * 50_000
+
+
+def test_deeply_nested_json_is_a_controlled_error(tmp_path, raw, alerts, capsys) -> None:
+    # H3: these raised a raw RecursionError from the loader, run-manifest-hash and report.
+    study_path, (run,), _ = _frozen_cli_runs(tmp_path, raw, alerts)
+    study = parse_study(json.loads(study_path.read_text()))
+    text = (run / "manifest.json").read_text().rstrip()
+    (run / "manifest.json").write_text(text[:-1] + ', "deep": ' + DEEP + "}")
+    with pytest.raises(EvidenceError, match="nested too deeply"):
+        load_evidence(run, study)
+    with pytest.raises(EvidenceError, match="nested too deeply"):
+        run_manifest_sha256(run)
+    assert improve.main(["run-manifest-hash", str(run)]) == 1
+    assert "nested too deeply" in capsys.readouterr().err
+    code, out = _cli_report(
+        capsys,
+        [
+            "report",
+            "--study",
+            str(study_path),
+            "--evidence",
+            str(run),
+            "--output",
+            str(tmp_path / "r"),
+        ],
+    )
+    assert code == 0 and "nested too deeply" in out["evidence_errors"][0]
+    assert out["outcome"] == "inconclusive"
+
+
+def test_deeply_nested_records_line_is_a_controlled_error(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    path = run / "records.jsonl"
+    path.write_text(path.read_text() + DEEP + "\n")
+    _edit_manifest(
+        run,
+        lambda m: m.update(
+            records_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            expected_records=m["expected_records"] + 1,
+        ),
+    )
+    with pytest.raises(EvidenceError, match="nested too deeply"):
+        load_evidence(run, study)
+
+
+def test_deeply_nested_wsp_manifest_is_a_controlled_error(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    text = (res.out_dir / "manifest.json").read_text().rstrip()
+    (res.out_dir / "manifest.json").write_text(text[:-1] + ', "deep": ' + DEEP + "}")
+    with pytest.raises(EvidenceError):
+        evidence_from_wsp(res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags)
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "", "false", [], {}])
+def test_wsp_synthetic_label_must_be_a_boolean(tmp_path, value) -> None:
+    # H4: bool() coercion turned null, 0 or "" into "not synthetic" and "false" into synthetic.
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    _edit_manifest(res.out_dir, lambda m: m.update(synthetic=value))
+    with pytest.raises(EvidenceError, match="synthetic must be a boolean"):
+        evidence_from_wsp(res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags)
+
+
+def test_wsp_synthetic_boolean_is_kept(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    assert evidence_from_wsp(res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags).synthetic

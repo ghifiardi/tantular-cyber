@@ -23,19 +23,19 @@ Two sources exist:
   report and does not re-run the tensor comparison. The WSP protocol's required limitations
   and preregistration status travel into the report.
 
-**Manifest identifier and what it does not prove.** ``records_sha256`` covers only the
-records. Fields read from ``manifest.json`` itself (``started_at``, each arm's artifact
-digests and configuration, ``synthetic``, ``limitations``, and for WSP the ``split``) are not
-covered by it. Both loaders therefore compute :func:`manifest_sha256`, a deterministic
-canonical-JSON hash of the parsed manifest, as an integrity and provenance *identifier* of the
-run. A hash written next to the manifest would protect nothing (whoever edits the manifest can
-recompute it), so none is stored there. To detect post-run edits, pass
-``expected_manifest_sha256``: a value recorded *outside* the run directory when the run
-finished (for example in an evidence register). The loader refuses a mismatch, and the
-evidence is marked ``manifest_check: matched_external_record``; otherwise ``not_checked``.
-Even a match is **not authentication**: it shows only that the manifest equals what that
-external record says, and is as trustworthy as the access controls or signatures protecting
-the record, which this workflow does not provide.
+**Run-manifest identifier and what it does not prove.** (Not the edit-manifest hash above.)
+``records_sha256`` covers only the records. Fields read from ``manifest.json`` itself
+(``started_at``, each arm's artifact digests and configuration, ``synthetic``, for triage
+``limitations``, and for WSP the ``split``) are not covered by it. Both loaders therefore
+compute :func:`run_manifest_digest`, a deterministic canonical-JSON hash of the parsed
+manifest, as an integrity and provenance *identifier* of the run. A hash written next to the
+manifest would protect nothing (whoever edits the manifest can recompute it), so none is stored
+there. To detect post-run edits, pass ``expected_run_manifest_sha256``: a value recorded
+*outside* the run directory when the run finished (for example in an evidence register). The
+loader refuses a mismatch, and the evidence is marked ``run_manifest_check:
+matched_external_record``; otherwise ``not_checked``. Even a match is **not authentication**:
+it shows only that the manifest equals what that external record says, and is as trustworthy as
+the access controls or signatures protecting the record, which this workflow does not provide.
 
 Malformed input of any shape makes the loaders raise :class:`EvidenceError`; no other
 exception type escapes them.
@@ -192,7 +192,7 @@ def evidence_problem(ev: Any) -> str | None:
         return f"evidence notes: {problem}"
     if "edit_verification" in ev.notes and type(ev.notes["edit_verification"]) is not dict:
         return "evidence notes edit_verification must be an object"
-    for key in ("wsp_split", "manifest_check", "manifest_sha256"):
+    for key in ("wsp_split", "run_manifest_check", "run_manifest_sha256"):
         if ev.notes.get(key) is not None and type(ev.notes[key]) is not str:
             return f"evidence notes {key} must be a string or null"
     if type(ev.limitations) not in (list, tuple) or not all(type(x) is str for x in ev.limitations):
@@ -253,10 +253,19 @@ def records_metadata(
 
 
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
-_MALFORMED = (KeyError, IndexError, TypeError, AttributeError, ValueError, OverflowError, OSError)
+_MALFORMED = (
+    KeyError,
+    IndexError,
+    TypeError,
+    AttributeError,
+    ValueError,
+    OverflowError,
+    OSError,
+    RecursionError,  # e.g. JSON nested thousands of levels deep
+)
 
 
-def manifest_sha256(manifest: Any) -> str:
+def run_manifest_digest(manifest: Any) -> str:
     """Deterministic identifier of a parsed run manifest (canonical JSON, ``sha256_json``).
 
     An integrity and provenance identifier, not authentication: compare it with a value
@@ -264,27 +273,27 @@ def manifest_sha256(manifest: Any) -> str:
     """
     try:
         return sha256_json(manifest)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise EvidenceError("manifest.json is not plain JSON data") from exc
 
 
 def run_manifest_sha256(run_dir: Path) -> str:
-    """:func:`manifest_sha256` of ``run_dir/manifest.json``, to record externally after a run."""
-    return manifest_sha256(_read_json(Path(run_dir) / "manifest.json"))
+    """:func:`run_manifest_digest` of ``run_dir/manifest.json``, to record outside the run."""
+    return run_manifest_digest(_read_json(Path(run_dir) / "manifest.json"))
 
 
-def _manifest_check(manifest: Any, expected: str | None) -> dict[str, str]:
-    got = manifest_sha256(manifest)
+def _run_manifest_check(manifest: Any, expected: str | None) -> dict[str, str]:
+    got = run_manifest_digest(manifest)
     if expected is None:
-        return {"manifest_sha256": got, "manifest_check": "not_checked"}
+        return {"run_manifest_sha256": got, "run_manifest_check": "not_checked"}
     if type(expected) is not str or not SHA256_RE.fullmatch(expected):
-        raise EvidenceError("expected_manifest_sha256 must be 64 lowercase hex characters")
+        raise EvidenceError("expected_run_manifest_sha256 must be 64 lowercase hex characters")
     if got != expected:
         raise EvidenceError(
-            "manifest.json differs from the externally recorded manifest_sha256 (edited after "
+            "manifest.json differs from the externally recorded run_manifest_sha256 (edited after "
             "the run, or a different run)"
         )
-    return {"manifest_sha256": got, "manifest_check": "matched_external_record"}
+    return {"run_manifest_sha256": got, "run_manifest_check": "matched_external_record"}
 
 
 def _normalized(fn):
@@ -307,6 +316,8 @@ def _parse_json(text: str, where: str) -> Any:
         return json.loads(text)
     except ValueError as exc:
         raise EvidenceError(f"{where} is not valid JSON") from exc
+    except RecursionError as exc:
+        raise EvidenceError(f"{where} is nested too deeply to parse") from exc
 
 
 def _read_text(path: Path) -> str:
@@ -322,12 +333,12 @@ def _read_json(path: Path) -> Any:
 
 @_normalized
 def load_evidence(
-    run_dir: Path, study: Study, expected_manifest_sha256: str | None = None
+    run_dir: Path, study: Study, expected_run_manifest_sha256: str | None = None
 ) -> Evidence:
     """Load and verify synthetic-triage evidence. Accuracy evidence must come through
     :func:`evidence_from_wsp`, which checks slice membership and the held-out split.
 
-    ``expected_manifest_sha256`` is a value recorded outside the run directory; see the
+    ``expected_run_manifest_sha256`` is a value recorded outside the run directory; see the
     module docstring for what a match does and does not show."""
     if study.task_kind != "alert_triage":
         raise EvidenceError(
@@ -343,7 +354,7 @@ def load_evidence(
         raise EvidenceError("evidence was collected under a different study (study_sha256)")
     if manifest.get("run_status") != "complete":
         raise EvidenceError(f"run_status is {manifest.get('run_status')!r}; not used")
-    check = _manifest_check(manifest, expected_manifest_sha256)
+    check = _run_manifest_check(manifest, expected_run_manifest_sha256)
     path = run_dir / "records.jsonl"
     if not path.is_file():
         raise EvidenceError("records.jsonl is missing")
@@ -413,7 +424,7 @@ def evidence_from_wsp(
     arm_map: Mapping[str, str],
     item_tags: Mapping[str, Sequence[str]],
     edit_report: Mapping[str, Any] | None = None,
-    expected_manifest_sha256: str | None = None,
+    expected_run_manifest_sha256: str | None = None,
 ) -> Evidence:
     """Translate a verified WSP run into accuracy evidence for one weight-edit comparison.
 
@@ -422,7 +433,7 @@ def evidence_from_wsp(
     supplies slice membership, which WSP items do not carry; untagged items belong only to the
     ``all`` scope. ``edit_report`` is the ``wsp.py verify-edit`` output for that candidate;
     without a matching report the comparison stops at ``prerequisite_missing``.
-    ``expected_manifest_sha256`` is an externally recorded identifier of the WSP run's
+    ``expected_run_manifest_sha256`` is an externally recorded identifier of the WSP run's
     ``manifest.json``. The split, start time and artifact claims are read from that manifest
     and are bound only by such a record (module docstring).
     """
@@ -471,7 +482,11 @@ def evidence_from_wsp(
         raise EvidenceError(f"WSP run failed verification: {exc}") from exc
     if type(manifest) is not dict:
         raise EvidenceError("WSP manifest is not an object")
-    check = _manifest_check(_read_json(Path(run_dir) / "manifest.json"), expected_manifest_sha256)
+    if type(manifest.get("synthetic", True)) is not bool:
+        raise EvidenceError("WSP manifest synthetic must be a boolean")
+    check = _run_manifest_check(
+        _read_json(Path(run_dir) / "manifest.json"), expected_run_manifest_sha256
+    )
     declared_data = study.raw["task"]["dataset"].get("content_sha256")
     if declared_data is None or manifest["dataset"].get("items_file_sha256") != declared_data:
         raise EvidenceError("WSP items hash differs from (or is missing in) the study dataset")
@@ -520,7 +535,7 @@ def evidence_from_wsp(
     ev = Evidence(
         run_id=manifest["run_id"],
         source="wsp",
-        synthetic=bool(manifest.get("synthetic", True)),
+        synthetic=manifest.get("synthetic", True),
         started_at=manifest.get("started_at"),
         arms=arms,
         records=records,

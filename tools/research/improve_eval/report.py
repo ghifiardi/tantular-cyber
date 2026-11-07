@@ -66,9 +66,22 @@ def build_report(
     study: Study, evidence: Sequence[Evidence], evidence_errors: Sequence[str] = ()
 ) -> dict[str, Any]:
     results = [compare_candidate(study, c, evidence) for c in study.candidates]
+    # Requested evidence that failed to load (passed in by the caller, e.g. the CLI) means the
+    # report is not built from everything that was asked for: no candidate may meet the
+    # declared criteria, whatever the remaining runs show. The errors stay listed verbatim.
+    not_loaded = list(evidence_errors)
+    if not_loaded:
+        for r in results:
+            if r["outcome"] == "meets_declared_criteria_pending_human_decision":
+                r["outcome"] = "inconclusive"
+                r["reasons"].append(
+                    f"{len(not_loaded)} requested evidence run(s) failed to load (see "
+                    "evidence_errors); a report missing requested evidence cannot meet the "
+                    "declared criteria"
+                )
     meets = [r["candidate"] for r in results if r["outcome"].startswith("meets_declared")]
     # A malformed evidence object already makes every candidate insufficient_evidence; it is
-    # listed as an error and not read further, and the report stays labelled synthetic.
+    # listed as an error and not read further, and the report's evidence_class says so.
     shaped, evidence_errors = [], list(evidence_errors)
     if type(evidence) not in (list, tuple):
         evidence_errors.append("evidence must be a list of Evidence objects")
@@ -86,10 +99,10 @@ def build_report(
     for e in evidence:
         limitations += [x for x in e.limitations if x not in limitations]
     for e in evidence:
-        if e.notes.get("manifest_check") != "matched_external_record":
+        if e.notes.get("run_manifest_check") != "matched_external_record":
             limitations.append(
                 f"Evidence run {e.run_id}: manifest not checked against an externally recorded "
-                "manifest_sha256, so its start time, artifact claims and split are as written "
+                "run_manifest_sha256, so its start time, artifact claims and split are as written "
                 "in the run directory; no candidate from it can meet the declared criteria."
             )
     limitations.append(TRUST_NOTE)
@@ -112,6 +125,15 @@ def build_report(
         limitations.insert(0, MALFORMED_LIMIT)
     if synthetic:
         limitations.insert(0, EVIDENCE_LIMIT)
+    # Shown first: a report missing requested evidence must say so before anything else.
+    if not_loaded:
+        limitations.insert(
+            0,
+            f"{len(not_loaded)} requested evidence run(s) failed to load and were not used: "
+            + "; ".join(not_loaded)
+            + ". No candidate in this report can meet the declared criteria, and it cannot "
+            "support an approval.",
+        )
     report = {
         "workflow_version": WORKFLOW_VERSION,
         "study_version": study.raw["study_version"],
@@ -138,6 +160,7 @@ def build_report(
             for e in evidence
         ],
         "evidence_errors": list(evidence_errors),
+        "evidence_complete": not evidence_errors,
         "candidates": results,
         "outcome": (
             "candidates_meet_declared_criteria_pending_human_decision" if meets else "inconclusive"
