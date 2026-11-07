@@ -33,7 +33,7 @@ real graders, prompts, dataset adapters and inference adapters.
 | `docs/wsp/exp8-replication-protocol.md`, `docs/wsp/protocols/exp8-replication-draft.json` | Draft Experiment 8 replication protocol (unfrozen; drift tolerance and minimum effect unset) |
 | `docs/wsp/ledger/` | Ledger records. `exp8-source-pins-2026-11-03.json`: public-metadata pins for Experiment A (status `planned`) |
 | `docs/wsp/run-readiness.md` | Decisions, infrastructure and harness work required before a real run |
-| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py`, `tests/test_wsp_sequential.py` | 111 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
+| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py`, `tests/test_wsp_sequential.py` | 122 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
 
 ```bash
 .venv/bin/python tools/wsp/wsp.py smoke --output ~/wsp-research/runs/smoke-$(date +%s)
@@ -165,15 +165,23 @@ than a report.
 2026-11-07: sequential per-arm loading and shard batching (run-readiness C4), with stub
 engines only. A protocol may declare `execution: {"order": "per_arm_sequential", "shards": k}`
 (absent means `interleaved`, so existing protocols and hashes are unchanged; when present it is
-hashed). The runner then loads one arm at a time in protocol order through a loader, checks
-that every load reports a distinct `load_id`, sends the arm's items in `k` batches (shard `i`
-holds the selected items `[i::k]` in dataset file order, like the authors' `rows[i::10]`), and
-closes the generator before the next load. Every request still gets its own records (with
-`shard` and `batch_size`); a request that fails inside a batch errors only its own rows; a
-batch that raises or returns the wrong number of entries errors every request in it; a load,
-load-identity or close failure, or an interrupt, aborts the run, which keeps the records so far
-and is refused by `verify_run`. The manifest records each load's position, `load_id` and
-status. No inference adapter exists yet (C1); nothing here touches a model or a GPU.
+hashed; an empty or explicitly default block therefore changes `protocol_sha256` even though
+it behaves like an absent one). The runner then loads one arm at a time in protocol order
+through a loader, checks that every load reports a distinct `load_id` and is a distinct engine
+object, requires `generate_batch` and `close()`, sends the arm's items in `k` batches (shard
+`i` holds the selected items `[i::k]` in dataset file order, like the authors' `rows[i::10]`;
+more shards than items is refused before any output), and closes the generator before the
+next load. Batch composition is bound by `execution.shards_sha256` (the per-shard item-id
+lists), because the dataset hash ignores item order. Each batch entry is a `BatchItem` that
+echoes its request, so a reordered or substituted entry is refused (`BatchOrderMismatch`,
+`BatchEntryInvalid`) instead of being credited to another request. Every request still gets
+its own records (with `shard` and `batch_size`); a request that fails inside a batch errors
+only its own rows; a batch that raises or returns the wrong number of entries errors every
+request in it; a load, load-identity or close failure, or an interrupt, aborts the run, which
+keeps the records so far and is refused by `verify_run`. The manifest records each load's
+position, `load_id`, status and whether `close()` succeeded. These checks rely on the adapter
+reporting load identity, loaded files and request echoes truthfully. No inference adapter
+exists yet (C1); nothing here touches a model or a GPU.
 
 ## Readiness (unchanged from the package)
 

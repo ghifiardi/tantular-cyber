@@ -32,7 +32,6 @@ run directory against its protocol before anything is analyzed.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import platform
 import sys
@@ -47,9 +46,9 @@ from typing import Any
 
 from . import HARNESS_VERSION
 from .dataset import Item, check_items, dataset_sha256
-from .generation import ArmLoader, Generation, GenerationRequest, Generator
+from .generation import ArmLoader, BatchItem, Generation, GenerationRequest, Generator
 from .grading import Grader
-from .hashing import harness_code_sha256, sha256_bytes, sha256_file
+from .hashing import harness_code_sha256, sha256_bytes, sha256_file, sha256_json
 from .protocol import Protocol
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -138,6 +137,19 @@ def run_paired(
     selected = sorted((i for i in items if i.split == split), key=lambda i: i.id)
     if not selected:
         raise RunError(f"no items in split {split!r}")
+    if sequential:
+        in_order = [i.id for i in items if i.split == split]
+        shard_ids = [in_order[k :: protocol.shards] for k in range(protocol.shards)]
+        if any(not ids for ids in shard_ids):
+            raise RunError(
+                f"execution.shards ({protocol.shards}) exceeds the {len(in_order)} selected items; "
+                "every shard must hold at least one item"
+            )
+        # Batch composition can change outputs, and the dataset hash ignores item order, so the
+        # exact per-shard item lists are bound here.
+        shards_sha256: str | None = sha256_json(shard_ids)
+    else:
+        shards_sha256 = None
 
     out = _prepare_out_dir(out_dir, allow_in_repo)
     run_id = run_id or f"wsp-{uuid.uuid4().hex[:12]}"
@@ -187,17 +199,24 @@ def run_paired(
         try:
             result: Any = generators[arm.id].generate(req)  # type: ignore[index]
         except Exception as exc:  # recorded, never dropped: one error row per requested sample
-            result = exc
+            process(item, arm, recs, None, round(clock() - t0, 6), raised=exc)
+            return
         process(item, arm, recs, result, round(clock() - t0, 6))
 
     def process(
-        item: Item, arm: Any, recs: list[dict[str, Any]], result: Any, latency: float
+        item: Item,
+        arm: Any,
+        recs: list[dict[str, Any]],
+        result: Any,
+        latency: float,
+        *,
+        raised: Exception | None = None,
     ) -> None:
-        """Turn one request's result (or the exception that failed it) into its records."""
+        """Turn one request's result, or the exception that failed it, into its records."""
         n = len(recs)
-        if isinstance(result, Exception):
+        if raised is not None:
             for rec in recs:
-                failed(rec, type(result).__name__, str(result), latency)
+                failed(rec, type(raised).__name__, str(raised), latency)
             records.extend(recs)
             return
         gens = result if isinstance(result, list) else [result]
@@ -292,23 +311,23 @@ def run_paired(
                     rec.update(shard=shard_index, batch_size=len(reqs))
                 recs_per.append(recs)
             t0 = clock()
+            batch_error: tuple[str, str] | None = None
             try:
                 results: Any = gen.generate_batch(reqs)
             except Exception as exc:  # the whole batch failed: an error row for every request
-                results = [exc] * len(reqs)
+                batch_error = (type(exc).__name__, str(exc))
             latency = round(clock() - t0, 6)
-            if not isinstance(results, list | tuple) or len(results) != len(reqs):
-                got = len(results) if isinstance(results, list | tuple) else type(results).__name__
-                mismatch = RuntimeError(f"batch of {len(reqs)} requests returned {got}")
-                results = [mismatch] * len(reqs)
-                mismatch_class = "BatchSizeMismatch"
-            else:
-                mismatch_class = None
-            for (item, _samples), recs, res in zip(todo, recs_per, results, strict=True):
-                if mismatch_class is not None:
+            if batch_error is None:
+                batch_error = _batch_problem(results, reqs)
+            for (item, _samples), recs, k in zip(todo, recs_per, range(len(reqs)), strict=True):
+                if batch_error is not None:
                     for rec in recs:
-                        failed(rec, mismatch_class, str(res), latency)
+                        failed(rec, *batch_error, latency)
                     records.extend(recs)
+                    continue
+                res = results[k].result
+                if isinstance(res, Exception):
+                    process(item, arm, recs, None, latency, raised=res)
                 else:
                     process(item, arm, recs, res, latency)
 
@@ -317,17 +336,25 @@ def run_paired(
 
     def run_sequential() -> None:
         seen: set[str] = set()
+        engines: list[Any] = []  # kept so a reused engine object is recognised (not just its id)
         for position, arm in enumerate(protocol.arms):
             entry: dict[str, Any] = {
                 "arm": arm.id,
                 "position": position,
                 "status": "load_failed",  # until the loader returns
-                "loaded_at": _now(),
+                "load_started_at": _now(),
             }
             loads.append(entry)
             gen = loaders[arm.id]()  # type: ignore[index]  # a load failure aborts the run
             entry["status"] = "running"
+            reused = any(gen is e for e in engines)
+            engines.append(gen)
             try:
+                if reused:
+                    raise RunError(
+                        f"arm {arm.id}: the loader returned an engine object already used by an "
+                        "earlier arm; every arm must be a separate load"
+                    )
                 desc = gen.describe()
                 if not isinstance(desc, dict):
                     raise RunError(f"arm {arm.id}: describe() must return an object")
@@ -350,16 +377,20 @@ def run_paired(
                     raise RunError(
                         f"arm {arm.id}: a per_arm_sequential generator needs generate_batch"
                     )
+                if not callable(getattr(gen, "close", None)):
+                    raise RunError(
+                        f"arm {arm.id}: a per_arm_sequential generator needs close(), so the "
+                        "engine is released before the next arm is loaded"
+                    )
                 run_arm(arm, gen)
             except BaseException:
-                _close_quietly(gen)
+                if not reused:
+                    entry["closed"] = _close_quietly(gen)
                 entry.update(status="failed", finished_at=_now())
                 raise
-            close = getattr(gen, "close", None)
-            if callable(close):
-                entry["status"] = "close_failed"
-                close()  # a close failure aborts the run: the next load may not have the GPU
-            entry.update(status="complete", closed=callable(close), finished_at=_now())
+            entry["status"] = "close_failed"
+            gen.close()  # a close failure aborts the run: the next load may not have the GPU
+            entry.update(status="complete", closed=True, finished_at=_now())
 
     abort: BaseException | None = None
     try:
@@ -419,6 +450,7 @@ def run_paired(
         "execution": {
             "order": protocol.execution_order,
             "shards": protocol.shards,
+            "shards_sha256": shards_sha256,
             "loads": loads if sequential else None,
         },
         "samples_per_item": protocol.samples_per_item,
@@ -453,13 +485,34 @@ def run_paired(
     return RunResult(run_id, out, manifest, records)
 
 
-def _close_quietly(gen: Any) -> None:
-    # Called only while another exception is propagating: release the engine if possible, but
-    # never let a second failure hide the first.
+def _batch_problem(results: Any, reqs: Sequence[GenerationRequest]) -> tuple[str, str] | None:
+    """Why a batch result cannot be attributed to its requests, or None if it can."""
+    if not isinstance(results, list | tuple) or len(results) != len(reqs):
+        got = len(results) if isinstance(results, list | tuple) else type(results).__name__
+        return "BatchSizeMismatch", f"batch of {len(reqs)} requests returned {got}"
+    for k, (entry, req) in enumerate(zip(results, reqs, strict=True)):
+        if not isinstance(entry, BatchItem):
+            return "BatchEntryInvalid", f"entry {k} is {type(entry).__name__}, not BatchItem"
+        if entry.request != req:
+            # Positions alone cannot be trusted: a reordered result would otherwise credit one
+            # request's output to another.
+            return "BatchOrderMismatch", f"entry {k} answers a different request"
+    return None
+
+
+def _close_quietly(gen: Any) -> bool | None:
+    """Release the engine while another failure propagates; never hide that failure.
+
+    Returns True if ``close()`` succeeded, False if it raised, None if there is no ``close``.
+    """
     close = getattr(gen, "close", None)
-    if callable(close):
-        with contextlib.suppress(Exception):  # the original failure is the one reported
-            close()
+    if not callable(close):
+        return None
+    try:
+        close()
+    except Exception:
+        return False
+    return True
 
 
 def _keep_reported(rec: dict[str, Any], gen: Generation) -> None:

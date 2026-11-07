@@ -17,7 +17,12 @@ sys.path.insert(0, str(WSP))
 from wsp_eval.analysis import analyze  # noqa: E402
 from wsp_eval.dataset import load_items  # noqa: E402
 from wsp_eval.drift import drift_report  # noqa: E402
-from wsp_eval.generation import Generation, GenerationError, SyntheticGenerator  # noqa: E402
+from wsp_eval.generation import (  # noqa: E402
+    BatchItem,
+    Generation,
+    GenerationError,
+    SyntheticGenerator,
+)
 from wsp_eval.grading import FinalAnswerGrader  # noqa: E402
 from wsp_eval.protocol import ProtocolError, parse_protocol  # noqa: E402
 from wsp_eval.runner import RunError, run_paired, verify_run  # noqa: E402
@@ -237,7 +242,9 @@ def test_a_failed_request_inside_a_batch_errors_only_its_own_rows(tmp_path, raw,
     def one_fails(self, requests):
         out = SyntheticGenerator.generate_batch(self, requests)
         return [
-            GenerationError("engine refused") if r.item_id == first and r.seed == 11 else o
+            BatchItem(r, GenerationError("engine refused"))
+            if r.item_id == first and r.seed == 11
+            else o
             for r, o in zip(requests, out, strict=True)
         ]
 
@@ -295,7 +302,8 @@ def test_abnormal_finishes_inside_a_batch_are_still_per_sample_errors(tmp_path, 
 
     def abnormal(self, requests):
         return [
-            Generation("x", finish_reason="abort", rendered_prompt_sha256="p") for _ in requests
+            BatchItem(r, Generation("x", finish_reason="abort", rendered_prompt_sha256="p"))
+            for r in requests
         ]
 
     events: list = []
@@ -463,3 +471,181 @@ def test_shards_use_file_order_not_id_order(tmp_path, raw, items) -> None:
     first_arm = proto.arms[0].id
     batches = [e[2] for e in events if e[0] == "batch" and e[1].startswith(first_arm)]
     assert [list(dict.fromkeys(b)) for b in batches] == [dev[0::2], dev[1::2]]
+
+
+# --- review fixes (focused review of 3d42e48) ----------------------------------------------
+
+
+def _with(items, seeds, events, arm, behaviour):
+    return _loaders(items, seeds, events, overrides=_scripted(items, seeds, events, arm, behaviour))
+
+
+def _reversed(self, reqs):
+    return list(reversed(SyntheticGenerator.generate_batch(self, reqs)))
+
+
+def _rotated(self, reqs):
+    out = SyntheticGenerator.generate_batch(self, reqs)
+    return [*out[1:], out[0]]
+
+
+def _bare(self, reqs):
+    return [x.result for x in SyntheticGenerator.generate_batch(self, reqs)]
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "error_class"),
+    [
+        # S1: reversed entries used to be credited to the wrong requests, silently.
+        (_reversed, "BatchOrderMismatch"),
+        (_rotated, "BatchOrderMismatch"),
+        # Bare results without their request cannot be attributed.
+        (_bare, "BatchEntryInvalid"),
+    ],
+)
+def test_batch_entries_must_answer_their_own_request(
+    tmp_path, raw, items, behaviour, error_class
+) -> None:
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+    loaders = _with(items, proto.seeds, events, "candidate", behaviour)
+    _, res, _ = _run(tmp_path, {**raw, **SEQ}, items, loaders=loaders, events=events)
+    rows = [r for r in res.records if r["arm"] == "candidate"]
+    assert rows and {r["error_class"] for r in rows} == {error_class}
+    assert all(r["status"] == "error" and r["output_sha256"] is None for r in rows)
+    assert res.manifest["run_status"] == "complete"  # recorded per request, not dropped
+
+
+def test_a_single_request_shard_is_not_refused_by_the_echo_check(tmp_path, raw, items) -> None:
+    dev = [i for i in items if i.split == "development"]
+    raw2 = {
+        **raw,
+        "execution": {"order": "per_arm_sequential", "shards": len(dev)},
+        "sampling_mode": "n_per_request",
+        "seeds": [11],
+    }
+    proto = parse_protocol(raw2)
+    events: list = []
+    loaders = _with(items, proto.seeds, events, "candidate", _reversed)
+    _, res, _ = _run(tmp_path, raw2, items, loaders=loaders, events=events)
+    assert not any(r["error_class"] == "BatchOrderMismatch" for r in res.records)
+
+
+def test_a_generator_without_close_is_refused_before_it_runs(tmp_path, raw, items) -> None:
+    # S2: the next arm used to load while this engine was still open.
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+    templates = synthetic_generators(items, proto.seeds)
+
+    class NoClose(StubEngine):
+        close = None  # type: ignore[assignment]
+
+    loaders = _loaders(
+        items,
+        proto.seeds,
+        events,
+        overrides={"reference": lambda: NoClose(templates["reference"], "ref-noclose", events)},
+    )
+    manifest, records = _assert_aborted(tmp_path, raw, items, loaders, events, RunError, "close")
+    assert records == [] and not any(e[0] == "batch" for e in events)
+    assert [e[1] for e in events if e[0] == "load"] == ["reference"]  # nothing loaded after it
+    assert manifest["execution"]["loads"][0]["closed"] is None  # there was nothing to call
+
+
+def test_shard_composition_is_hashed(tmp_path, raw, items) -> None:
+    # S3: the dataset hash ignores item order, so the per-shard item lists are bound here.
+    from wsp_eval.hashing import sha256_json
+
+    _, a, _ = _run(tmp_path, {**raw, **SEQ}, items, name="a")
+    _, b, _ = _run(tmp_path, {**raw, **SEQ}, list(reversed(items)), name="b")
+    ea, eb = a.manifest["execution"], b.manifest["execution"]
+    assert a.manifest["dataset"]["items_file_sha256"] == b.manifest["dataset"]["items_file_sha256"]
+    assert ea["shards_sha256"] and ea["shards_sha256"] != eb["shards_sha256"]
+    dev = [i.id for i in items if i.split == "development"]
+    assert ea["shards_sha256"] == sha256_json([dev[0::2], dev[1::2]])
+
+
+def test_interleaved_manifests_have_no_shard_hash(tmp_path, raw, items) -> None:
+    proto = parse_protocol(raw)
+    res = run_paired(
+        proto,
+        items,
+        synthetic_generators(items, proto.seeds),
+        FinalAnswerGrader(),
+        tmp_path / "i",
+        purpose="t",
+        operator="op1",
+    )
+    assert res.manifest["execution"] == {
+        "order": "interleaved",
+        "shards": 1,
+        "shards_sha256": None,
+        "loads": None,
+    }
+
+
+def test_more_shards_than_items_is_refused_before_any_output(tmp_path, raw, items) -> None:
+    # N2: empty shards used to be skipped silently while the manifest claimed the full count.
+    n = len([i for i in items if i.split == "development"])
+    raw2 = {**raw, "execution": {"order": "per_arm_sequential", "shards": n + 1}}
+    with pytest.raises(RunError, match="exceeds"):
+        _run(tmp_path, raw2, items)
+    assert not (tmp_path / "run").exists()
+
+
+def test_close_outcome_is_recorded_after_a_failure(tmp_path, raw, items) -> None:
+    # N1: after an arm failure the manifest says whether the engine was released.
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+
+    def boom(self, requests):
+        raise KeyboardInterrupt
+
+    class BadClose(_Scripted):
+        def close(self):
+            raise RuntimeError("release failed")
+
+    templates = synthetic_generators(items, proto.seeds)
+    loaders = _loaders(
+        items,
+        proto.seeds,
+        events,
+        overrides={"reference": lambda: BadClose(templates["reference"], "r-x", events, boom)},
+    )
+    manifest, _ = _assert_aborted(tmp_path, raw, items, loaders, events, KeyboardInterrupt, None)
+    assert manifest["execution"]["loads"][0]["closed"] is False
+
+
+def test_the_same_engine_object_cannot_serve_two_arms(tmp_path, raw, items) -> None:
+    # N3: load_id is self-reported, so a relabelled engine object is also checked by identity.
+    proto = parse_protocol({**raw, **SEQ})
+    events: list = []
+    templates = synthetic_generators(items, proto.seeds)
+    shared = StubEngine(templates["reference"], "shared-1", events)
+
+    def again():
+        shared.load_id = "shared-2"
+        return shared
+
+    loaders = _loaders(
+        items, proto.seeds, events, overrides={"reference": lambda: shared, "candidate": again}
+    )
+    _assert_aborted(tmp_path, raw, items, loaders, events, RunError, "already used")
+
+
+def test_interleaved_returned_exception_is_still_invalid_generation(tmp_path, raw, items) -> None:
+    # N4: a generate() that returns (not raises) an exception keeps main's InvalidGeneration.
+    proto = parse_protocol(raw)
+    gens = synthetic_generators(items, proto.seeds)
+
+    class Returns(SyntheticGenerator):
+        def generate(self, request):
+            return ValueError("returned, not raised")
+
+    g = gens["candidate"]
+    gens["candidate"] = Returns(g.name, g.table, load_id=g.load_id)
+    res = run_paired(
+        proto, items, gens, FinalAnswerGrader(), tmp_path / "r", purpose="t", operator="op1"
+    )
+    rows = [r for r in res.records if r["arm"] == "candidate"]
+    assert {r["error_class"] for r in rows} == {"InvalidGeneration"}

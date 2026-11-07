@@ -54,20 +54,31 @@ class Generator(Protocol):
         ...
 
 
-# One entry per request of a batch, in request order: the request's result, or the exception
-# that failed that request alone (recorded as error rows for its samples, never dropped).
+# A request's result: its Generation(s), or the exception that failed that request alone
+# (recorded as error rows for its samples, never dropped).
 BatchResult = Union["Generation", list["Generation"], Exception]
+
+
+@dataclass(frozen=True)
+class BatchItem:
+    """One entry of a batch result. ``request`` echoes the request it answers, so the runner can
+    refuse a reordered or substituted entry instead of crediting it to another request
+    (``Generation`` itself carries no request identity)."""
+
+    request: GenerationRequest
+    result: BatchResult
 
 
 class BatchGenerator(Generator, Protocol):
     """A generator that serves a whole shard in one engine call (``per_arm_sequential`` runs).
 
-    ``generate_batch`` returns exactly one entry per request, in order. Raising fails every
-    request of the batch. ``close()`` releases the engine (for example the GPU) before the
-    next arm is loaded; the runner calls it once per load, also when the arm fails.
+    ``generate_batch`` returns exactly one :class:`BatchItem` per request, in request order,
+    each echoing its request. Raising fails every request of the batch. ``close()`` (required)
+    releases the engine (for example the GPU) before the next arm is loaded; the runner calls it
+    once per load, also when the arm fails.
     """
 
-    def generate_batch(self, requests: Sequence[GenerationRequest]) -> Sequence[BatchResult]: ...
+    def generate_batch(self, requests: Sequence[GenerationRequest]) -> Sequence[BatchItem]: ...
 
     def close(self) -> None: ...
 
@@ -128,15 +139,15 @@ class SyntheticGenerator:
             raise whole
         return [self._lookup((request.item_id, request.seed, k)) for k in range(request.n)]
 
-    def generate_batch(self, requests: Sequence[GenerationRequest]) -> list[BatchResult]:
+    def generate_batch(self, requests: Sequence[GenerationRequest]) -> list[BatchItem]:
         """Serve a shard: each request's result, or the exception that failed it alone."""
         self.batches.append([(r.item_id, r.seed, r.n) for r in requests])
-        out: list[BatchResult] = []
+        out: list[BatchItem] = []
         for request in requests:
             try:
-                out.append(self.generate(request))
+                out.append(BatchItem(request, self.generate(request)))
             except Exception as exc:  # per-request failure, reported in its slot
-                out.append(exc)
+                out.append(BatchItem(request, exc))
         return out
 
     def close(self) -> None:
