@@ -442,7 +442,21 @@ def test_finish_error_row_without_a_prompt_hash_is_not_recorded(tmp_path, raw, i
 # --- post-merge review (PR #23, Codex P2) --------------------------------------------------
 
 
-@pytest.mark.parametrize("policy", [None, "drop", "EXCLUDE_ITEM"])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        "drop",
+        "EXCLUDE_ITEM",
+        # Exact membership, not a pattern: whitespace, empty and non-string values are refused.
+        "exclude_item\n",
+        " exclude_item",
+        "",
+        1,
+        True,
+        ["exclude_item"],
+    ],
+)
 def test_protocol_rejects_missing_or_unknown_missing_policy(raw, policy) -> None:
     for frozen in (False, True):
         bad = copy.deepcopy(raw)
