@@ -7,7 +7,11 @@ deliberately no "deploy" or "promote" value, and ``deployment_authorized`` must 
 
 Rules: the decider is a pseudonym and is neither the study owner nor the operator (no sole
 self-approval); the record names the exact study and report hashes; approval needs a candidate
-whose outcome is ``meets_declared_criteria_pending_human_decision``.
+whose outcome is ``meets_declared_criteria_pending_human_decision`` *and* a report with
+``evidence_complete: true`` and no ``evidence_errors`` (every requested run loaded). A
+candidate can only reach that outcome when its evidence run's manifest matched an externally
+recorded run-manifest identifier (``compare.py``). Other decisions (``reject``,
+``request_more_evidence``, ``pending``) are allowed on any well-formed report.
 
 What a record is *not*: it is not authenticated approval (``identity_verified`` is always
 ``false``; anyone who can write the file can type any pseudonym), and it is not enforced
@@ -54,10 +58,12 @@ def _report_problem(report: Any) -> str | None:
     return None
 
 
-def validate_decision(rec: dict[str, Any], study: Study, report: Any) -> list[str]:
+def validate_decision(rec: Any, study: Study, report: Any) -> list[str]:
     problem = _report_problem(report)
     if problem:
         return [problem]
+    if type(rec) is not dict:
+        return ["the decision record is not an object"]
     problems = []
     if set(rec) != FIELDS:
         return [f"decision record must have exactly {sorted(FIELDS)}"]
@@ -89,10 +95,17 @@ def validate_decision(rec: dict[str, Any], study: Study, report: Any) -> list[st
         problems.append("a decision needs a rationale")
     outcomes = {r["candidate"]: r["outcome"] for r in report.get("candidates", [])}
     cand = rec["candidate"]
+    if cand is not None and type(cand) is not str:
+        return [*problems, "candidate must be a string or null"]
     if cand is not None and cand not in outcomes:
         problems.append(f"unknown candidate {cand!r}")
     if rec["decision"] == "approve_further_evaluation":
-        if report.get("evidence_errors") or report.get("evidence_complete") is not True:
+        if "evidence_complete" not in report:
+            problems.append(
+                "cannot approve on this report: it predates the evidence_complete field, so "
+                "it does not show that every requested run loaded; regenerate the report"
+            )
+        elif report.get("evidence_errors") or report.get("evidence_complete") is not True:
             problems.append(
                 "cannot approve on a report whose requested evidence did not all load "
                 f"(evidence_errors: {report.get('evidence_errors')!r})"

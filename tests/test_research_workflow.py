@@ -7,6 +7,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -2065,7 +2066,7 @@ def test_build_report_and_decision_refuse_incomplete_evidence(tmp_path, raw, ale
     # A report from before this field existed cannot support an approval either.
     old = {k: v for k, v in complete.items() if k != "evidence_complete"}
     assert any(
-        "did not all load" in x
+        "predates the evidence_complete field" in x  # N4: says why, not "did not all load"
         for x in validate_decision(
             make_decision(
                 study, complete, candidate=THRESH, decision="approve_further_evaluation", **kw
@@ -2335,29 +2336,88 @@ def test_decide_cli_refuses_a_malformed_report_file(
         assert not (tmp_path / f"{decision}.json").exists()
 
 
-def test_cli_load_errors_name_the_run_as_given(tmp_path, raw, alerts, capsys) -> None:
-    # J5: `x/run` and `y/run` used to both appear as `run: ...`.
+def test_cli_load_errors_distinguish_runs_without_absolute_paths(
+    tmp_path, raw, alerts, capsys
+) -> None:
+    # J5 + N6: `x/run` and `y/run` must be distinguishable, but a shareable report must not
+    # carry absolute local paths.
     study_path, (a,), (ha,) = _frozen_cli_runs(tmp_path, raw, alerts)
-    other = tmp_path / "y" / a.name
-    code, out = _cli_report(
-        capsys,
-        [
-            "report",
-            "--study",
-            str(study_path),
-            "--evidence",
-            str(a),
-            str(other),
-            "--expected-run-manifest-sha256",
-            ha,
-            "0" * 64,
-            "--output",
-            str(tmp_path / "r"),
-        ],
-    )
+    x, y = tmp_path / "x" / "run", tmp_path / "y" / "run"
+    x.parent.mkdir()
+    y.parent.mkdir()
+    a.rename(x)
+    shutil.copytree(x, y)
+    missing = tmp_path / "z" / "run"
+    argv = [
+        "report",
+        "--study",
+        str(study_path),
+        "--evidence",
+        str(x),
+        str(y),
+        str(missing),
+        "--expected-run-manifest-sha256",
+        ha,
+        "0" * 64,
+        ha,
+        "--output",
+        str(tmp_path / "r"),
+    ]
+    code, out = _cli_report(capsys, argv)
     assert code == 0
-    (err,) = out["evidence_errors"]
-    assert err.startswith(f"{other}: ")
+    e1, e2 = out["evidence_errors"]
+    assert e1.startswith("evidence[1] y/run: ") and "externally recorded" in e1
+    assert e2.startswith("evidence[2] z/run: ")
+    for name in ("report.json", "report.md"):
+        text = (tmp_path / "r" / name).read_text()
+        assert str(tmp_path) not in text and str(tmp_path.resolve()) not in text
+        assert "evidence[1] y/run" in text
+
+
+def test_run_labels_handle_one_run_and_unusual_paths() -> None:
+    assert improve._run_labels([Path("/a/b/run")]) == ["evidence[0] run"]
+    assert improve._run_labels([Path("/a/x/run"), Path("/a/y/run")]) == [
+        "evidence[0] x/run",
+        "evidence[1] y/run",
+    ]
+    assert improve._run_labels([Path("a\0b")]) == ["evidence[0] a\0b"]
+    assert improve._run_labels([]) == []
+
+
+def test_decision_refuses_wrong_shaped_records_and_candidates(tmp_path, raw, alerts) -> None:
+    # S1, S2: these raised TypeError from validate_decision / make_decision.
+    study, report = _report(tmp_path, {**raw, **FROZEN}, alerts)
+    kw = {"decided_at": "2026-11-05T09:00Z", "rationale": "r", "decided_by": "reviewer1"}
+    for bad in (["a"], {}, 7, ("a",)):
+        with pytest.raises(ValueError, match="candidate must be a string or null"):
+            make_decision(study, report, candidate=bad, decision="reject", **kw)
+    for rec in (None, "x", [], 5):
+        assert validate_decision(rec, study, report) == ["the decision record is not an object"]
+    # Ordinary decisions still work.
+    assert make_decision(study, report, candidate=None, decision="pending", **kw)
+    assert make_decision(study, report, candidate=THRESH, decision="reject", **kw)
+
+
+def test_rule_outcome_line_after_a_failed_load_does_not_blame_the_rules(
+    tmp_path, raw, alerts
+) -> None:
+    # N3: after a failed load the downgraded rule outcome is not presented as the rules' own.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN, "frozen_at": "2999-01-01T00:00Z"}, alerts)
+    md = render_markdown(build_report(study, [_load(run, study)], ["b: records.jsonl is missing"]))
+    assert "Declared rules applied to this evidence alone" not in md
+    assert "after any downgrade for incomplete or unchecked evidence" in md
+    assert "unreviewed method" not in md
+
+
+def test_decision_docs_state_the_evidence_complete_requirement() -> None:
+    # N5
+    from improve_eval import decision, report
+
+    assert "evidence_complete: true" in decision.__doc__
+    assert "evidence_complete: true" in report.__doc__
+    doc = (ROOT / "docs" / "research" / "improvement-workflow.md").read_text()
+    section = doc[doc.index("## Human decisions") :]
+    assert "`evidence_complete: true`" in section[:1500]
 
 
 def test_run_manifest_identifier_labels_are_distinct_from_the_edit_manifest_hash() -> None:

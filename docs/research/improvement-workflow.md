@@ -253,7 +253,9 @@ that its checks are integrity and consistency checks, not authentication.
 
 **Requested evidence that fails to load.** Every run named in a report request must load.
 If any fails (including a run-manifest mismatch, a missing directory or malformed JSON), its
-error is kept verbatim in `evidence_errors` and at the top of the limitations, the report
+error is kept verbatim in `evidence_errors` and at the top of the limitations (labelled
+`evidence[i]` with its path relative to the other requested runs; the CLI does not write
+absolute local paths into reports), the report
 records `evidence_complete: false`, and no candidate can meet the declared criteria: a
 `meets` result from the remaining runs becomes `inconclusive` with a reason. `decide` refuses
 `approve_further_evaluation` on such a report. Otherwise, dropping one of two runs that both
@@ -405,7 +407,11 @@ always carries:
 - `enforced_by: "none"`: no system reads it to gate anything.
 
 The decider may not be the study owner or operator. Approval needs a candidate with the
-`meets_declared_criteria…` outcome.
+`meets_declared_criteria…` outcome (which itself needs a preregistered study and evidence whose
+manifest matched an externally recorded run-manifest identifier) **and** a report with
+`evidence_complete: true` and no `evidence_errors`. A report that predates
+`evidence_complete` cannot support an approval and must be regenerated. `reject`,
+`request_more_evidence` and `pending` remain possible on any well-formed report.
 
 The report's `report_sha256` is recomputed when a decision is recorded. This **detects
 accidental edits; it is not tamper-evident**:

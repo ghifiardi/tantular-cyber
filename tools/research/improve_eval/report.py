@@ -1,10 +1,14 @@
 """Study report: machine-readable JSON and a human-readable Markdown rendering.
 
 The overall outcome is ``inconclusive`` unless at least one candidate meets every declared
-criterion under a preregistered study; then it is
-``candidates_meet_declared_criteria_pending_human_decision``. The report never recommends or
-performs a promotion. ``human_decision`` is always ``pending`` in a report; decisions are
-separate, unauthenticated records (``decision.py``).
+criterion under a preregistered study, from evidence whose manifest matched an externally
+recorded run-manifest identifier, and every requested evidence run loaded
+(``evidence_complete: true``); then it is
+``candidates_meet_declared_criteria_pending_human_decision``. A requested run that failed to
+load is listed verbatim in ``evidence_errors`` (with its path relative to the other requested
+runs, never an absolute path from the CLI) and as the first limitation. The report never
+recommends or performs a promotion. ``human_decision`` is always ``pending`` in a report;
+decisions are separate, unauthenticated records (``decision.py``).
 
 Every value is shown with its numerator and denominator, every declared limit with its
 ``bound_source`` (synthetic fixture values are labelled as such), and every interval with its
@@ -335,10 +339,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"Hypothesis: {r['hypothesis']}")
         if r.get("rule_outcome") and r["rule_outcome"] != r["outcome"]:
             lines.append(
-                f"Declared rules applied to this evidence alone gave `{r['rule_outcome']}`. "
-                "That is not this candidate's result: the outcome above also reflects the "
-                "gates in the reasons below (for example preregistration timing, a "
-                "cluster-unit study or an unreviewed method)."
+                f"Rule outcome: `{r['rule_outcome']}`. This is the declared rules' result after "
+                "any downgrade for incomplete or unchecked evidence; it is not this "
+                "candidate's result, which also reflects preregistration timing or a "
+                "cluster-unit study (see the reasons below)."
             )
         eff = r.get("target_effect")
         if eff:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +69,32 @@ class _Once(argparse.Action):
             )
         setattr(namespace, f"_seen_{self.dest}", True)
         setattr(namespace, self.dest, values)
+
+
+def _run_labels(runs: list[Path]) -> list[str]:
+    """Shareable labels for requested runs: index plus the path relative to the runs' common
+    parent, so ``x/run`` and ``y/run`` stay distinct without writing absolute local paths."""
+    try:
+        resolved = [r.resolve() for r in runs]
+        base = Path(os.path.commonpath([r.parent for r in resolved])) if resolved else None
+        rel = [os.path.relpath(r, base) for r in resolved]
+    except (OSError, ValueError):  # e.g. a NUL in a path, or paths on different drives
+        rel = [r.name or "?" for r in runs]
+    return [f"evidence[{i}] {p}" for i, p in enumerate(rel)]
+
+
+def _scrub(message: str, run: Path, label: str) -> str:
+    """Replace any form of a run's local path in an error message with its shareable label."""
+    forms = {str(run)}
+    try:
+        forms.add(str(run.resolve()))
+        forms.add(str(run.absolute()))
+    except (OSError, ValueError):
+        pass
+    for f in sorted(forms, key=len, reverse=True):
+        if f and f != ".":
+            message = message.replace(f, label)
+    return message
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,13 +191,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 2
             evidence, errors = [], []
+            labels = _run_labels(args.evidence)
             for i, run in enumerate(args.evidence):
                 try:
                     evidence.append(
                         load_evidence(run, study, expected[i] if expected is not None else None)
                     )
                 except (EvidenceError, OSError, ValueError, RecursionError) as exc:
-                    errors.append(f"{run}: {exc}")  # the run as given; recorded, not dropped
+                    # Recorded, not dropped; labelled without absolute local paths.
+                    errors.append(f"{labels[i]}: {_scrub(str(exc), run, labels[i])}")
             report = build_report(study, evidence, errors)
             out = _write_report(report, args.output, args.allow_in_repo)
             _print({"report": str(out), "outcome": report["outcome"], "evidence_errors": errors})
