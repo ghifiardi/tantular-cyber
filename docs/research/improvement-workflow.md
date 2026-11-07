@@ -57,7 +57,7 @@ any value here.
 | configuration | `prompt_or_threshold`, `feature_change` | Same artifact digest as the baseline; the configuration actually differs; `feature_change` names a feature-contract hash |
 | training | `conventional_training`, `lora` | A different artifact digest; training data, training-config hash and compute budget declared; `lora`'s `base_artifact_sha256` is the registered baseline digest |
 | soc_triage_model | `soc_triage_model` | A different artifact; model family, feature contract, training data, and a calibration dataset that is **not** the evaluation dataset |
-| weight_edit | `weight_edit` | A different artifact; `base_artifact_sha256` is the baseline digest; edit-manifest hash. Status `verified` plus a `report_sha256` is required in a frozen study, **and** the actual `verify-edit` report must be supplied with the WSP evidence, name the registered edit manifest, and come from a held-out WSP run (below). Until `verify-edit` reports carry `manifest_sha256` (a separate WSP change), weight-edit evidence **loaded through `evidence_from_wsp`** cannot pass. A hand-built `Evidence` object can assert an edit-verification result in its `notes` (see [Direct calls](#direct-calls-and-what-is-recomputed-at-the-comparison-boundary)) |
+| weight_edit | `weight_edit` | A different artifact; `base_artifact_sha256` is the baseline digest; edit-manifest hash. Status `verified` plus a `report_sha256` is required in a frozen study, **and** the actual `verify-edit` report must be supplied with the WSP evidence, name the registered edit manifest, and come from a held-out WSP run (below). `wsp.py verify-edit` reports carry `manifest_sha256` (#26), so the edit-manifest linkage is **available** to `evidence_from_wsp`. That makes the loader-based weight-edit path able to pass; it does **not** mean any real weight edit has been verified (only synthetic files have been checked), nor that the other requirements for a passing comparison are met. A hand-built `Evidence` object can assert an edit-verification result in its `notes` (see [Direct calls](#direct-calls-and-what-is-recomputed-at-the-comparison-boundary)) |
 
 ## Metrics: explicit numerators and denominators
 
@@ -413,10 +413,10 @@ preregistered; read the two together.
 keys, compact separators, UTF-8), exactly as emitted by `wsp.py verify-edit` in
 `manifest_sha256` (#26). It is **not** the hash of the file's bytes (`manifest_file_sha256`,
 which `sha256sum` would give); registering that hash fails closed. Reports without
-`manifest_sha256` (from the current, merged `verify-edit`) are refused, so weight-edit
-evidence loaded through `evidence_from_wsp` cannot pass until the separate WSP change that
-adds the field is merged. (A hand-built object can assert the result in `notes`; see the
-direct-calls section.) The WSP run
+`manifest_sha256` (from `verify-edit` before #26) are refused. With #26 the linkage is
+available; it is a provenance consistency check of a supplied report, and every other
+requirement below still applies. (A hand-built object can assert the result in `notes`; see
+the direct-calls section.) The WSP run
 must also be from the held-out split. Only then is
 the evidence's edit verification recorded as `hash_consistent`. Without such a report the
 comparison is `prerequisite_missing`, whatever the study declares.
@@ -501,7 +501,7 @@ infrastructure or people; not implemented or verified here.
 | Only binding methods (exact CP; Bonferroni paired, binary single-sample items) can pass; others descriptive; cluster-unit results always descriptive; estimand named for every interval; multiplicity stated | Impl + Test | The *validity* of the methods is not established by tests: it needs statistical review. A clustered method, its estimand and the cluster definition are **open decisions** |
 | Baseline unchanged, checked per named file and configuration | Impl + Test | Relies on evaluators reporting loaded digests truthfully → **Op** |
 | One intervention type per candidate; family prerequisites | Impl + Test | Truth of declared training and calibration data is **Op** |
-| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol (re-parsed and hash-bound; arm settings matched), arms, dataset, slice membership and held-out split; only the registered file may differ between arms | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, trusting who ran it, and the evaluator truthfully reporting every loaded file are **Op**. Manifest linkage needs the separate WSP change. Enforced by the loader only; a hand-built object can assert it |
+| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol (re-parsed and hash-bound; arm settings matched), arms, dataset, slice membership and held-out split; only the registered file may differ between arms | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, trusting who ran it, and the evaluator truthfully reporting every loaded file are **Op**. Edit-manifest linkage is available since #26; no real weight edit has been verified. Enforced by the loader only; a hand-built object can assert it |
 | Invented limits labelled `synthetic_fixture`; real studies cannot use them | Impl + Test | Who sets real limits, and when, is **Op** |
 | Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated. The evidence start time comes from the manifest and is bound only by an external manifest record |
 | Run-manifest identifier; `meets` needs a match with an externally recorded value | Impl + Test | Detects post-run edits only if the external record is itself protected (independent access control or signatures) → **Op**; not authentication |

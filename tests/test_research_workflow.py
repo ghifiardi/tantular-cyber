@@ -429,7 +429,8 @@ def test_decisions_are_human_named_and_never_deploy(tmp_path, raw, alerts) -> No
 # --- WSP harness as the weight-edit evidence path -------------------------------------------
 
 
-# Shape of `wsp.py verify-edit` output (checkpoint_diff.verify_edit), synthetic digests.
+# Shape of the library `checkpoint_diff.verify_edit` output (the CLI also adds
+# `manifest_file_sha256`), synthetic digests.
 EDIT_REPORT = {
     "status": "verified",
     "problems": [],
