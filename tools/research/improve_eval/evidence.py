@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,9 +60,87 @@ class Evidence:
     notes: dict[str, Any] = field(default_factory=dict)
 
 
-def _check_records(records: Sequence[dict[str, Any]], run_id: str) -> None:
+def record_problem(r: Any) -> str | None:
+    """Ordinary-input validation of one record, before any field is used (not authentication).
+
+    Types are checked exactly (``type(x) is str``), so subclasses that change hashing,
+    equality or membership are refused. The values themselves remain as asserted.
+    """
+    if type(r) is not dict:
+        return "a record is not an object"
+    if not (type(r.get("arm")) is str and type(r.get("item_id")) is str):
+        return "record arm and item_id must be strings"
+    item = r["item_id"]
+    if type(r.get("sample")) is not int:
+        return f"item {item}: sample must be an integer"
+    if type(r.get("status")) is not str:
+        return f"item {item}: status must be a string"
+    tags = r.get("tags", [])
+    if type(tags) not in (list, tuple) or not all(type(t) is str for t in tags):
+        return f"item {item}: tags must be a list of strings"
+    for key in ("cluster", "label", "decision", "error_class", "run_id"):
+        v = r.get(key)
+        if v is not None and type(v) is not str:
+            return f"item {item}: {key} must be a string or null"
+    if r.get("correct") is not None and type(r["correct"]) is not bool:
+        return f"item {item}: correct must be a boolean or null"
+    return None
+
+
+def parse_timestamp(s: Any) -> datetime:
+    """Parse an ISO-8601 timestamp to UTC; EvidenceError if it is not one."""
+    if type(s) is not str:
+        raise EvidenceError("timestamp must be an ISO-8601 string")
+    try:
+        t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EvidenceError(f"timestamp {s!r} is not ISO-8601") from exc
+    if t.tzinfo is None:
+        raise EvidenceError(f"timestamp {s!r} has no time zone")
+    return t.astimezone(UTC)
+
+
+def evidence_problem(ev: Any) -> str | None:
+    """Ordinary-input validation of a (possibly hand-built) Evidence object and its records.
+
+    This lets a direct caller get a gate outcome instead of an exception. It checks shapes
+    only: the values are still caller-asserted, and only the loaders bind them to run,
+    records, study and dataset hashes.
+    """
+    if not isinstance(ev, Evidence):
+        return "evidence is not an Evidence object"
+    if type(ev.run_id) is not str or type(ev.source) is not str:
+        return "evidence run_id and source must be strings"
+    if type(ev.synthetic) is not bool:
+        return "evidence synthetic must be a boolean"
+    if ev.started_at is not None:
+        try:
+            parse_timestamp(ev.started_at)
+        except EvidenceError as exc:
+            return f"evidence started_at: {exc}"
+    if type(ev.arms) is not dict or not all(
+        type(k) is str and type(v) is dict for k, v in ev.arms.items()
+    ):
+        return "evidence arms must map arm ids to objects"
+    if type(ev.notes) is not dict:
+        return "evidence notes must be an object"
+    if type(ev.limitations) not in (list, tuple) or not all(type(x) is str for x in ev.limitations):
+        return "evidence limitations must be a list of strings"
+    if type(ev.records) not in (list, tuple):
+        return "evidence records must be a list"
+    for r in ev.records:
+        problem = record_problem(r)
+        if problem:
+            return problem
+    return None
+
+
+def _check_records(records: Sequence[Any], run_id: str) -> None:
     seen: set[tuple[str, str, int]] = set()
     for r in records:
+        problem = record_problem(r)
+        if problem:
+            raise EvidenceError(problem)
         if r.get("run_id") != run_id:
             raise EvidenceError("records.jsonl contains records from another run")
         key = (r["arm"], r["item_id"], r["sample"])
@@ -102,6 +181,17 @@ def records_metadata(
     return meta
 
 
+def _parse_json(text: str, where: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise EvidenceError(f"{where} is not valid JSON") from exc
+
+
+def _read_json(path: Path) -> Any:
+    return _parse_json(path.read_text(encoding="utf-8"), path.name)
+
+
 def load_evidence(run_dir: Path, study: Study) -> Evidence:
     """Load and verify synthetic-triage evidence. Accuracy evidence must come through
     :func:`evidence_from_wsp`, which checks slice membership and the held-out split."""
@@ -110,7 +200,9 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
             "load_evidence accepts alert_triage studies only; accuracy evidence must come "
             "through evidence_from_wsp (slice membership and held-out checks)"
         )
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest = _read_json(run_dir / "manifest.json")
+    if type(manifest) is not dict:
+        raise EvidenceError("manifest.json is not an object")
     if manifest.get("source") != "synthetic_triage" or manifest.get("task_kind") != "alert_triage":
         raise EvidenceError("load_evidence accepts synthetic_triage alert_triage evidence only")
     if manifest.get("study_sha256") != study.sha256:
@@ -120,9 +212,20 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
     path = run_dir / "records.jsonl"
     if sha256_file(path) != manifest.get("records_sha256"):
         raise EvidenceError("records.jsonl does not match records_sha256 in the manifest")
-    records = [json.loads(x) for x in path.read_text(encoding="utf-8").split("\n") if x.strip()]
+    records = [
+        _parse_json(x, "records.jsonl")
+        for x in path.read_text(encoding="utf-8").split("\n")
+        if x.strip()
+    ]
     if len(records) != manifest.get("expected_records"):
         raise EvidenceError("record count differs from expected_records in the manifest")
+    if type(manifest.get("run_id")) is not str:
+        raise EvidenceError("manifest run_id must be a string")
+    arms = manifest.get("arms")
+    if type(arms) is not dict or not all(
+        type(k) is str and type(v) is dict for k, v in arms.items()
+    ):
+        raise EvidenceError("manifest arms must map arm ids to objects")
     _check_records(records, manifest["run_id"])
     if {r["arm"] for r in records} != set(manifest["arms"]):
         raise EvidenceError("record arms differ from the arms the manifest declares")
@@ -142,7 +245,7 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
         raise EvidenceError("task.dataset.metadata_sha256 not registered; metadata unverifiable")
     if triage_metadata_sha256(records_metadata(records)) != declared_meta:
         raise EvidenceError("alert tags, clusters or labels in the records differ from the study")
-    return Evidence(
+    ev = Evidence(
         run_id=manifest["run_id"],
         source="synthetic_triage",
         synthetic=bool(manifest.get("synthetic", True)),
@@ -151,6 +254,10 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
         records=tuple(records),
         limitations=tuple(manifest.get("limitations", [])),
     )
+    problem = evidence_problem(ev)
+    if problem:
+        raise EvidenceError(problem)
+    return ev
 
 
 def slice_membership_sha256(item_ids: Sequence[str], item_tags: Mapping[str, Sequence[str]]) -> str:
@@ -177,6 +284,11 @@ def evidence_from_wsp(
     """
     if study.task_kind != "accuracy":
         raise EvidenceError("WSP evidence is accuracy evidence; the study task differs")
+    if not all(
+        type(i) is str and type(t) in (list, tuple) and all(type(x) is str for x in t)
+        for i, t in item_tags.items()
+    ):
+        raise EvidenceError("item_tags must map item ids to lists of strings")
     unknown = sorted(set(arm_map.values()) - set(study.arm_ids))
     if unknown:
         raise EvidenceError(f"arm_map targets not registered in the study: {unknown}")

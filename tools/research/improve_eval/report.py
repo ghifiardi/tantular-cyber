@@ -20,7 +20,7 @@ from wsp_eval.hashing import sha256_json
 
 from . import WORKFLOW_VERSION
 from .compare import compare_candidate
-from .evidence import Evidence
+from .evidence import Evidence, evidence_problem
 from .study import Study
 
 EVIDENCE_LIMIT = (
@@ -58,7 +58,18 @@ def build_report(
 ) -> dict[str, Any]:
     results = [compare_candidate(study, c, evidence) for c in study.candidates]
     meets = [r["candidate"] for r in results if r["outcome"].startswith("meets_declared")]
-    synthetic = study.synthetic or any(e.synthetic for e in evidence) or not evidence
+    # A malformed evidence object already makes every candidate insufficient_evidence; it is
+    # listed as an error and not read further, and the report stays labelled synthetic.
+    shaped, evidence_errors = [], list(evidence_errors)
+    for i, e in enumerate(evidence):
+        problem = evidence_problem(e)
+        if problem:
+            evidence_errors.append(f"evidence object {i}: {problem}")
+        else:
+            shaped.append(e)
+    malformed = len(shaped) != len(evidence)
+    evidence = shaped
+    synthetic = study.synthetic or any(e.synthetic for e in evidence) or not evidence or malformed
     limitations = list(study.raw.get("limitations", []))
     for e in evidence:
         limitations += [x for x in e.limitations if x not in limitations]

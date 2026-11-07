@@ -2,13 +2,16 @@
 
 Gates, in order; the first that fails decides the candidate's outcome:
 
-1. ``insufficient_evidence``: no single verified evidence run contains both the baseline and
-   the candidate (comparisons are always paired within one run); accuracy evidence that is not
-   WSP-sourced; any comparison-boundary consistency check fails (record types, duplicate
-   records, a sample outside the registered design, tags/cluster/label differing between
-   arms, an evaluated item set that differs from the registered one, triage metadata or
-   accuracy slice membership not matching the registered hash); or a cluster-level study's
-   records lack cluster ids. These all run before steps 2-4.
+1. ``insufficient_evidence``: the candidate is not registered in the study, or the dict
+   passed differs from its registration (only the registered candidate is compared); an
+   evidence object or record has the wrong shape or types (checked before any field is
+   read, so malformed input is a gate, not an exception); no single evidence run contains
+   both the baseline and the candidate (comparisons are always paired within one run);
+   accuracy evidence that is not WSP-sourced; any comparison-boundary consistency check
+   fails (duplicate records, a sample outside the registered design, tags/cluster/label
+   differing between arms, an evaluated item set that differs from the registered one,
+   triage metadata or accuracy slice membership not matching the registered hash); or a
+   cluster-level study's records lack cluster ids. These all run before steps 2-4.
 2. ``baseline_changed_not_interpreted``: the baseline's loaded artifact (the registered file,
    when named) or configuration differs from the registration, or is not recorded.
 3. ``candidate_provenance_mismatch``: the same check for the candidate.
@@ -49,9 +52,10 @@ arms), which may include incomplete ones. There is no exclusion option. Binding 
 require the registered design to be single-sample.
 
 **Comparison-boundary consistency checks.** Before provenance or prerequisites,
-``compare_candidate`` recomputes from the records it actually uses: ordinary types (``arm``
-and ``item_id`` strings, integer ``sample``, ``tags`` a list of strings, ``cluster`` and
-``label`` string or null); no duplicate ``(arm, item, sample)`` records; samples inside the
+``compare_candidate`` resolves the candidate from the study, shape-checks every evidence
+object (``evidence.evidence_problem``: exact types for record fields, ``started_at``,
+``arms``, ``notes``, ``limitations``), and recomputes from the records it actually uses: no
+duplicate ``(arm, item, sample)`` records; samples inside the
 registered design (exactly one per alert and arm for triage); identical tags, cluster and
 label for an item in every arm; the registered item set; and the canonical triage metadata
 hash (``metadata_sha256``) or accuracy slice-membership hash (``slice_membership_sha256``).
@@ -61,7 +65,8 @@ authentication**: caller-supplied evidence remains unauthenticated. Record outco
 (``correct``, ``decision``, ``status``, ``error_class``), ``source``, ``synthetic``,
 ``run_id``, ``limitations``, ``notes`` (WSP split, edit verification), ``started_at`` and the
 arms' reported digests and configuration remain as asserted by whoever built the object.
-Only the loaders also check run, records, study and dataset hashes.
+Only the loaders also check run, records, study and dataset hashes, the WSP split and the
+``verify-edit`` report; a hand-built object can assert all of those in ``notes``.
 
 **Fail-closed preconditions.** A calibration dataset without a content
 hash or with the evaluation dataset's identity or hash, and WSP evidence from a non-held-out
@@ -81,7 +86,6 @@ own evaluation and release process outside this workflow.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from typing import Any
 
 from wsp_eval.hashing import sha256_json
@@ -89,7 +93,9 @@ from wsp_eval.hashing import sha256_json
 from .evidence import (
     Evidence,
     EvidenceError,
+    evidence_problem,
     item_set_sha256,
+    parse_timestamp,
     records_metadata,
     slice_membership_sha256,
     triage_metadata_sha256,
@@ -105,7 +111,7 @@ from .metrics import (
     ratio,
     triage_breakdown,
 )
-from .study import METRICS, Study
+from .study import METRICS, Study, StudyError
 
 RULE_OUTCOMES = (
     "constraint_violated",
@@ -125,18 +131,20 @@ GATE_OUTCOMES = (
 )
 
 
-def _ts(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
-
-
 def preregistration(study: Study, ev: Evidence) -> dict[str, Any]:
     reasons = []
     if not study.frozen:
         reasons.append("study not frozen")
     elif not ev.started_at:
         reasons.append("evidence start time not recorded")
-    elif _ts(study.raw["frozen_at"]) > _ts(ev.started_at):
-        reasons.append("study frozen after the evidence run started")
+    else:
+        try:
+            late = parse_timestamp(study.raw["frozen_at"]) > parse_timestamp(ev.started_at)
+        except EvidenceError as exc:
+            reasons.append(f"evidence start time not usable: {exc}")
+        else:
+            if late:
+                reasons.append("study frozen after the evidence run started")
     return {"preregistered": not reasons, "reasons": reasons}
 
 
@@ -311,24 +319,6 @@ def _constraint(study, k, records, cand_id, items, clusters, single_sample) -> d
 Meta = dict[str, tuple[tuple[str, ...], str | None, str | None]]
 
 
-def _type_problem(r: Any) -> str | None:
-    """Ordinary-input validation of a record's identifying fields (not authentication)."""
-    if not isinstance(r, dict):
-        return "a record is not an object"
-    if not (isinstance(r.get("arm"), str) and isinstance(r.get("item_id"), str)):
-        return "record arm and item_id must be strings"
-    if isinstance(r.get("sample"), bool) or not isinstance(r.get("sample"), int):
-        return f"item {r.get('item_id')}: sample must be an integer"
-    tags = r.get("tags", [])
-    if type(tags) not in (list, tuple) or not all(type(t) is str for t in tags):
-        return f"item {r['item_id']}: tags must be a list of strings"
-    for key in ("cluster", "label"):
-        v = r.get(key)
-        if v is not None and type(v) is not str:
-            return f"item {r['item_id']}: {key} must be a string or null"
-    return None
-
-
 def _boundary_problems(study: Study, records: Sequence[dict[str, Any]]) -> tuple[list[str], Meta]:
     """Consistency checks recomputed from the records actually compared.
 
@@ -342,10 +332,7 @@ def _boundary_problems(study: Study, records: Sequence[dict[str, Any]]) -> tuple
     else:
         allowed = set(range(spi)) if isinstance(spi, int) else None
     seen: set[tuple[str, str, int]] = set()
-    for r in records:
-        problem = _type_problem(r)
-        if problem:
-            return [problem], {}
+    for r in records:  # record types were validated with the evidence object
         key = (r["arm"], r["item_id"], r["sample"])
         if key in seen:
             return [f"duplicate record for arm/item/sample {key}"], {}
@@ -393,18 +380,59 @@ def _boundary_problems(study: Study, records: Sequence[dict[str, Any]]) -> tuple
     return [], meta
 
 
+def _registered(study: Study, cand: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """The study's own registration of ``cand``, or why it cannot be used.
+
+    A caller may pass any dict; only the registered candidate is compared, and a dict that is
+    not exactly the registration (canonical JSON) is refused rather than silently replaced.
+    """
+    cid = cand.get("id") if type(cand) is dict else None
+    if type(cid) is not str:
+        return None, "candidate must be an object with a string id"
+    try:
+        reg = study.candidate(cid)
+    except StudyError:
+        return None, f"candidate {cid!r} is not registered in the study"
+    if cand is not reg:
+        try:
+            same = sha256_json(cand) == sha256_json(reg)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return None, (
+                f"candidate {cid!r} differs from the study's registration; only the "
+                "registered candidate is compared"
+            )
+    return reg, None
+
+
 def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evidence]) -> dict:
-    cid, base_id = cand["id"], study.baseline["id"]
+    base_id = study.baseline["id"]
     result: dict[str, Any] = {
-        "candidate": cid,
-        "intervention_type": cand["intervention"]["type"],
-        "hypothesis": cand["hypothesis"],
+        "candidate": cand.get("id") if type(cand) is dict else None,
+        "intervention_type": None,
+        "hypothesis": None,
         "reasons": [],
         "constraints": [],
         "target_effect": None,
         "evidence_run": None,
         "rule_outcome": None,
     }
+    reg, problem = _registered(study, cand)
+    if reg is None:
+        result["outcome"] = "insufficient_evidence"
+        result["reasons"].append(problem)
+        return result
+    cand, cid = reg, reg["id"]
+    result["intervention_type"] = cand["intervention"]["type"]
+    result["hypothesis"] = cand["hypothesis"]
+    # Shape checks before any field is read, so malformed input gives a gate, not an exception.
+    for i, e in enumerate(evidence):
+        problem = evidence_problem(e)
+        if problem:
+            result["outcome"] = "insufficient_evidence"
+            result["reasons"].append(f"evidence object {i}: {problem}")
+            return result
     runs = [e for e in evidence if base_id in e.arms and cid in e.arms]
     if len(runs) != 1:
         result["outcome"] = "insufficient_evidence"

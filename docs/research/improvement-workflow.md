@@ -57,7 +57,7 @@ any value here.
 | configuration | `prompt_or_threshold`, `feature_change` | Same artifact digest as the baseline; the configuration actually differs; `feature_change` names a feature-contract hash |
 | training | `conventional_training`, `lora` | A different artifact digest; training data, training-config hash and compute budget declared; `lora`'s `base_artifact_sha256` is the registered baseline digest |
 | soc_triage_model | `soc_triage_model` | A different artifact; model family, feature contract, training data, and a calibration dataset that is **not** the evaluation dataset |
-| weight_edit | `weight_edit` | A different artifact; `base_artifact_sha256` is the baseline digest; edit-manifest hash. Status `verified` plus a `report_sha256` is required in a frozen study, **and** the actual `verify-edit` report must be supplied with the WSP evidence, name the registered edit manifest, and come from a held-out WSP run (below). Until `verify-edit` reports carry `manifest_sha256` (a separate WSP change), weight-edit evidence cannot pass |
+| weight_edit | `weight_edit` | A different artifact; `base_artifact_sha256` is the baseline digest; edit-manifest hash. Status `verified` plus a `report_sha256` is required in a frozen study, **and** the actual `verify-edit` report must be supplied with the WSP evidence, name the registered edit manifest, and come from a held-out WSP run (below). Until `verify-edit` reports carry `manifest_sha256` (a separate WSP change), weight-edit evidence **loaded through `evidence_from_wsp`** cannot pass. A hand-built `Evidence` object can assert an edit-verification result in its `notes` (see [Direct calls](#direct-calls-and-what-is-recomputed-at-the-comparison-boundary)) |
 
 ## Metrics: explicit numerators and denominators
 
@@ -220,36 +220,55 @@ verified, and it is refused for that reason instead.
 ## Direct calls and what is recomputed at the comparison boundary
 
 `compare_candidate` and `build_report` can be called with `Evidence` objects built directly
-(for example in a notebook), bypassing the loaders. Before provenance or prerequisites, from
-the records actually compared, they check (→ `insufficient_evidence` on any failure, with no
-metric reported):
-- ordinary input types: `arm` and `item_id` strings, integer `sample` (not a boolean),
-  `tags` a list of strings, `cluster` and `label` a string or null;
-- no duplicate `(arm, item, sample)` records, and samples inside the registered design
-  (triage: exactly one per alert and arm);
-- tags, cluster and label identical for an item in every arm;
-- the registered item set, then the canonical triage metadata hash or the accuracy
-  slice-membership hash. The target slice is then taken from these verified tags.
+(for example in a notebook), bypassing the loaders. The table separates what the loaders
+guarantee from what every call checks, and from what a caller who builds the object can
+simply assert.
 
-After that they check the registered samples and balance (→ `inconclusive`), arm provenance
-against the registration, prerequisites, the cluster-descriptive rule, preregistration
-timing and the decision rules.
+| | Through the loaders (`load_evidence`, `evidence_from_wsp`) | On every call, including hand-built objects | Caller can assert on a hand-built object |
+|---|---|---|---|
+| Candidate | Taken from the study | Resolved from the study by id; an unregistered id or a dict that differs from the registration (canonical JSON) is refused | Nothing |
+| Shapes and types | Checked, as `EvidenceError` | Checked, as `insufficient_evidence`: record fields (below), `run_id`, `source`, `synthetic`, `started_at` (ISO-8601 with a time zone), `arms`, `notes`, `limitations` | Nothing |
+| Item set, design, arm agreement, metadata or slice hash | Checked | Rechecked from the records compared | Nothing |
+| Run, records, study and dataset hashes; record count; `run_status` | Checked | Not checked (there is no run to check) | Everything |
+| `verify-edit` report linkage, WSP split, WSP protocol | Checked | Not checked; read from `notes` | `notes["edit_verification"]`, `notes["wsp_split"]` |
+| Record outcomes (`correct`, `decision`, `status`, `error_class`) | Read from the verified run | Type-checked only | The values |
+| `source`, `synthetic`, `run_id`, `limitations`, `started_at`, arm digests and configuration | Read from the verified run | Type-checked only | The values |
 
-The type checks validate ordinary input; they are not a defence against deliberately
-deceptive Python objects. All of these are **consistency checks against the registered
-study, not authentication**: caller-supplied evidence remains unauthenticated. On the direct
-path, the following remain as asserted by whoever built the object:
-- record outcomes (`correct`, `decision`, `status`, `error_class`);
-- `source` (for accuracy, the only source check is the declared string `"wsp"`) and
-  `synthetic` (which decides whether a report is labelled `measured`);
-- `run_id` and `limitations`;
-- `notes` (WSP split, edit-verification result);
-- `started_at`;
-- each arm's reported artifact digests and configuration hash.
+So a hand-built object with `source: "wsp"`, consistent metadata, `notes` claiming a held-out
+run and a hash-consistent edit verification, and asserted outcomes, can reach
+`meets_declared_criteria_pending_human_decision` without any WSP run or `verify-edit`
+report. That is the documented limit of this path, not a gap in the checks: **a result from
+a direct call is only as trustworthy as the code that built its evidence.** Use the loaders
+for anything that will be read as evidence.
 
-Only the loaders also check the run, records, study and dataset hashes and the `verify-edit`
-report. A report from a direct call is only as trustworthy as the code that built its
-evidence.
+**Order on every call** (→ `insufficient_evidence` on any failure, with no metric
+reported):
+1. the candidate is resolved from the study;
+2. every evidence object passed is shape-checked: a record must be an object with string
+   `arm`, `item_id` and `status`, an integer `sample` (not a boolean), `tags` a list (or
+   tuple) of strings, `cluster`, `label`, `decision`, `error_class` and `run_id` a string or
+   null, and `correct` a boolean or null. Types are checked exactly, so subclasses that
+   change hashing, equality or membership are refused. One malformed object makes every
+   candidate `insufficient_evidence`; `build_report` lists it under `evidence_errors`, does
+   not read it further, and labels the report `synthetic_fixture_not_a_measurement`;
+3. exactly one run pairs the baseline and candidate; accuracy evidence must say
+   `source: "wsp"`;
+4. no duplicate `(arm, item, sample)` records, and samples inside the registered design
+   (triage: exactly one per alert and arm);
+5. tags, cluster and label identical for an item in every arm;
+6. the registered item set, then the canonical triage metadata hash or the accuracy
+   slice-membership hash. The target slice is then taken from these verified tags;
+7. for a cluster-unit study, every record has a cluster id.
+
+Then, in this order: baseline and candidate provenance against the registration
+(`baseline_changed_not_interpreted`, `candidate_provenance_mismatch`), prerequisites
+(`prerequisite_missing`), the registered samples and balance (an incomplete or unbalanced run
+makes the rule outcome `inconclusive`), the decision rules, and finally preregistration
+timing and the cluster-descriptive rule. When provenance or a prerequisite fails, that gate
+is the outcome even if the design check would also fail.
+
+All of these are **consistency checks against the registered study, not authentication**:
+caller-supplied evidence remains unauthenticated.
 
 **Open notes (not fixed):**
 - *Registered hashes are not cross-checked when the study is parsed.* `expected_items_sha256`
@@ -281,7 +300,9 @@ keys, compact separators, UTF-8), exactly as emitted by `wsp.py verify-edit` in
 `manifest_sha256` (#26). It is **not** the hash of the file's bytes (`manifest_file_sha256`,
 which `sha256sum` would give); registering that hash fails closed. Reports without
 `manifest_sha256` (from the current, merged `verify-edit`) are refused, so weight-edit
-evidence cannot pass until the separate WSP change that adds the field is merged. The WSP run
+evidence loaded through `evidence_from_wsp` cannot pass until the separate WSP change that
+adds the field is merged. (A hand-built object can assert the result in `notes`; see the
+direct-calls section.) The WSP run
 must also be from the held-out split. Only then is
 the evidence's edit verification recorded as `hash_consistent`. Without such a report the
 comparison is `prerequisite_missing`, whatever the study declares.
@@ -354,10 +375,10 @@ infrastructure or people; not implemented or verified here.
 | Only binding methods (exact CP; Bonferroni paired, binary single-sample items) can pass; others descriptive; cluster-unit results always descriptive; estimand named for every interval; multiplicity stated | Impl + Test | The *validity* of the methods is not established by tests: it needs statistical review. A clustered method, its estimand and the cluster definition are **open decisions** |
 | Baseline unchanged, checked per named file and configuration | Impl + Test | Relies on evaluators reporting loaded digests truthfully → **Op** |
 | One intervention type per candidate; family prerequisites | Impl + Test | Truth of declared training and calibration data is **Op** |
-| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol, arms, dataset, slice membership and held-out split | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, and trusting who ran it, is **Op**. Manifest linkage needs the separate WSP change |
+| Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol, arms, dataset, slice membership and held-out split | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, and trusting who ran it, is **Op**. Manifest linkage needs the separate WSP change. Enforced by the loader only; a hand-built object can assert it |
 | Invented limits labelled `synthetic_fixture`; real studies cannot use them | Impl + Test | Who sets real limits, and when, is **Op** |
 | Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated |
-| Evidence bound to study and dataset; tampered, aborted or mixed runs refused | Impl + Test | Protects against accidents, not against rewriting both records and manifest |
+| Evidence bound to study and dataset; tampered, aborted or mixed runs refused | Impl + Test | Protects against accidents, not against rewriting both records and manifest. Loader only; on direct calls only shapes, design and metadata are rechecked |
 | Decision recorded; no self-approval; marked unauthenticated and unenforced; report self-hash checked | Impl + Test | The self-hash catches accidental edits only (not tamper-evident). Write access to decision files and any real approval system are **Op** |
 | Calibration not the evaluation set | Impl + Test (identity and hash) | Disjointness of differently packaged data is **Op** |
 | Escalation volume capped separately from precision and deferral | Impl + Test | Real capacity numbers are an owner decision |

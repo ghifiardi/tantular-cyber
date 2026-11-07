@@ -18,6 +18,7 @@ WSP = ROOT / "tools" / "wsp"
 sys.path[:0] = [str(RESEARCH), str(WSP)]
 
 import improve  # noqa: E402
+from improve_eval.compare import compare_candidate  # noqa: E402
 from improve_eval.decision import make_decision, validate_decision  # noqa: E402
 from improve_eval.evidence import (  # noqa: E402
     EvidenceError,
@@ -1482,3 +1483,185 @@ def test_ordinary_input_types_are_validated(tmp_path, raw, alerts, change, messa
     altered = tuple(change(r) if r["item_id"] == "syn-alert-021" else r for r in ev.records)
     r = _by_id(build_report(study, [dataclasses.replace(ev, records=altered)]))[THRESH]
     assert r["outcome"] == "insufficient_evidence" and message in r["reasons"][0]
+
+
+# --- sixth round: candidate resolution and input shapes (fifth review R1, R2) ---------------
+
+MEETS = "meets_declared_criteria_pending_human_decision"
+
+
+def test_an_equal_copy_of_the_registered_candidate_is_compared_as_registered(
+    tmp_path, raw, alerts
+) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    copied = compare_candidate(study, copy.deepcopy(study.candidate(THRESH)), [ev])
+    assert copied == compare_candidate(study, study.candidate(THRESH), [ev])
+    assert copied["outcome"] == MEETS
+
+
+@pytest.mark.parametrize(
+    ("cid", "change"),
+    [
+        # R1: the calibration check ran on whatever dict was passed.
+        (
+            SOC,
+            lambda c: c["intervention"]["calibration"]["dataset"].update(
+                name="other-calibration", content_sha256="1" * 64
+            ),
+        ),
+        # R1: the registered edit-verification status could be overridden.
+        (EDIT, lambda c: c["intervention"]["edit_verification"].update(status="verified")),
+        (THRESH, lambda c: c.update(hypothesis="a different hypothesis")),
+    ],
+)
+def test_altered_candidate_dict_is_refused(tmp_path, raw, alerts, cid, change) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    altered = copy.deepcopy(study.candidate(cid))
+    change(altered)
+    r = compare_candidate(study, altered, [ev])
+    assert r["outcome"] == "insufficient_evidence"
+    assert "differs from the study's registration" in r["reasons"][0]
+    assert r["target_effect"] is None and r["constraints"] == []
+
+
+def test_unregistered_candidate_is_refused_even_with_its_own_evidence(
+    tmp_path, raw, alerts
+) -> None:
+    # R1: a candidate id the study does not register, with its arm added to the evidence,
+    # reached "meets".
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = load_evidence(run, study)
+    rogue = dict(copy.deepcopy(study.candidate(THRESH)), id="rogue")
+    forged = dataclasses.replace(
+        ev,
+        arms={**ev.arms, "rogue": ev.arms[THRESH]},
+        records=(*ev.records, *(dict(r, arm="rogue") for r in ev.records if r["arm"] == THRESH)),
+    )
+    r = compare_candidate(study, rogue, [forged])
+    assert r["outcome"] == "insufficient_evidence" and "not registered" in r["reasons"][0]
+    for bad in ("x", None, {"id": 7}):
+        r = compare_candidate(study, bad, [ev])
+        assert r["outcome"] == "insufficient_evidence" and "string id" in r["reasons"][0]
+
+
+class _IdentityStr(str):
+    """Equal to the original text but hashed by identity: slips past a set of seen keys."""
+
+    __hash__ = object.__hash__
+
+
+class _IdentityInt(int):
+    __hash__ = object.__hash__
+
+
+def _first(ev, change):
+    return dataclasses.replace(ev, records=(change(dict(ev.records[0])), *ev.records[1:]))
+
+
+def _drop(key):
+    def change(r):
+        r.pop(key)
+        return r
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("alter", "message"),
+    [
+        (lambda ev: dataclasses.replace(ev, records=(*ev.records, "x")), "not an object"),
+        (lambda ev: dataclasses.replace(ev, records=(None, *ev.records)), "not an object"),
+        (lambda ev: _first(ev, _drop("arm")), "arm and item_id must be strings"),
+        (lambda ev: _first(ev, _drop("status")), "status must be a string"),
+        (lambda ev: _first(ev, lambda r: dict(r, arm=_IdentityStr(r["arm"]))), "must be strings"),
+        (lambda ev: _first(ev, lambda r: dict(r, sample=_IdentityInt(0))), "sample must be"),
+        (lambda ev: _first(ev, lambda r: dict(r, correct="yes")), "correct must be a boolean"),
+        (lambda ev: _first(ev, lambda r: dict(r, decision=1)), "decision must be a string"),
+        (lambda ev: dataclasses.replace(ev, started_at="not-a-date"), "is not ISO-8601"),
+        (lambda ev: dataclasses.replace(ev, started_at=5), "must be an ISO-8601 string"),
+        (lambda ev: dataclasses.replace(ev, started_at="2026-11-02T00:00"), "no time zone"),
+        (lambda ev: dataclasses.replace(ev, notes=None), "notes must be an object"),
+        (
+            lambda ev: dataclasses.replace(ev, arms={**ev.arms, "baseline": None}),
+            "arms must map",
+        ),
+        (lambda ev: dataclasses.replace(ev, limitations=("ok", 3)), "limitations must be"),
+        (lambda ev: dataclasses.replace(ev, records=None), "records must be a list"),
+        (lambda ev: {"run_id": ev.run_id}, "not an Evidence object"),
+    ],
+)
+def test_malformed_evidence_is_a_gate_not_an_exception(
+    tmp_path, raw, alerts, alter, message
+) -> None:
+    # R2: these used to raise TypeError, KeyError, ValueError or AttributeError (or, for the
+    # identity-hashed arm, let a duplicate past the duplicate check before crashing).
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    bad = alter(load_evidence(run, study))
+    report = build_report(study, [bad])
+    for r in report["candidates"]:
+        assert r["outcome"] == "insufficient_evidence" and message in r["reasons"][0]
+        assert r["target_effect"] is None
+    assert report["evidence_class"] == "synthetic_fixture_not_a_measurement"
+    assert report["evidence_runs"] == [] and message in report["evidence_errors"][0]
+    render_markdown(report)
+
+
+@pytest.mark.parametrize(
+    ("lines", "message"),
+    [
+        (lambda recs: [*recs[:-1], "not json"], "not valid JSON"),
+        (lambda recs: [*recs[:-1], json.dumps(["a", "list"])], "not an object"),
+        (
+            lambda recs: [
+                json.dumps({k: v for k, v in json.loads(recs[0]).items() if k != "sample"}),
+                *recs[1:],
+            ],
+            "sample must be an integer",
+        ),
+        (
+            lambda recs: [json.dumps(dict(json.loads(recs[0]), tags="general")), *recs[1:]],
+            "tags must be a list",
+        ),
+    ],
+)
+def test_loader_reports_malformed_records_as_evidence_errors(
+    tmp_path, raw, alerts, lines, message
+) -> None:
+    # R2 (loader path): a raw KeyError or AttributeError, not EvidenceError, used to escape.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    path = run / "records.jsonl"
+    path.write_text("".join(x + "\n" for x in lines(path.read_text().splitlines())))
+    manifest = json.loads((run / "manifest.json").read_text())
+    manifest["records_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (run / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(EvidenceError, match=message):
+        load_evidence(run, study)
+
+
+@pytest.mark.parametrize(
+    ("manifest", "message"),
+    [("[1, 2]", "not an object"), ("{", "not valid JSON")],
+)
+def test_loader_reports_a_malformed_manifest(tmp_path, raw, alerts, manifest, message) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    (run / "manifest.json").write_text(manifest)
+    with pytest.raises(EvidenceError, match=message):
+        load_evidence(run, study)
+
+
+def test_loader_reports_an_unusable_start_time(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    manifest = json.loads((run / "manifest.json").read_text())
+    (run / "manifest.json").write_text(json.dumps(dict(manifest, started_at="yesterday")))
+    with pytest.raises(EvidenceError, match="started_at"):
+        load_evidence(run, study)
+
+
+def test_wsp_item_tags_must_be_lists_of_strings(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    first = next(iter(tags))
+    for bad in ({**tags, first: "heldout-slice"}, {**tags, first: [1]}):
+        with pytest.raises(EvidenceError, match="item_tags"):
+            evidence_from_wsp(res.out_dir, proto, parse_study(study_raw), ARM_MAP, bad)
