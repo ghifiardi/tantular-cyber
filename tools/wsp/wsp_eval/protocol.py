@@ -37,6 +37,9 @@ ARM_ROLES = ("reference", "candidate", "no_edit_reload", "alternative")
 REPLICATION_ROLES = ("reference", "candidate", "no_edit_reload")
 SPLITS = ("development", "heldout")
 SAMPLING_MODES = ("per_sample_seed", "n_per_request")
+# interleaved: every arm loaded at once, requests interleaved per item (the default).
+# per_arm_sequential: one arm loaded at a time, in protocol order, its items sent in shards.
+EXECUTION_ORDERS = ("interleaved", "per_arm_sequential")
 MISSING_POLICIES = ("exclude_item", "count_as_incorrect")
 TOLERANCE_METRICS = (
     "max_abs_accuracy_diff",
@@ -84,6 +87,8 @@ class Protocol:
     grader: dict[str, Any]
     analysis: dict[str, Any]
     sampling_mode: str = "per_sample_seed"
+    execution_order: str = "interleaved"
+    shards: int = 1
     drift: dict[str, Any] = field(default_factory=dict)
     sha256: str = field(default="")
 
@@ -102,6 +107,29 @@ def _require(d: dict[str, Any], key: str, kind: type | tuple[type, ...]) -> Any:
     if not isinstance(d[key], kind) or (isinstance(d[key], bool) and bool not in kinds):
         raise ProtocolError(f"field {key!r} has wrong type")
     return d[key]
+
+
+def _execution(raw: dict[str, Any]) -> tuple[str, int]:
+    """Optional ``execution`` block: how arms are loaded and how requests are batched.
+
+    Absent means ``interleaved`` with one shard, so existing protocols (and their hashes) are
+    unchanged. When present it is part of the hashed protocol, because load order and batch
+    composition can change model outputs.
+    """
+    if "execution" not in raw:
+        return "interleaved", 1
+    block = raw["execution"]
+    if not isinstance(block, dict) or set(block) - {"order", "shards"}:
+        raise ProtocolError("execution must be an object with only 'order' and 'shards'")
+    order = block.get("order", "interleaved")
+    if order not in EXECUTION_ORDERS:
+        raise ProtocolError(f"execution.order must be one of {EXECUTION_ORDERS}")
+    shards = block.get("shards", 1)
+    if type(shards) is not int or shards < 1:
+        raise ProtocolError("execution.shards must be an integer >= 1")
+    if shards != 1 and order != "per_arm_sequential":
+        raise ProtocolError("execution.shards > 1 requires execution.order per_arm_sequential")
+    return order, shards
 
 
 def parse_protocol(raw: dict[str, Any]) -> Protocol:
@@ -130,6 +158,7 @@ def parse_protocol(raw: dict[str, Any]) -> Protocol:
         raise ProtocolError("n_per_request uses exactly one request seed")
     if len(set(seeds)) != len(seeds):
         raise ProtocolError("seeds must be distinct")
+    order, shards = _execution(raw)
 
     arms: list[ArmSpec] = []
     for a in arms_raw:
@@ -219,6 +248,8 @@ def parse_protocol(raw: dict[str, Any]) -> Protocol:
         grader=grader,
         analysis=analysis,
         sampling_mode=mode,
+        execution_order=order,
+        shards=shards,
         drift=drift,
     )
     object.__setattr__(proto, "sha256", sha256_json(raw))
