@@ -33,6 +33,7 @@ real graders, prompts, dataset adapters and inference adapters.
 | `docs/wsp/exp8-replication-protocol.md`, `docs/wsp/protocols/exp8-replication-draft.json` | Draft Experiment 8 replication protocol (unfrozen; drift tolerance and minimum effect unset) |
 | `docs/wsp/ledger/` | Ledger records. `exp8-source-pins-2026-11-03.json`: public-metadata pins for Experiment A (status `planned`) |
 | `docs/wsp/run-readiness.md` | Decisions, infrastructure and harness work required before a real run |
+| `tools/wsp_runtime/`, `docs/wsp/runtime.md` | Runtime adapters C1–C3 (vLLM engine, grader, dataset loader), separate from this harness and tested with stub engines only |
 | `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py`, `tests/test_wsp_sequential.py` | 127 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
 
 ```bash

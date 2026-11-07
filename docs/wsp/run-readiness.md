@@ -57,11 +57,18 @@ artifact.
    *Decision needed:* the isolation test forbids `torch`, network and subprocess imports
    under `tools/wsp`. The adapter therefore has to live in a separate, reviewed location that
    runs only on the isolated host, unless that control is deliberately changed.
+   *Status 2026-11-08:* written in `tools/wsp_runtime` (separate from `tools/wsp`, heavy
+   imports lazy) and tested with a stub engine only; see [runtime.md](runtime.md) for what
+   still needs a real GPU, especially engine shutdown and GPU-memory release.
 2. **Grader adapter** for math-verify, following `mathqa.py`: last `\boxed{}`/`\fbox{}`, no
    box means incorrect, 5 s timeouts. Its `id` and `revision` must match the protocol. Test it
    on synthetic strings only, never on MATH-500 content in the repo.
+   *Status 2026-11-08:* written (`wsp_runtime/grader.py`), tested on synthetic strings with a
+   stub math-verify; three interpretations still need review against `mathqa.py` (R9).
 3. **Dataset loader:** a local MATH-500 file at the R8 revision converted to `Item` rows with
    `unique_id` as the ID, then a content-hash and ID check. No network.
+   *Status 2026-11-08:* written (`wsp_runtime/datasets.py`) for MATH-500 and the MATH training
+   split (smoke items), tested on synthetic files only.
 4. **Execution order and batching.** `run_paired` currently interleaves arms per item and
    sends one request per (item, arm). That assumes every arm's model is loaded at the same
    time. Three vLLM instances at the authors' `gpu_memory_utilization` 0.85 cannot share one
