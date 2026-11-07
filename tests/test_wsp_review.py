@@ -4,6 +4,7 @@ preregistration timing and protocol strictness. Synthetic fixtures only, no mode
 from __future__ import annotations
 
 import copy
+import dataclasses
 import importlib.util
 import json
 import shutil
@@ -436,3 +437,51 @@ def test_finish_error_row_without_a_prompt_hash_is_not_recorded(tmp_path, raw, i
     checks = {c["check"]: c for c in d["identity"]["checks"]}
     assert checks["rendered_prompts"]["status"] == "not_recorded"
     assert d["identity"]["complete"] is False
+
+
+# --- post-merge review (PR #23, Codex P2) --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        "drop",
+        "EXCLUDE_ITEM",
+        # Exact membership, not a pattern: whitespace, empty and non-string values are refused.
+        "exclude_item\n",
+        " exclude_item",
+        "",
+        1,
+        True,
+        ["exclude_item"],
+    ],
+)
+def test_protocol_rejects_missing_or_unknown_missing_policy(raw, policy) -> None:
+    for frozen in (False, True):
+        bad = copy.deepcopy(raw)
+        if frozen:
+            bad.update(FROZEN)
+        if policy is None:
+            del bad["analysis"]["missing_policy"]
+        else:
+            bad["analysis"]["missing_policy"] = policy
+        with pytest.raises(ProtocolError, match="missing_policy"):
+            parse_protocol(bad)
+
+
+@pytest.mark.parametrize("policy", [None, "drop"])
+def test_analysis_and_drift_reject_bad_policies_the_same_way(tmp_path, raw, items, policy) -> None:
+    proto, res = _run(tmp_path, raw, items)
+    plan = dict(proto.analysis)  # as if the plan were altered after parsing
+    if policy is None:
+        del plan["missing_policy"]
+    else:
+        plan["missing_policy"] = policy
+    altered = dataclasses.replace(proto, analysis=plan)
+    with pytest.raises(ProtocolError, match="missing_policy"):
+        analyze(res.records, plan, synthetic=True)
+    with pytest.raises(ProtocolError, match="missing_policy"):
+        reproducibility_report(altered, res.records, "reference", "reload")
+    with pytest.raises(ProtocolError, match="missing_policy"):
+        drift_report(altered, res.manifest, res.records)

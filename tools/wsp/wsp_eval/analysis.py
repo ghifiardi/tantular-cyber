@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from statistics import mean, median
 from typing import Any
 
-MISSING_POLICIES = ("exclude_item", "count_as_incorrect")
+from .protocol import missing_policy
 
 
 def mcnemar_exact(b: int, c: int) -> float | None:
@@ -125,9 +125,7 @@ def analyze(
     """``prereg`` is :func:`preregistration` output; without it the rule is not binding."""
     ref = protocol_analysis["reference_arm"]
     cand = protocol_analysis["candidate_arm"]
-    policy = protocol_analysis.get("missing_policy")
-    if policy not in MISSING_POLICIES:
-        raise ValueError(f"analysis.missing_policy must be one of {MISSING_POLICIES}")
+    policy = missing_policy(protocol_analysis)
     raw_effect = protocol_analysis["min_meaningful_effect"]
     min_effect = None if raw_effect is None else float(raw_effect)
 
