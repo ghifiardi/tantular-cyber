@@ -30,7 +30,7 @@ from wsp_eval.checkpoint_diff import SafetensorsError, diff_checkpoints, verify_
 from wsp_eval.dataset import DatasetError, check_items, load_items
 from wsp_eval.drift import drift_report
 from wsp_eval.grading import FinalAnswerGrader
-from wsp_eval.hashing import sha256_file
+from wsp_eval.hashing import sha256_bytes
 from wsp_eval.ledger import validate_record
 from wsp_eval.protocol import ProtocolError, load_protocol
 from wsp_eval.runner import RunError, run_paired, verify_run
@@ -100,9 +100,12 @@ def main(argv: list[str] | None = None) -> int:
             _print(diff_checkpoints(args.base, args.candidate))
             return 0
         if args.cmd == "verify-edit":
-            manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+            # Read the manifest once: the parsed content and manifest_file_sha256 describe
+            # the same bytes, even if the file changes while the checkpoints are diffed.
+            raw_manifest = args.manifest.read_bytes()
+            manifest = json.loads(raw_manifest.decode("utf-8"))
             report = verify_edit(diff_checkpoints(args.base, args.candidate), manifest)
-            report["manifest_file_sha256"] = sha256_file(args.manifest)
+            report["manifest_file_sha256"] = sha256_bytes(raw_manifest)
             _print(report)
             return 0 if report["status"] == "verified" else 1
         if args.cmd == "smoke":

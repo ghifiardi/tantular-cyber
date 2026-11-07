@@ -379,3 +379,49 @@ def test_verify_edit_cli_reports_which_manifest_it_checked(tmp_path, capsys) -> 
     assert out["status"] == "verified"
     assert out["manifest_sha256"] == sha256_json(manifest)  # canonical JSON content
     assert out["manifest_file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_verify_edit_cli_hashes_the_manifest_bytes_it_parsed(tmp_path, capsys, monkeypatch):
+    # The manifest used to be read twice: once to parse, and again after the (slow) checkpoint
+    # diff to hash, so a file replaced in between gave a manifest_file_sha256 for other bytes.
+    import wsp
+
+    base_w, edit_w = [1.0, 2.0], [1.0, 2.5]
+    base = _write_safetensors(tmp_path / "base.safetensors", {"w": ("BF16", [2], _bytes(base_w))})
+    cand = _write_safetensors(tmp_path / "cand.safetensors", {"w": ("BF16", [2], _bytes(edit_w))})
+    manifest = {
+        "tensors": [
+            {
+                "name": "w",
+                "shape": [2],
+                "dtype": "bfloat16",
+                "changed_entries": 1,
+                "base_sha256": hashlib.sha256(_bytes(base_w)).hexdigest(),
+                "edited_sha256": hashlib.sha256(_bytes(edit_w)).hexdigest(),
+            }
+        ]
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=1))
+    parsed_bytes = path.read_bytes()
+    real_diff = wsp.diff_checkpoints
+
+    def diff_then_swap(a, b):
+        out = real_diff(a, b)
+        path.write_text(json.dumps({"tensors": [], "swapped": True}))
+        return out
+
+    monkeypatch.setattr(wsp, "diff_checkpoints", diff_then_swap)
+    assert wsp.main(["verify-edit", str(base), str(cand), str(path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "verified" and out["manifest_sha256"] == sha256_json(manifest)
+    assert out["manifest_file_sha256"] == hashlib.sha256(parsed_bytes).hexdigest()
+    assert out["manifest_file_sha256"] != hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_verify_edit_refuses_a_manifest_with_non_finite_numbers() -> None:
+    diff = {"changed_tensors": [], "only_in_base": [], "only_in_candidate": []}
+    diff.update(shape_or_dtype_mismatch=[], metadata_equal=True)
+    diff.update(base={"sha256": "0" * 64}, candidate={"sha256": "9" * 64})
+    with pytest.raises(ValueError):
+        verify_edit(diff, {"tensors": [{"name": "w", "changed_entries": float("nan")}]})

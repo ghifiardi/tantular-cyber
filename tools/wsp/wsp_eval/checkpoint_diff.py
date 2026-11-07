@@ -224,6 +224,8 @@ def verify_edit(diff: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any
     SHA-256 of ``manifest`` (``hashing.sha256_json``), so a consumer can confirm that a
     ``verified`` report refers to the edit manifest it registered, and not to another manifest
     for the same two files. It is a provenance link, not an authentication of who ran the check.
+    A manifest containing NaN or Infinity cannot be hashed canonically, so it raises
+    ``ValueError`` instead of producing a report (fails closed).
     """
     problems: list[str] = []
     expected = {t["name"]: t for t in manifest.get("tensors", [])}

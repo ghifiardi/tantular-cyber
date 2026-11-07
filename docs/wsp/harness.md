@@ -33,7 +33,7 @@ real graders, prompts, dataset adapters and inference adapters.
 | `docs/wsp/exp8-replication-protocol.md`, `docs/wsp/protocols/exp8-replication-draft.json` | Draft Experiment 8 replication protocol (unfrozen; drift tolerance and minimum effect unset) |
 | `docs/wsp/ledger/` | Ledger records. `exp8-source-pins-2026-11-03.json`: public-metadata pins for Experiment A (status `planned`) |
 | `docs/wsp/run-readiness.md` | Decisions, infrastructure and harness work required before a real run |
-| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py` | 78 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
+| `tests/test_wsp_harness.py`, `tests/test_wsp_drift.py`, `tests/test_wsp_review.py` | 81 tests, synthetic fixtures plus validation of the recorded ledger entries and the draft protocol |
 
 ```bash
 .venv/bin/python tools/wsp/wsp.py smoke --output ~/wsp-research/runs/smoke-$(date +%s)
@@ -155,7 +155,12 @@ unknown one as `count_as_incorrect` while reporting the unknown name.
 the manifest they were checked against. `wsp.py verify-edit` also adds `manifest_file_sha256`
 (the raw file bytes). A consumer can then confirm that a `verified` report refers to the edit
 manifest it registered, rather than to another manifest for the same two files. This is a
-provenance link, not authentication of who ran the check.
+provenance link, not authentication of who ran the check, and not evidence that any real weight
+edit has been verified: only synthetic safetensors files have been checked. The CLI reads the
+manifest once, so the parsed content and `manifest_file_sha256` describe the same bytes. The
+base and candidate checkpoint digests are still computed after their tensors are compared (a
+separate read-then-hash follow-up). A manifest with NaN or Infinity fails with an error rather
+than a report.
 
 ## Readiness (unchanged from the package)
 
