@@ -2,14 +2,21 @@
 
     python tools/research/improve.py validate tools/research/fixtures/synthetic_study.json
     python tools/research/improve.py demo --output ~/research/runs/demo-1
+    python tools/research/improve.py manifest-hash RUN_DIR
     python tools/research/improve.py report --study STUDY.json --evidence RUN_DIR [...] \\
-        --output REPORT_DIR
+        [--expected-manifest-sha256 SHA [...]] --output REPORT_DIR
     python tools/research/improve.py decide --study STUDY.json --report REPORT_DIR/report.json \\
         --decision reject --decided-by reviewer1 --rationale "..." --output DECISION.json
 
 ``demo`` runs only the scripted synthetic evaluators on the synthetic fixture. There is no
 command that loads a real model, contacts a SIEM or provider, trains, edits weights, or
 promotes anything. Exit codes: 0 ok, 1 validation/integrity problem, 2 usage error.
+
+``manifest-hash`` prints a run manifest's deterministic identifier. Record it *outside* the
+run directory when the run finishes, and pass it back to ``report`` with
+``--expected-manifest-sha256`` (one per ``--evidence`` run, in the same order). Without it, no
+candidate can meet the declared criteria. A match is an integrity check against that record,
+not authentication: it is only as trustworthy as whatever protects the record.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wsp"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from improve_eval.decision import DECISIONS, make_decision
-from improve_eval.evidence import EvidenceError, load_evidence
+from improve_eval.evidence import EvidenceError, load_evidence, run_manifest_sha256
 from improve_eval.report import build_report, render_markdown
 from improve_eval.soc import load_alerts, run_triage_evaluation
 from improve_eval.study import StudyError, load_study
@@ -59,8 +66,18 @@ def main(argv: list[str] | None = None) -> int:
     sr = sub.add_parser("report", help="report from verified evidence runs")
     sr.add_argument("--study", type=Path, required=True)
     sr.add_argument("--evidence", type=Path, nargs="*", default=[])
+    sr.add_argument(
+        "--expected-manifest-sha256",
+        nargs="*",
+        default=None,
+        help="externally recorded manifest identifiers, one per --evidence run, same order",
+    )
     sr.add_argument("--output", type=Path, required=True)
     sr.add_argument("--allow-in-repo", action="store_true")
+    sm = sub.add_parser(
+        "manifest-hash", help="print a run manifest's identifier, to record outside the run"
+    )
+    sm.add_argument("run", type=Path)
     sc = sub.add_parser("decide", help="record a human decision on a report (deploys nothing)")
     sc.add_argument("--study", type=Path, required=True)
     sc.add_argument("--report", type=Path, required=True)
@@ -101,14 +118,40 @@ def main(argv: list[str] | None = None) -> int:
             )
             report = build_report(study, [load_evidence(run, study)])
             out = _write_report(report, args.output / "report", args.allow_in_repo)
-            _print({"evidence": str(run), "report": str(out), "outcome": report["outcome"]})
+            _print(
+                {
+                    "evidence": str(run),
+                    "manifest_sha256": run_manifest_sha256(run),
+                    "report": str(out),
+                    "outcome": report["outcome"],
+                }
+            )
+            return 0
+        if args.cmd == "manifest-hash":
+            _print(
+                {
+                    "run": str(args.run),
+                    "manifest_sha256": run_manifest_sha256(args.run),
+                    "note": "record this outside the run directory; it identifies the manifest, "
+                    "it does not authenticate it",
+                }
+            )
             return 0
         if args.cmd == "report":
             study = load_study(args.study)
+            expected = args.expected_manifest_sha256
+            if expected is not None and len(expected) != len(args.evidence):
+                print(
+                    "error: give one --expected-manifest-sha256 per --evidence run",
+                    file=sys.stderr,
+                )
+                return 2
             evidence, errors = [], []
-            for run in args.evidence:
+            for i, run in enumerate(args.evidence):
                 try:
-                    evidence.append(load_evidence(run, study))
+                    evidence.append(
+                        load_evidence(run, study, expected[i] if expected is not None else None)
+                    )
                 except (EvidenceError, OSError, ValueError) as exc:
                     errors.append(f"{run.name}: {exc}")  # recorded in the report, not dropped
             report = build_report(study, evidence, errors)

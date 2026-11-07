@@ -22,11 +22,30 @@ Two sources exist:
   consistency check of a report someone supplied: it does not authenticate who produced the
   report and does not re-run the tensor comparison. The WSP protocol's required limitations
   and preregistration status travel into the report.
+
+**Manifest identifier and what it does not prove.** ``records_sha256`` covers only the
+records. Fields read from ``manifest.json`` itself (``started_at``, each arm's artifact
+digests and configuration, ``synthetic``, ``limitations``, and for WSP the ``split``) are not
+covered by it. Both loaders therefore compute :func:`manifest_sha256`, a deterministic
+canonical-JSON hash of the parsed manifest, as an integrity and provenance *identifier* of the
+run. A hash written next to the manifest would protect nothing (whoever edits the manifest can
+recompute it), so none is stored there. To detect post-run edits, pass
+``expected_manifest_sha256``: a value recorded *outside* the run directory when the run
+finished (for example in an evidence register). The loader refuses a mismatch, and the
+evidence is marked ``manifest_check: matched_external_record``; otherwise ``not_checked``.
+Even a match is **not authentication**: it shows only that the manifest equals what that
+external record says, and is as trustworthy as the access controls or signatures protecting
+the record, which this workflow does not provide.
+
+Malformed input of any shape makes the loaders raise :class:`EvidenceError`; no other
+exception type escapes them.
 """
 
 from __future__ import annotations
 
+import functools
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -97,7 +116,49 @@ def parse_timestamp(s: Any) -> datetime:
         raise EvidenceError(f"timestamp {s!r} is not ISO-8601") from exc
     if t.tzinfo is None:
         raise EvidenceError(f"timestamp {s!r} has no time zone")
-    return t.astimezone(UTC)
+    try:
+        return t.astimezone(UTC)
+    except OverflowError as exc:  # e.g. 0001-01-01T00:00+01:00 is before datetime.min in UTC
+        raise EvidenceError(f"timestamp {s!r} is out of range in UTC") from exc
+
+
+def _json_problem(value: Any) -> str | None:
+    """Whether a value is plain JSON data with string keys (what the report serializes)."""
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if type(v) is dict:
+            if not all(type(k) is str for k in v):
+                return "not plain JSON data with string keys"
+            stack.extend(v.values())
+        elif type(v) in (list, tuple):
+            stack.extend(v)
+        elif v is not None and type(v) not in (str, int, float, bool):
+            return "not plain JSON data with string keys"
+    try:
+        sha256_json(value)
+    except (TypeError, ValueError, RecursionError):
+        return "not plain JSON data with string keys"
+    return None
+
+
+def _arm_problem(arm: str, v: Any) -> str | None:
+    if type(v) is not dict:
+        return f"evidence arm {arm!r} is not an object"
+    arts = v.get("artifacts", {})
+    if arts is not None and (
+        type(arts) is not dict
+        or not all(type(k) is str and type(x) is str for k, x in arts.items())
+    ):
+        return f"evidence arm {arm!r}: artifacts must map file names to digests"
+    shas = v.get("artifact_sha256s", [])
+    if type(shas) not in (list, tuple) or not all(type(x) is str for x in shas):
+        return f"evidence arm {arm!r}: artifact_sha256s must be a list of strings"
+    cfg = v.get("config_sha256")
+    if cfg is not None and type(cfg) is not str:
+        return f"evidence arm {arm!r}: config_sha256 must be a string or null"
+    problem = _json_problem(v)
+    return f"evidence arm {arm!r}: {problem}" if problem else None
 
 
 def evidence_problem(ev: Any) -> str | None:
@@ -107,7 +168,7 @@ def evidence_problem(ev: Any) -> str | None:
     only: the values are still caller-asserted, and only the loaders bind them to run,
     records, study and dataset hashes.
     """
-    if not isinstance(ev, Evidence):
+    if type(ev) is not Evidence:  # exact: a subclass could change what later reads return
         return "evidence is not an Evidence object"
     if type(ev.run_id) is not str or type(ev.source) is not str:
         return "evidence run_id and source must be strings"
@@ -118,12 +179,22 @@ def evidence_problem(ev: Any) -> str | None:
             parse_timestamp(ev.started_at)
         except EvidenceError as exc:
             return f"evidence started_at: {exc}"
-    if type(ev.arms) is not dict or not all(
-        type(k) is str and type(v) is dict for k, v in ev.arms.items()
-    ):
+    if type(ev.arms) is not dict or not all(type(k) is str for k in ev.arms):
         return "evidence arms must map arm ids to objects"
+    for k, v in ev.arms.items():
+        problem = _arm_problem(k, v)
+        if problem:
+            return problem
     if type(ev.notes) is not dict:
         return "evidence notes must be an object"
+    problem = _json_problem(ev.notes)
+    if problem:
+        return f"evidence notes: {problem}"
+    if "edit_verification" in ev.notes and type(ev.notes["edit_verification"]) is not dict:
+        return "evidence notes edit_verification must be an object"
+    for key in ("wsp_split", "manifest_check", "manifest_sha256"):
+        if ev.notes.get(key) is not None and type(ev.notes[key]) is not str:
+            return f"evidence notes {key} must be a string or null"
     if type(ev.limitations) not in (list, tuple) or not all(type(x) is str for x in ev.limitations):
         return "evidence limitations must be a list of strings"
     if type(ev.records) not in (list, tuple):
@@ -181,6 +252,56 @@ def records_metadata(
     return meta
 
 
+SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_MALFORMED = (KeyError, IndexError, TypeError, AttributeError, ValueError, OverflowError, OSError)
+
+
+def manifest_sha256(manifest: Any) -> str:
+    """Deterministic identifier of a parsed run manifest (canonical JSON, ``sha256_json``).
+
+    An integrity and provenance identifier, not authentication: compare it with a value
+    recorded outside the run directory to detect later edits (see the module docstring).
+    """
+    try:
+        return sha256_json(manifest)
+    except (TypeError, ValueError) as exc:
+        raise EvidenceError("manifest.json is not plain JSON data") from exc
+
+
+def run_manifest_sha256(run_dir: Path) -> str:
+    """:func:`manifest_sha256` of ``run_dir/manifest.json``, to record externally after a run."""
+    return manifest_sha256(_read_json(Path(run_dir) / "manifest.json"))
+
+
+def _manifest_check(manifest: Any, expected: str | None) -> dict[str, str]:
+    got = manifest_sha256(manifest)
+    if expected is None:
+        return {"manifest_sha256": got, "manifest_check": "not_checked"}
+    if type(expected) is not str or not SHA256_RE.fullmatch(expected):
+        raise EvidenceError("expected_manifest_sha256 must be 64 lowercase hex characters")
+    if got != expected:
+        raise EvidenceError(
+            "manifest.json differs from the externally recorded manifest_sha256 (edited after "
+            "the run, or a different run)"
+        )
+    return {"manifest_sha256": got, "manifest_check": "matched_external_record"}
+
+
+def _normalized(fn):
+    """Run a loader so that malformed input of any shape surfaces as EvidenceError."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Evidence:
+        try:
+            return fn(*args, **kwargs)
+        except EvidenceError:
+            raise
+        except _MALFORMED as exc:
+            raise EvidenceError(f"malformed evidence input ({type(exc).__name__}: {exc})") from exc
+
+    return wrapper
+
+
 def _parse_json(text: str, where: str) -> Any:
     try:
         return json.loads(text)
@@ -188,13 +309,26 @@ def _parse_json(text: str, where: str) -> Any:
         raise EvidenceError(f"{where} is not valid JSON") from exc
 
 
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise EvidenceError(f"cannot read {path.name} ({type(exc).__name__})") from exc
+
+
 def _read_json(path: Path) -> Any:
-    return _parse_json(path.read_text(encoding="utf-8"), path.name)
+    return _parse_json(_read_text(path), path.name)
 
 
-def load_evidence(run_dir: Path, study: Study) -> Evidence:
+@_normalized
+def load_evidence(
+    run_dir: Path, study: Study, expected_manifest_sha256: str | None = None
+) -> Evidence:
     """Load and verify synthetic-triage evidence. Accuracy evidence must come through
-    :func:`evidence_from_wsp`, which checks slice membership and the held-out split."""
+    :func:`evidence_from_wsp`, which checks slice membership and the held-out split.
+
+    ``expected_manifest_sha256`` is a value recorded outside the run directory; see the
+    module docstring for what a match does and does not show."""
     if study.task_kind != "alert_triage":
         raise EvidenceError(
             "load_evidence accepts alert_triage studies only; accuracy evidence must come "
@@ -209,14 +343,13 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
         raise EvidenceError("evidence was collected under a different study (study_sha256)")
     if manifest.get("run_status") != "complete":
         raise EvidenceError(f"run_status is {manifest.get('run_status')!r}; not used")
+    check = _manifest_check(manifest, expected_manifest_sha256)
     path = run_dir / "records.jsonl"
+    if not path.is_file():
+        raise EvidenceError("records.jsonl is missing")
     if sha256_file(path) != manifest.get("records_sha256"):
         raise EvidenceError("records.jsonl does not match records_sha256 in the manifest")
-    records = [
-        _parse_json(x, "records.jsonl")
-        for x in path.read_text(encoding="utf-8").split("\n")
-        if x.strip()
-    ]
+    records = [_parse_json(x, "records.jsonl") for x in _read_text(path).split("\n") if x.strip()]
     if len(records) != manifest.get("expected_records"):
         raise EvidenceError("record count differs from expected_records in the manifest")
     if type(manifest.get("run_id")) is not str:
@@ -226,6 +359,11 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
         type(k) is str and type(v) is dict for k, v in arms.items()
     ):
         raise EvidenceError("manifest arms must map arm ids to objects")
+    lims = manifest.get("limitations", [])
+    if type(lims) is not list or not all(type(x) is str for x in lims):
+        raise EvidenceError("manifest limitations must be a list of strings")
+    if type(manifest.get("synthetic", True)) is not bool:
+        raise EvidenceError("manifest synthetic must be a boolean")
     _check_records(records, manifest["run_id"])
     if {r["arm"] for r in records} != set(manifest["arms"]):
         raise EvidenceError("record arms differ from the arms the manifest declares")
@@ -248,11 +386,12 @@ def load_evidence(run_dir: Path, study: Study) -> Evidence:
     ev = Evidence(
         run_id=manifest["run_id"],
         source="synthetic_triage",
-        synthetic=bool(manifest.get("synthetic", True)),
+        synthetic=manifest.get("synthetic", True),
         started_at=manifest.get("started_at"),
         arms=manifest["arms"],
         records=tuple(records),
-        limitations=tuple(manifest.get("limitations", [])),
+        limitations=tuple(lims),
+        notes=check,
     )
     problem = evidence_problem(ev)
     if problem:
@@ -266,6 +405,7 @@ def slice_membership_sha256(item_ids: Sequence[str], item_tags: Mapping[str, Seq
     return sha256_json(sorted([i, sorted(item_tags.get(i, []))] for i in set(item_ids)))
 
 
+@_normalized
 def evidence_from_wsp(
     run_dir: Path,
     protocol: Protocol,
@@ -273,6 +413,7 @@ def evidence_from_wsp(
     arm_map: Mapping[str, str],
     item_tags: Mapping[str, Sequence[str]],
     edit_report: Mapping[str, Any] | None = None,
+    expected_manifest_sha256: str | None = None,
 ) -> Evidence:
     """Translate a verified WSP run into accuracy evidence for one weight-edit comparison.
 
@@ -281,7 +422,18 @@ def evidence_from_wsp(
     supplies slice membership, which WSP items do not carry; untagged items belong only to the
     ``all`` scope. ``edit_report`` is the ``wsp.py verify-edit`` output for that candidate;
     without a matching report the comparison stops at ``prerequisite_missing``.
+    ``expected_manifest_sha256`` is an externally recorded identifier of the WSP run's
+    ``manifest.json``. The split, start time and artifact claims are read from that manifest
+    and are bound only by such a record (module docstring).
     """
+    if not isinstance(item_tags, Mapping) or not isinstance(arm_map, Mapping):
+        raise EvidenceError("arm_map and item_tags must be mappings")
+    if not all(type(k) is str and type(v) is str for k, v in arm_map.items()):
+        raise EvidenceError("arm_map must map WSP arm ids to study arm ids (strings)")
+    if edit_report is not None and (
+        not isinstance(edit_report, Mapping) or _json_problem(dict(edit_report))
+    ):
+        raise EvidenceError("edit_report must be a plain JSON object")
     if study.task_kind != "accuracy":
         raise EvidenceError("WSP evidence is accuracy evidence; the study task differs")
     if not all(
@@ -317,6 +469,9 @@ def evidence_from_wsp(
         manifest, wsp_records = verify_run(run_dir, protocol)
     except RunError as exc:
         raise EvidenceError(f"WSP run failed verification: {exc}") from exc
+    if type(manifest) is not dict:
+        raise EvidenceError("WSP manifest is not an object")
+    check = _manifest_check(_read_json(Path(run_dir) / "manifest.json"), expected_manifest_sha256)
     declared_data = study.raw["task"]["dataset"].get("content_sha256")
     if declared_data is None or manifest["dataset"].get("items_file_sha256") != declared_data:
         raise EvidenceError("WSP items hash differs from (or is missing in) the study dataset")
@@ -362,7 +517,7 @@ def evidence_from_wsp(
     if edit_report is not None:
         verification = _match_edit_report(study, cand, edit_report)
     prereg = wsp_preregistration(protocol.raw, manifest)
-    return Evidence(
+    ev = Evidence(
         run_id=manifest["run_id"],
         source="wsp",
         synthetic=bool(manifest.get("synthetic", True)),
@@ -376,8 +531,13 @@ def evidence_from_wsp(
             "wsp_protocol_preregistered": prereg["preregistered"],
             "wsp_split": manifest.get("split"),
             "edit_verification": verification,
+            **check,
         },
     )
+    problem = evidence_problem(ev)
+    if problem:
+        raise EvidenceError(f"WSP evidence: {problem}")
+    return ev
 
 
 def _match_edit_report(

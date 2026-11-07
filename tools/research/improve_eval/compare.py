@@ -29,7 +29,11 @@ Gates, in order; the first that fails decides the candidate's outcome:
 **Decision rule.** The target criterion is a confidence-bound criterion: the *lower* bound of
 the improvement interval must be above zero and at least ``min_meaningful_effect``, i.e. the
 data must rule out improvements smaller than the declared minimum. A point estimate above the
-minimum is not enough. A regression needs the upper bound below zero.
+minimum is not enough. A regression needs the upper bound below zero. ``meets`` also needs
+evidence whose manifest matched an externally recorded identifier
+(``notes["manifest_check"] == "matched_external_record"``): the start time, artifact claims
+and WSP split come from the manifest. Otherwise the rule outcome is ``inconclusive``. A match
+is an integrity check against that record, not authentication.
 
 **Constraints** distinguish what was observed from what is established:
 
@@ -65,8 +69,10 @@ authentication**: caller-supplied evidence remains unauthenticated. Record outco
 (``correct``, ``decision``, ``status``, ``error_class``), ``source``, ``synthetic``,
 ``run_id``, ``limitations``, ``notes`` (WSP split, edit verification), ``started_at`` and the
 arms' reported digests and configuration remain as asserted by whoever built the object.
-Only the loaders also check run, records, study and dataset hashes, the WSP split and the
-``verify-edit`` report; a hand-built object can assert all of those in ``notes``.
+Only the loaders also check run, records, study and dataset hashes, the ``verify-edit``
+report and (against an external record, when given) the manifest; a hand-built object can
+assert all of those in ``notes``. These checks are for ordinary input in the loader
+workflow, not a defence against arbitrary in-process code.
 
 **Fail-closed preconditions.** A calibration dataset without a content
 hash or with the evaluation dataset's identity or hash, and WSP evidence from a non-held-out
@@ -427,6 +433,10 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
     result["intervention_type"] = cand["intervention"]["type"]
     result["hypothesis"] = cand["hypothesis"]
     # Shape checks before any field is read, so malformed input gives a gate, not an exception.
+    if type(evidence) not in (list, tuple):
+        result["outcome"] = "insufficient_evidence"
+        result["reasons"].append("evidence must be a list of Evidence objects")
+        return result
     for i, e in enumerate(evidence):
         problem = evidence_problem(e)
         if problem:
@@ -589,6 +599,18 @@ def compare_candidate(study: Study, cand: dict[str, Any], evidence: Sequence[Evi
         rule = "inconclusive"
         result["reasons"] += [f"design: {x}" for x in design_problems]
         result["reasons"].append("incomplete or unbalanced evidence: outcome is inconclusive")
+    if rule == "meets_declared_criteria_pending_human_decision" and (
+        ev.notes.get("manifest_check") != "matched_external_record"
+    ):
+        # The start time (preregistration), arm artifact claims and WSP split come from the
+        # run's manifest, which no hash in the run directory binds. Without a comparison with
+        # an externally recorded manifest identifier, post-run edits are undetectable.
+        rule = "inconclusive"
+        result["reasons"].append(
+            "evidence manifest not checked against an externally recorded manifest_sha256: "
+            "its start time, artifact claims and split are as written in the run directory; "
+            "outcome is inconclusive (a match would still not be authentication)"
+        )
     prereg = preregistration(study, ev)
     result["preregistration"] = prereg
     result["rule_outcome"] = rule

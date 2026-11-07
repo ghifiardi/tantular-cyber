@@ -217,6 +217,41 @@ it. The comparison also recomputes the slice-membership hash from the records it
 its `notes` claim. If its item set differs from the registered one, the membership cannot be
 verified, and it is refused for that reason instead.
 
+## Trust assumptions of the loader workflow
+
+The supported workflow is: the bundled writer (or the WSP harness) produces a run directory;
+the operator records its manifest identifier **outside** that directory; a reader loads the
+run through `load_evidence` / `evidence_from_wsp`, passing the recorded identifier; the report
+is built from what the loaders return. What each step establishes:
+
+| Step | Establishes | Does not establish |
+|---|---|---|
+| Records hash (`records_sha256`), record count, run ids, duplicates | `records.jsonl` matches what its manifest says | Anything about the manifest itself, or who wrote either file |
+| Study, dataset, metadata and slice hashes | The evidence is consistent with the registered study and dataset | That labels, tags or outcomes are true |
+| Manifest identifier (`manifest_sha256`, canonical JSON of the parsed `manifest.json`) | A deterministic integrity and provenance identifier for the run | Anything on its own: a hash kept with the manifest can be recomputed by whoever edits it, so none is stored there |
+| Identifier compared with an externally recorded value (`expected_manifest_sha256`; evidence marked `manifest_check: matched_external_record`) | The manifest's start time, arm artifact digests and configuration, `synthetic`, `limitations` and (WSP) `split` are unchanged since the value was recorded | Authentication. The check is only as strong as whatever protects the external record. Unless that record is under independently enforced access controls or signatures (not provided here), someone who can change both can make them agree |
+| WSP `verify_run` and the `verify-edit` report linkage | The WSP run matches its protocol and records hashes; the supplied report hashes to the registered value and names the registered files and edit manifest | Who ran WSP or `verify-edit`, or that the tensor comparison was re-run |
+
+**Consequence in the decision rule.** The start time (preregistration), artifact claims and
+WSP split all come from the manifest. `meets_declared_criteria_pending_human_decision`
+therefore also requires `manifest_check: matched_external_record`. Without it the rule
+outcome is `inconclusive`, with a reason saying so, and the report adds a limitation per
+unchecked run. In synthetic tests the "external record" is a dictionary in the test process;
+that shows the mechanism, not a control.
+
+The report's `evidence_class` is `synthetic_fixture_not_a_measurement`, or, for a
+non-synthetic study and evidence, `measured_unauthenticated` (or
+`not_interpreted_malformed_evidence` if a malformed object was supplied). Every report states
+that its checks are integrity and consistency checks, not authentication.
+
+**Scope of this review cycle.** The checks are designed for the loader workflow above and
+its documented assumptions. They validate ordinary input, including hand-built objects with
+the wrong shape, but they are not a defence against arbitrary in-process Python code (which
+can, for example, mutate a record dict between checks). Real experiments need the separately
+controlled infrastructure described in [the WSP readiness plan](../wsp/run-readiness.md):
+storage and evidence registers under independent access control, and authenticated approvals.
+None of that exists or is implemented here.
+
 ## Direct calls and what is recomputed at the comparison boundary
 
 `compare_candidate` and `build_report` can be called with `Evidence` objects built directly
@@ -230,12 +265,14 @@ simply assert.
 | Shapes and types | Checked, as `EvidenceError` | Checked, as `insufficient_evidence`: record fields (below), `run_id`, `source`, `synthetic`, `started_at` (ISO-8601 with a time zone), `arms`, `notes`, `limitations` | Nothing |
 | Item set, design, arm agreement, metadata or slice hash | Checked | Rechecked from the records compared | Nothing |
 | Run, records, study and dataset hashes; record count; `run_status` | Checked | Not checked (there is no run to check) | Everything |
-| `verify-edit` report linkage, WSP split, WSP protocol | Checked | Not checked; read from `notes` | `notes["edit_verification"]`, `notes["wsp_split"]` |
-| Record outcomes (`correct`, `decision`, `status`, `error_class`) | Read from the verified run | Type-checked only | The values |
-| `source`, `synthetic`, `run_id`, `limitations`, `started_at`, arm digests and configuration | Read from the verified run | Type-checked only | The values |
+| `verify-edit` report linkage, WSP protocol | Checked | Not checked; read from `notes` | `notes["edit_verification"]` |
+| Manifest fields: `started_at`, arm artifact digests and configuration, `synthetic`, `limitations`, WSP `split` | Read from `manifest.json`; unchanged since recording **only if** `manifest_check` is `matched_external_record` (not authentication) | Type-checked; `meets` requires `notes["manifest_check"] == "matched_external_record"` | The values, and `notes["manifest_check"]` itself |
+| Record outcomes (`correct`, `decision`, `status`, `error_class`) | Read from `records.jsonl` (bound by `records_sha256`) | Type-checked only | The values |
+| `source`, `run_id` | Set by the loader | Type-checked only | The values |
 
 So a hand-built object with `source: "wsp"`, consistent metadata, `notes` claiming a held-out
-run and a hash-consistent edit verification, and asserted outcomes, can reach
+run, a hash-consistent edit verification and a matched manifest check, and asserted outcomes,
+can reach
 `meets_declared_criteria_pending_human_decision` without any WSP run or `verify-edit`
 report. That is the documented limit of this path, not a gap in the checks: **a result from
 a direct call is only as trustworthy as the code that built its evidence.** Use the loaders
@@ -247,10 +284,19 @@ reported):
 2. every evidence object passed is shape-checked: a record must be an object with string
    `arm`, `item_id` and `status`, an integer `sample` (not a boolean), `tags` a list (or
    tuple) of strings, `cluster`, `label`, `decision`, `error_class` and `run_id` a string or
-   null, and `correct` a boolean or null. Types are checked exactly, so subclasses that
-   change hashing, equality or membership are refused. One malformed object makes every
-   candidate `insufficient_evidence`; `build_report` lists it under `evidence_errors`, does
-   not read it further, and labels the report `synthetic_fixture_not_a_measurement`;
+   null, and `correct` a boolean or null. The object must be exactly an `Evidence` (not a
+   subclass), with string `run_id` and `source`, boolean `synthetic`, `started_at` null or
+   ISO-8601 with a time zone and representable in UTC, `limitations` a list of strings, and
+   `arms` and `notes` plain JSON objects with string keys: each arm's `artifacts` maps file
+   names to digest strings, `artifact_sha256s` is a list of strings, `config_sha256` a string
+   or null; `notes["edit_verification"]` is an object and `wsp_split`, `manifest_check` and
+   `manifest_sha256` strings or null. Types are checked exactly, so ordinary subclasses that
+   change hashing, equality or membership are refused (see the scope note above for what
+   this does not cover). The `evidence` argument itself must be a list or tuple. One
+   malformed object makes every candidate `insufficient_evidence`; `build_report` lists it
+   under `evidence_errors`, does not read it further, and labels the report
+   `not_interpreted_malformed_evidence` (or `synthetic_fixture_not_a_measurement` for a
+   synthetic study);
 3. exactly one run pairs the baseline and candidate; accuracy evidence must say
    `source: "wsp"`;
 4. no duplicate `(arm, item, sample)` records, and samples inside the registered design
@@ -341,21 +387,26 @@ writes. It is not an access-controlled approval.
 ```bash
 .venv/bin/python tools/research/improve.py validate tools/research/fixtures/synthetic_study.json
 .venv/bin/python tools/research/improve.py demo --output ~/research/runs/demo-$(date +%s)
-.venv/bin/python tools/research/improve.py report --study STUDY.json --evidence RUN_DIR... --output DIR
+.venv/bin/python tools/research/improve.py manifest-hash RUN_DIR   # record outside the run
+.venv/bin/python tools/research/improve.py report --study STUDY.json --evidence RUN_DIR... \
+    --expected-manifest-sha256 SHA... --output DIR
 .venv/bin/python tools/research/improve.py decide --study STUDY.json --report DIR/report.json \
     --decision request_more_evidence --decided-by reviewer1 --rationale "..." --output DECISION.json
 ```
 
 Comparison gates, in order:
-1. `insufficient_evidence` (no single run pairs baseline and candidate; accuracy evidence not
-   WSP-sourced; any comparison-boundary check fails; cluster-unit records lack cluster ids).
-   All of these run before steps 2–4;
+1. `insufficient_evidence` (the candidate is unregistered or differs from its registration; an
+   evidence object or record is malformed; no single run pairs baseline and candidate;
+   accuracy evidence not WSP-sourced; any comparison-boundary check fails; cluster-unit
+   records lack cluster ids). All of these run before steps 2–4;
 2. `baseline_changed_not_interpreted`;
 3. `candidate_provenance_mismatch`;
 4. `prerequisite_missing`;
 5. the rule outcome (`constraint_violated` > `regression_on_target` >
    `meets_declared_criteria_pending_human_decision` > `inconclusive`);
-6. `inconclusive` if, with the registered item set, samples are missing or pairs unbalanced;
+6. `inconclusive` if, with the registered item set, samples are missing or pairs unbalanced,
+   or if a `meets` result comes from evidence whose manifest was not checked against an
+   externally recorded identifier;
 7. `descriptive_only_not_preregistered`, unless the study was frozen before the evidence run
    started;
 8. `descriptive_only_cluster_method_unreviewed` for cluster-unit studies.
@@ -377,8 +428,9 @@ infrastructure or people; not implemented or verified here.
 | One intervention type per candidate; family prerequisites | Impl + Test | Truth of declared training and calibration data is **Op** |
 | Weight edits tied to a hash-consistent `verify-edit` report (files and edit manifest), WSP protocol, arms, dataset, slice membership and held-out split | Impl + Test | A consistency check, not authenticated verification. Running `verify-edit` on real files, and trusting who ran it, is **Op**. Manifest linkage needs the separate WSP change. Enforced by the loader only; a hand-built object can assert it |
 | Invented limits labelled `synthetic_fixture`; real studies cannot use them | Impl + Test | Who sets real limits, and when, is **Op** |
-| Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated |
-| Evidence bound to study and dataset; tampered, aborted or mixed runs refused | Impl + Test | Protects against accidents, not against rewriting both records and manifest. Loader only; on direct calls only shapes, design and metadata are rechecked |
+| Rules fixed before evidence (freeze + name + `frozen_at` ≤ evidence start) | Impl + Test | Timestamps are recorded, not authenticated. The evidence start time comes from the manifest and is bound only by an external manifest record |
+| Manifest identifier; `meets` needs a match with an externally recorded value | Impl + Test | Detects post-run edits only if the external record is itself protected (independent access control or signatures) → **Op**; not authentication |
+| Evidence bound to study and dataset; tampered, aborted or mixed runs refused | Impl + Test | Protects records against accidents, not against rewriting both records and manifest. The manifest's own fields are bound only by an external record (row below). Loader only; on direct calls only shapes, design and metadata are rechecked |
 | Decision recorded; no self-approval; marked unauthenticated and unenforced; report self-hash checked | Impl + Test | The self-hash catches accidental edits only (not tamper-evident). Write access to decision files and any real approval system are **Op** |
 | Calibration not the evaluation set | Impl + Test (identity and hash) | Disjointness of differently packaged data is **Op** |
 | Escalation volume capped separately from precision and deferral | Impl + Test | Real capacity numbers are an owner decision |

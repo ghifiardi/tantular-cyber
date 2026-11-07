@@ -21,11 +21,13 @@ import improve  # noqa: E402
 from improve_eval.compare import compare_candidate  # noqa: E402
 from improve_eval.decision import make_decision, validate_decision  # noqa: E402
 from improve_eval.evidence import (  # noqa: E402
+    Evidence,
     EvidenceError,
     evidence_from_wsp,
     item_set_sha256,
     load_evidence,
     records_metadata,
+    run_manifest_sha256,
     slice_membership_sha256,
     triage_metadata_sha256,
 )
@@ -84,12 +86,23 @@ def _evidence(tmp_path, raw, alerts, *, name="ev", **overrides):
         operator="op1",
         run_id=f"imp-{name}",
     )
+    # Stands in for an evidence register outside the run directory, written when the run
+    # finished. In tests it is only a dict; real use needs an independently controlled store.
+    EXTERNAL_RECORD[run] = run_manifest_sha256(run)
     return study, run
+
+
+EXTERNAL_RECORD: dict[Path, str] = {}
+
+
+def _load(run, study):
+    """Load with the manifest checked against the external record (the confirmatory path)."""
+    return load_evidence(run, study, expected_manifest_sha256=EXTERNAL_RECORD[run])
 
 
 def _report(tmp_path, raw, alerts, **kw):
     study, run = _evidence(tmp_path, raw, alerts, **kw)
-    return study, build_report(study, [load_evidence(run, study)])
+    return study, build_report(study, [_load(run, study)])
 
 
 def _by_id(report: dict) -> dict:
@@ -1494,7 +1507,7 @@ def test_an_equal_copy_of_the_registered_candidate_is_compared_as_registered(
     tmp_path, raw, alerts
 ) -> None:
     study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
-    ev = load_evidence(run, study)
+    ev = _load(run, study)
     copied = compare_candidate(study, copy.deepcopy(study.candidate(THRESH)), [ev])
     assert copied == compare_candidate(study, study.candidate(THRESH), [ev])
     assert copied["outcome"] == MEETS
@@ -1585,7 +1598,7 @@ def _drop(key):
         (lambda ev: dataclasses.replace(ev, notes=None), "notes must be an object"),
         (
             lambda ev: dataclasses.replace(ev, arms={**ev.arms, "baseline": None}),
-            "arms must map",
+            "arm 'baseline' is not an object",
         ),
         (lambda ev: dataclasses.replace(ev, limitations=("ok", 3)), "limitations must be"),
         (lambda ev: dataclasses.replace(ev, records=None), "records must be a list"),
@@ -1665,3 +1678,294 @@ def test_wsp_item_tags_must_be_lists_of_strings(tmp_path) -> None:
     for bad in ({**tags, first: "heldout-slice"}, {**tags, first: [1]}):
         with pytest.raises(EvidenceError, match="item_tags"):
             evidence_from_wsp(res.out_dir, proto, parse_study(study_raw), ARM_MAP, bad)
+
+
+# --- seventh round: manifest identifier, nested shapes, loader normalization (G1-G8) --------
+
+
+def _edit_manifest(run: Path, change) -> None:
+    manifest = json.loads((run / "manifest.json").read_text())
+    change(manifest)
+    (run / "manifest.json").write_text(json.dumps(manifest))
+
+
+def _manifest_cases(run, study):
+    """The three ways a reader can load an edited manifest."""
+    with pytest.raises(EvidenceError, match="externally recorded manifest_sha256"):
+        load_evidence(run, study, expected_manifest_sha256=EXTERNAL_RECORD[run])
+    unchecked = load_evidence(run, study)
+    # Someone who can edit the manifest can also recompute its hash: a value taken *after* the
+    # edit matches, so it protects nothing. Only a value recorded before, outside the run
+    # directory and under independent control, detects the edit.
+    recomputed = load_evidence(run, study, expected_manifest_sha256=run_manifest_sha256(run))
+    return unchecked, recomputed
+
+
+def test_edited_start_time_is_caught_only_by_an_external_record(tmp_path, raw, alerts) -> None:
+    # G4: the study was frozen after the run, so the honest outcome is descriptive only.
+    late = {**raw, **FROZEN, "frozen_at": "2999-01-01T00:00Z"}
+    study, run = _evidence(tmp_path, late, alerts)
+    honest = _by_id(build_report(study, [_load(run, study)]))[THRESH]
+    assert honest["outcome"] == "descriptive_only_not_preregistered"
+    _edit_manifest(run, lambda m: m.update(started_at="2999-02-01T00:00Z"))
+    unchecked, recomputed = _manifest_cases(run, study)
+    r = _by_id(build_report(study, [unchecked]))[THRESH]
+    assert unchecked.notes["manifest_check"] == "not_checked"
+    assert r["outcome"] == "inconclusive" and r["rule_outcome"] == "inconclusive"
+    assert any("not checked against an externally recorded" in x for x in r["reasons"])
+    # The documented limit: a recomputed hash "matches", and the edit then passes.
+    assert recomputed.notes["manifest_check"] == "matched_external_record"
+    assert _by_id(build_report(study, [recomputed]))[THRESH]["outcome"] == MEETS
+
+
+def test_edited_artifact_digest_is_caught_only_by_an_external_record(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    registered = study.baseline["artifact"]
+    file = registered.get("file")
+
+    def wrong(m):  # the run as it honestly happened: a different baseline file was loaded
+        arm = m["arms"]["baseline"]
+        if file:
+            arm["artifacts"][file] = "e" * 64
+        arm["artifact_sha256s"] = ["e" * 64]
+
+    _edit_manifest(run, wrong)
+    EXTERNAL_RECORD[run] = run_manifest_sha256(run)  # recorded when that run finished
+    honest = _by_id(build_report(study, [_load(run, study)]))[THRESH]
+    assert honest["outcome"] == "baseline_changed_not_interpreted"
+
+    def restore(m):  # the post-run edit: claim the registered baseline was loaded
+        arm = m["arms"]["baseline"]
+        if file:
+            arm["artifacts"][file] = registered["sha256"]
+        arm["artifact_sha256s"] = [registered["sha256"]]
+
+    _edit_manifest(run, restore)
+    unchecked, recomputed = _manifest_cases(run, study)
+    assert _by_id(build_report(study, [unchecked]))[THRESH]["outcome"] == "inconclusive"
+    assert _by_id(build_report(study, [recomputed]))[THRESH]["outcome"] == MEETS  # the limit
+
+
+def test_edited_wsp_split_is_caught_only_by_an_external_record(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path, split="development")
+    study = parse_study(study_raw)
+    recorded = run_manifest_sha256(res.out_dir)
+
+    def load(expected=None):
+        return evidence_from_wsp(
+            res.out_dir,
+            proto,
+            study,
+            ARM_MAP,
+            tags,
+            edit_report=EDIT_REPORT,
+            expected_manifest_sha256=expected,
+        )
+
+    (honest,) = build_report(study, [load(recorded)])["candidates"]
+    assert honest["outcome"] == "prerequisite_missing" and "held-out" in honest["reasons"][0]
+    _edit_manifest(res.out_dir, lambda m: m.update(split="heldout"))
+    with pytest.raises(EvidenceError, match="externally recorded manifest_sha256"):
+        load(recorded)
+    unchecked = load()
+    assert unchecked.notes["wsp_split"] == "heldout"  # read from the edited manifest
+    assert unchecked.notes["manifest_check"] == "not_checked"
+    (r,) = build_report(study, [unchecked])["candidates"]
+    assert r["outcome"] != MEETS
+    recomputed = load(run_manifest_sha256(res.out_dir))
+    assert recomputed.notes["manifest_check"] == "matched_external_record"  # the limit
+
+
+def test_manifest_identifier_is_deterministic_and_validated(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    before = run_manifest_sha256(run)
+    _edit_manifest(run, lambda m: None)  # re-serialized differently, same content
+    assert run_manifest_sha256(run) == before
+    for bad in (before.upper(), before + "\n", "x" * 64, 5):
+        with pytest.raises(EvidenceError, match="64 lowercase hex"):
+            load_evidence(run, study, expected_manifest_sha256=bad)
+
+
+def test_cli_prints_and_checks_the_manifest_identifier(tmp_path, capsys) -> None:
+    assert improve.main(["demo", "--output", str(tmp_path / "demo")]) == 0
+    capsys.readouterr()
+    run = tmp_path / "demo" / "evidence"
+    assert improve.main(["manifest-hash", str(run)]) == 0
+    sha = json.loads(capsys.readouterr().out)["manifest_sha256"]
+    assert sha == run_manifest_sha256(run)
+    base = ["report", "--study", str(FIX / "synthetic_study.json"), "--evidence", str(run)]
+    assert (
+        improve.main([*base, "--output", str(tmp_path / "r1"), "--expected-manifest-sha256", sha])
+        == 0
+    )
+    capsys.readouterr()
+    report = json.loads((tmp_path / "r1" / "report.json").read_text())
+    assert report["evidence_runs"][0]["manifest_check"] == "matched_external_record"
+    out = [*base, "--output", str(tmp_path / "r2"), "--expected-manifest-sha256", "0" * 64]
+    assert improve.main(out) == 0
+    assert "externally recorded" in json.loads(capsys.readouterr().out)["evidence_errors"][0]
+    two = [*base, "--output", str(tmp_path / "r3"), "--expected-manifest-sha256", sha, sha]
+    assert improve.main(two) == 2
+
+
+class _SneakyEvidence(Evidence):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("alter", "message"),
+    [
+        # G1: valid ISO text whose UTC conversion overflows.
+        (
+            lambda ev: dataclasses.replace(ev, started_at="0001-01-01T00:00+01:00"),
+            "out of range",
+        ),
+        # G2: nested values the comparison reads.
+        (
+            lambda ev: dataclasses.replace(
+                ev, arms={**ev.arms, "baseline": {**ev.arms["baseline"], "artifacts": ["x"]}}
+            ),
+            "artifacts must map",
+        ),
+        (
+            lambda ev: dataclasses.replace(
+                ev, arms={**ev.arms, "baseline": {**ev.arms["baseline"], "artifact_sha256s": 5}}
+            ),
+            "artifact_sha256s must be",
+        ),
+        (
+            lambda ev: dataclasses.replace(
+                ev, arms={**ev.arms, "baseline": {**ev.arms["baseline"], "config_sha256": 5}}
+            ),
+            "config_sha256 must be",
+        ),
+        (
+            lambda ev: dataclasses.replace(ev, notes={"edit_verification": "x"}),
+            "edit_verification must be an object",
+        ),
+        (lambda ev: dataclasses.replace(ev, notes={"x": object()}), "plain JSON"),
+        (lambda ev: dataclasses.replace(ev, notes={1: "a", "b": 2}), "plain JSON"),
+        (lambda ev: dataclasses.replace(ev, notes={"wsp_split": 1}), "wsp_split must be"),
+        # G5: an Evidence subclass could return different values on later reads.
+        (
+            lambda ev: _SneakyEvidence(
+                **{f.name: getattr(ev, f.name) for f in dataclasses.fields(ev)}
+            ),
+            "not an Evidence object",
+        ),
+    ],
+)
+def test_malformed_nested_evidence_is_a_gate(tmp_path, raw, alerts, alter, message) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    report = build_report(study, [alter(_load(run, study))])
+    for r in report["candidates"]:
+        assert r["outcome"] == "insufficient_evidence" and message in r["reasons"][0]
+    assert message in report["evidence_errors"][0]
+    render_markdown(report)
+
+
+def test_evidence_argument_must_be_a_list(tmp_path, raw, alerts) -> None:
+    study, _ = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    r = compare_candidate(study, study.candidate(THRESH), None)
+    assert r["outcome"] == "insufficient_evidence" and "must be a list" in r["reasons"][0]
+    report = build_report(study, None)
+    assert all(c["outcome"] == "insufficient_evidence" for c in report["candidates"])
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda m: m.update(started_at="9999-12-31T23:59-01:00"), "out of range"),  # G1
+        (lambda m: m.update(started_at="2026-11-02T00:00"), "no time zone"),
+        (lambda m: m.update(limitations=None), "limitations must be"),  # G3
+        (lambda m: m.update(limitations=3), "limitations must be"),
+        (lambda m: m.update(limitations="abc"), "limitations must be"),
+        (lambda m: m.update(limitations={"k": 1}), "limitations must be"),
+        (lambda m: m.update(synthetic="yes"), "synthetic must be"),
+        (lambda m: m.update(arms=None), "arms must map"),
+    ],
+)
+def test_loader_normalizes_malformed_manifest_fields(
+    tmp_path, raw, alerts, change, message
+) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    _edit_manifest(run, change)
+    with pytest.raises(EvidenceError, match=message):
+        load_evidence(run, study)
+
+
+def test_loader_normalizes_unreadable_records(tmp_path, raw, alerts) -> None:
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    path = run / "records.jsonl"
+    path.write_bytes(b"\xff\xfe\n")
+    _edit_manifest(
+        run, lambda m: m.update(records_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    )
+    with pytest.raises(EvidenceError, match=r"cannot read records\.jsonl"):
+        load_evidence(run, study)
+    path.unlink()
+    with pytest.raises(EvidenceError, match=r"records\.jsonl is missing"):
+        load_evidence(run, study)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda m: m.pop("dataset"),
+        lambda m: m.update(dataset="x"),
+        lambda m: m.update(arms=None),
+        lambda m: m.update(counts="x"),
+        lambda m: m.update(started_at="not-a-time"),
+        lambda m: m.update(started_at=5),
+        lambda m: m["arms"][0].pop("inference"),
+    ],
+)
+def test_wsp_loader_normalizes_malformed_manifest_fields(tmp_path, change) -> None:
+    # G3: these raised KeyError, AttributeError, TypeError or ValueError.
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    _edit_manifest(res.out_dir, change)
+    with pytest.raises(EvidenceError):
+        evidence_from_wsp(
+            res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags, edit_report=EDIT_REPORT
+        )
+
+
+def test_wsp_loader_normalizes_malformed_arguments(tmp_path) -> None:
+    proto, res, study_raw, tags = _wsp_setup(tmp_path)
+    study = parse_study(study_raw)
+    with pytest.raises(EvidenceError, match="mappings"):
+        evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, list(tags))
+    with pytest.raises(EvidenceError, match="arm_map"):
+        evidence_from_wsp(res.out_dir, proto, study, {"reference": ["baseline"]}, tags)
+    with pytest.raises(EvidenceError, match="edit_report"):
+        evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags, edit_report={"x": object()})
+    (res.out_dir / "manifest.json").write_text("[1, 2]")
+    with pytest.raises(EvidenceError):
+        evidence_from_wsp(res.out_dir, proto, study, ARM_MAP, tags)
+
+
+def test_notes_cannot_overwrite_report_run_fields(tmp_path, raw, alerts) -> None:
+    # G6
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = _load(run, study)
+    forged = dataclasses.replace(
+        ev, notes={**ev.notes, "run_id": "other", "source": "wsp", "synthetic": False}
+    )
+    (row,) = build_report(study, [forged])["evidence_runs"]
+    assert (row["run_id"], row["source"], row["synthetic"]) == (ev.run_id, ev.source, True)
+
+
+def test_malformed_object_in_a_non_synthetic_report_is_not_called_synthetic(
+    tmp_path, raw, alerts, monkeypatch
+) -> None:
+    # G7: the warning text must not claim synthetic fixtures for a real study.
+    study, run = _evidence(tmp_path, {**raw, **FROZEN}, alerts)
+    ev = dataclasses.replace(_load(run, study), synthetic=False)
+    real = dataclasses.replace(study, synthetic=False)
+    report = build_report(real, [ev, dataclasses.replace(ev, notes=None)])
+    assert report["evidence_class"] == "not_interpreted_malformed_evidence"
+    assert not any("synthetic fixtures" in x for x in report["limitations"])
+    assert any("malformed evidence object" in x for x in report["limitations"])
+    clean = build_report(real, [ev])
+    assert clean["evidence_class"] == "measured_unauthenticated"
+    assert any("None of them authenticates" in x for x in clean["limitations"])

@@ -27,6 +27,15 @@ EVIDENCE_LIMIT = (
     "Every result here comes from synthetic fixtures. It is not a measurement of any model, "
     "SOC deployment or dataset, and it is not a Tantular Cyber baseline."
 )
+MALFORMED_LIMIT = (
+    "A malformed evidence object was supplied. It was not interpreted, every candidate is "
+    "insufficient_evidence, and nothing in this report is a measurement."
+)
+TRUST_NOTE = (
+    "Checks in this report are integrity and consistency checks against the registered study "
+    "and, where recorded, an external manifest identifier. None of them authenticates who "
+    "produced the evidence or the truth of its outcomes, labels, timestamps or artifact claims."
+)
 DECISION_NOTE = (
     "No artifact is promoted or deployed by this workflow, and nothing here enforces a "
     "decision. A decision is a separate record made under a pseudonym; the identity is "
@@ -61,6 +70,9 @@ def build_report(
     # A malformed evidence object already makes every candidate insufficient_evidence; it is
     # listed as an error and not read further, and the report stays labelled synthetic.
     shaped, evidence_errors = [], list(evidence_errors)
+    if type(evidence) not in (list, tuple):
+        evidence_errors.append("evidence must be a list of Evidence objects")
+        evidence = [None]  # counted as malformed below
     for i, e in enumerate(evidence):
         problem = evidence_problem(e)
         if problem:
@@ -69,10 +81,18 @@ def build_report(
             shaped.append(e)
     malformed = len(shaped) != len(evidence)
     evidence = shaped
-    synthetic = study.synthetic or any(e.synthetic for e in evidence) or not evidence or malformed
+    synthetic = study.synthetic or any(e.synthetic for e in evidence) or not evidence
     limitations = list(study.raw.get("limitations", []))
     for e in evidence:
         limitations += [x for x in e.limitations if x not in limitations]
+    for e in evidence:
+        if e.notes.get("manifest_check") != "matched_external_record":
+            limitations.append(
+                f"Evidence run {e.run_id}: manifest not checked against an externally recorded "
+                "manifest_sha256, so its start time, artifact claims and split are as written "
+                "in the run directory; no candidate from it can meet the declared criteria."
+            )
+    limitations.append(TRUST_NOTE)
     limitations.append(_multiplicity(study))
     limitations.append(METHOD_NOTE)
     unit = study.analysis.get("unit", "item")
@@ -88,6 +108,8 @@ def build_report(
             "(descriptive_only_cluster_method_unreviewed). The cluster-weighted estimand can "
             "differ from the item-weighted one; both are shown."
         )
+    if malformed:
+        limitations.insert(0, MALFORMED_LIMIT)
     if synthetic:
         limitations.insert(0, EVIDENCE_LIMIT)
     report = {
@@ -95,7 +117,13 @@ def build_report(
         "study_version": study.raw["study_version"],
         "study_sha256": study.sha256,
         "study_frozen": study.frozen,
-        "evidence_class": "synthetic_fixture_not_a_measurement" if synthetic else "measured",
+        "evidence_class": (
+            "synthetic_fixture_not_a_measurement"
+            if synthetic
+            else "not_interpreted_malformed_evidence"
+            if malformed
+            else "measured_unauthenticated"
+        ),
         "task_kind": study.task_kind,
         "validity_scope": study.raw["task"].get("validity_scope"),
         "unit": unit,
@@ -106,7 +134,7 @@ def build_report(
         },
         "target_failure": study.target,
         "evidence_runs": [
-            {"run_id": e.run_id, "source": e.source, "synthetic": e.synthetic, **e.notes}
+            {**e.notes, "run_id": e.run_id, "source": e.source, "synthetic": e.synthetic}
             for e in evidence
         ],
         "evidence_errors": list(evidence_errors),
