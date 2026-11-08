@@ -32,6 +32,12 @@ on the isolated host.
 None of these can be resolved in this repository. Each must be done, recorded and reviewed
 before a real run:
 
+0. **Execution design: no process boundary between arms.** The readiness proposal (PR #27,
+   §"Sequential loading") specifies each arm as a **separate process** and engine load, with the
+   GPU released between arms. This adapter runs every arm in **one process** and relies on
+   in-process cleanup plus the engine-object observation (C1, close). That is not the specified
+   isolation. Before real execution, either implement the per-arm process boundary, or
+   explicitly revise the execution design and have the revision reviewed.
 1. **No runtime lock.** `requirements.in` has no lock file; vLLM and transformers are
    `REPLACE` (R6) and sympy is `REPLACE` (R9). Resolving a lock needs network access and those
    decisions.
@@ -82,16 +88,18 @@ before a real run:
   `SamplingParams` object is built and read back for every (n, seed) the run requests; and
   every arm's settings, storage and loaded-file inventory are checked (`preflight()`). Each load
   repeats the settings, storage and inventory checks before the backend is created, and checks
-  the imported modules' versions against the protocol again.
+  the imported modules' versions against the protocol again. What needs a loaded engine (the
+  tokenizer, observed engine settings) is checked or recorded at load time; the effective
+  engine configuration stays a GPU-host check.
 - **Versions, compared exactly.** The protocol's `version` / `transformers_version` are the
   **package-metadata** versions (`importlib.metadata`); preflight requires the installed
-  metadata to equal them. The modules' `__version__` strings, read in preflight (an import, no
-  GPU) and again at load, must equal the same pins, or an explicitly registered
-  `vllm_module_version` / `transformers_module_version` when the module reports a differently
-  formatted string (for example a local `+cu124` suffix). Nothing is stripped or normalised: a
-  format difference is refused until it is registered. What needs a loaded
-  engine (the tokenizer, observed engine settings) is checked or recorded at load time; the
-  effective engine configuration stays a GPU-host check.
+  metadata to equal them. The modules' `__version__` strings, read in preflight (an import,
+  assumed to need no GPU; see the GPU-host table) and again at load, must equal the same pins,
+  or an explicitly registered `vllm_module_version` / `transformers_module_version` when the
+  module reports the pin plus a local-version suffix (`<pin>+<local>`, for example `+cu124`).
+  Only that form can be registered: a different release under the module name is a mixed
+  install and is refused. Nothing is stripped or normalised: a suffix is refused until it is
+  registered.
 - **Storage (`verify_storage`).** Required, or the load is refused:
   - the path, made absolute, contains no `..` component and no symbolic-link component (it is
     loaded by its resolved path), and the checkpoint contains no symbolic link;
@@ -170,27 +178,44 @@ before a real run:
   settings read-back, `describe`), the engine is torn down the same way as in a close before the
   error propagates, since the runner never receives it; if vLLM's constructor itself fails, only
   the release steps run. The cleanup is recorded as a `load_failed` report.
-  - **Frames in the whole error chain are cleared first.** A frame inside the engine's own
-    methods would otherwise keep the engine alive through the release, and such a frame may sit
-    in the propagating error's traceback or in the traceback of an error it was raised from
-    (`__cause__`) or during (`__context__`). The local variables of every frame in the whole
-    chain are cleared (cycles are detected; frames still executing are left alone). The errors
-    themselves, their types, messages, chaining and traceback lines are kept. **This reduces
-    post-mortem debugging information:** a debugger can no longer inspect those frames' local
-    variables.
+  - **Frame clearing is best-effort.** A frame inside the engine's own methods can keep the
+    engine alive through the release, in the propagating error's traceback or in that of an
+    error it was raised from (`__cause__`) or during (`__context__`). The local variables of the
+    frames listed in those tracebacks are cleared (cycles are detected). The errors themselves,
+    their types, messages, chaining and traceback lines are kept. **This reduces post-mortem
+    debugging information:** a debugger can no longer inspect those frames' local variables. On
+    Python 3.11, clearing the frame of a suspended generator or coroutine finalises it, so its
+    `finally` code runs during the cleanup. It does **not** find every reference: an error
+    attribute such as `AttributeError.obj`, exception-group members, frames reachable only
+    through `f_back`, and library objects can still hold the engine. No attempt is made to find
+    them; the observation (C1, close) records whether the engine object actually went away. An
+    interrupt during the clearing does not skip the teardown.
   - **Ordinary cleanup failures** (a failed or missing shutdown step) are attached to the
     original error as a note (`cleanup after this failed load also failed: …`) and recorded in
-    the report; the original error is re-raised.
+    the report; the original error is re-raised. If the error cannot take a note (a library
+    replaced `__notes__`), the report records `note_not_attached` and the original error is
+    still the one raised.
   - **An interrupt during the cleanup** propagates instead of the original error; the original
     failure stays reachable as the interrupt's `__context__`, and the report records
     `interrupted: true`.
+- **Engine-object observation (Python object lifetime only).** At load the engine takes a weak
+  reference to the vLLM object. In the release, after garbage collection and before the CUDA
+  cache is cleared, it records `engine_object_after_release`: `released` (the object is gone),
+  `alive` (something still references it), `not_observable` (it cannot be weak-referenced, or
+  the observation did not run) or `no_engine` (vLLM's constructor failed). At a **normal close,
+  anything but `released` fails the close**, so the next arm is not loaded: a still-referenced
+  object, and an object whose release cannot be observed, are not treated as released. After a
+  failed load it is recorded only, since the run aborts anyway. This establishes **Python
+  object lifetime only**: that the adapter's own vLLM object was freed in this process. It says
+  nothing about worker processes, CUDA contexts or device memory, which stay separate real-run
+  checks.
 - **Close, in this order.** (1) The engine's own shutdown, a required step:
   `llm_engine.shutdown`, or `llm_engine.engine_core.shutdown` on the V1 engine (these names are
   **version-dependent assumptions**; a version with neither fails every close). (2) Every
   reference the engine holds to vLLM objects is dropped. (3) The release steps:
-  `destroy_model_parallel`, `destroy_distributed_environment`, `gc.collect`, then
-  `torch.cuda.empty_cache`, so memory freed by the collection is returned to the device as well
-  (a test checks that no engine object is alive when the cache is cleared). Each step is
+  `destroy_model_parallel`, `destroy_distributed_environment`, `gc.collect`, the observation
+  above, then `torch.cuda.empty_cache`, so memory freed by the collection is returned to the
+  device as well. Each step is
   recorded with its status (`ok`, `failed`, `unavailable`); a failed step does not stop the
   later ones. Then this process's allocated **and reserved** PyTorch memory and its live
   `multiprocessing` children are recorded, and the checkpoint is re-hashed. A close report is
@@ -203,16 +228,22 @@ before a real run:
   during the release steps ends them at that point. An interrupt during the memory,
   child-process or re-hash checks marks the report `interrupted: true` with what ran so far.
   If the runner closes the engine while another failure is propagating, it records only
-  `closed: false` in the manifest; why is in the close report.
+  `closed: false` in the manifest; why is in the close report. In particular, when Ctrl-C
+  arrives during generation, the propagating interrupt's traceback still holds the engine's
+  frame, so the close made on the way out observes the object `alive` and reports that error.
 
 **What survives an interruption.** The close reports are kept in memory and written only into
-`runtime_report.json`. After an interrupt **during the run** (`run_paired`), the runner writes
-its aborted manifest and records, and `run.py` then writes `runtime_report.json` best-effort,
-marked `interrupted: true`, with every close report recorded so far, before the interrupt
-propagates; no summary is printed. A second interrupt while the report is being written can
-prevent it. After an interrupt **before the run starts** (during the checks) nothing is written
-at all. After an ordinary failure the report and the printed summary both carry the close
-reports.
+`runtime_report.json`. After an interrupt **during the run** (once the runner's abort handling
+is active), the runner writes its aborted manifest and records, and `run.py` then writes
+`runtime_report.json` best-effort, marked `interrupted: true`, with every close report recorded
+so far; the same interrupt object then propagates and no summary is printed. The report is
+written **atomically** (a temporary file, flushed, then hard-linked into place, never
+overwriting), so it is either complete or absent. A **second interrupt** during that write is
+dropped in favour of the first, and leaves no report. An interrupt **before the run starts**
+(during the checks) writes nothing, and one that arrives inside the runner after it created
+the output directory but before its abort handling starts leaves the directory without a
+manifest, so the report is skipped. After an ordinary failure the report and the printed
+summary both carry the close reports.
 
 **What the close does not show.** `torch.cuda.memory_allocated` and `memory_reserved` count only
 this process's PyTorch allocator. vLLM's engine runs in worker processes, and CUDA contexts and
@@ -356,7 +387,9 @@ recorded, and reviewed before the confirmatory run.
 | **Effective engine settings** | Read back and record the effective values of the engine arguments left at vLLM's defaults (batch limits, prefix caching, eager/compilation, KV-cache dtype, attention backend, scheduler) and the effective model configuration |
 | Storage | The operator checks listed under C1, storage |
 | Which files vLLM actually opens | Every file in the directory is registered and hashed, offline mode is forced and `generation_config` cannot be a path, but a file read from elsewhere (vLLM's caches, a compile, Triton or FlashInfer cache, environment-selected paths) would be invisible. Check with file-access tracing on the host |
-| Version strings | Record the package-metadata and module `__version__` strings of vLLM and transformers in the image; register a module version explicitly if the formats differ |
+| Importing vLLM and transformers in preflight | Preflight imports both (for `__version__` and `SamplingParams`), assumed to need no GPU. On the real libraries the import may run platform or CUDA detection, plugin discovery or logging setup; record what it does on the host |
+| Weak-referenceability | Confirm that the pinned vLLM's `LLM` object can be weak-referenced (otherwise every close fails as `not_observable`) |
+| Version strings | Record the package-metadata and module `__version__` strings of vLLM and transformers in the image; register a module version (`<pin>+<local>`) explicitly if they differ by a local suffix |
 | Telemetry | Confirm that `VLLM_NO_USAGE_STATS` / `DO_NOT_TRACK` disable usage reporting on the pinned vLLM (with egress blocked and logged) |
 | Effective stop tokens | The stop set vLLM applies at generation time is not observable from the adapter; record it on the chosen version and confirm it includes eos `248044`. Check whether `</think>` survives `skip_special_tokens` |
 | vLLM API details | `LLM(...)` keyword names (`generation_config`, `load_format`, `trust_remote_code`), `generate(prompts, params_list)` returning outputs in input order with `.prompt`, `finish_reason` and `token_ids`, `SamplingParams` attributes, `get_default_sampling_params`, `llm_engine.model_config`, the shutdown hooks, `torch.cuda.memory_reserved`, and how child samples of an `n > 1` request are seeded |

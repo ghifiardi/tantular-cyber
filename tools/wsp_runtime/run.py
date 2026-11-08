@@ -40,15 +40,19 @@ This command needs vLLM, transformers, torch and math-verify, which are installe
 isolated host. It has been exercised only with stand-in modules (``tests/test_wsp_runtime.py``),
 which validate control flow, not compatibility with the real libraries. Exit codes: 0 ok, 1 run
 or validation failure (including any error record or a report that could not be written), 2
-usage error. An interrupt (Ctrl-C) or other ``BaseException`` during the run propagates
-unchanged after a best-effort ``runtime_report.json`` (marked ``interrupted``) is written next
-to the runner's aborted manifest; no summary is printed and the exit status is the
-interpreter's. An interrupt before the run starts (during the checks) leaves nothing on disk.
+usage error. An interrupt (Ctrl-C) or other ``BaseException`` during the run propagates (the
+same exception object) after a best-effort ``runtime_report.json`` (marked ``interrupted``) is
+written atomically next to the runner's aborted manifest; a second interrupt during that write
+is dropped in favour of the first, and leaves no partial report. No summary is printed and the
+exit status is the interpreter's. Nothing is written for an interrupt before the run starts,
+or one that arrives inside the runner before its abort handling (the output directory may then
+exist without a manifest, and the report is skipped).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -295,8 +299,11 @@ def run(
         # unchanged. No summary is printed.
         summary.update(run_status="interrupted", error=f"{type(exc).__name__}: {exc}"[:300])
         runtime_report["interrupted"] = True
-        _report_into(summary, out, run_id, runtime_report, dataset_report)
-        raise
+        # A second interrupt during the write is dropped: the first interrupt is the one
+        # propagated, and the atomic write leaves either the whole report or none.
+        with contextlib.suppress(BaseException):
+            _report_into(summary, out, run_id, runtime_report, dataset_report)
+        raise exc
     counts = result.manifest["counts"]
     summary.update(
         run_status=result.manifest["run_status"],
@@ -349,9 +356,23 @@ def _write_report(
         ),
     }
     data = (json.dumps(body, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    with (out / REPORT_FILE).open("xb") as fh:
-        fh.write(data)
+    _write_atomically(out / REPORT_FILE, data)
     return {"runtime_report": REPORT_FILE, "runtime_report_sha256": sha256_bytes(data)}
+
+
+def _write_atomically(path: Path, data: bytes) -> None:
+    """All or nothing, never overwriting: write a temporary file in the same directory, flush
+    it to disk, then hard-link it to ``path`` (which fails if ``path`` exists) and remove the
+    temporary name. An interruption leaves either no report or the complete one."""
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp.open("xb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.link(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class _Aborted(Exception):

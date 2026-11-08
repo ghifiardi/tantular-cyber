@@ -173,7 +173,10 @@ class _Hub:
         if self.llm_error is not None:
             raise self.llm_error
         llm = self.llm_class(self, **kwargs)
-        self.llms.append(weakref.ref(llm))
+        try:
+            self.llms.append(weakref.ref(llm))
+        except TypeError:  # a stand-in that cannot be weak-referenced
+            self.llms.append(lambda: None)
         return llm
 
     def engine_shutdown(self, name):
@@ -835,6 +838,7 @@ def test_failure_after_engine_creation_shuts_it_down(protocol, ckpts) -> None:
     (report,) = reports
     assert report["phase"] == "load_failed" and "synthetic tokenizer" in report["load_error"]
     assert report["errors"] == []
+    assert report["engine_object_after_release"] == "released"
 
 
 class _ChainedLLM(FakeLLM):
@@ -927,6 +931,7 @@ def test_failed_engine_construction_runs_process_level_cleanup(protocol, ckpts) 
         "torch.cuda.empty_cache",
     ]
     assert reports[0]["phase"] == "load_failed"
+    assert reports[0]["engine_object_after_release"] == "no_engine"
 
 
 # --- C1: batches and request echoes -------------------------------------------------------
@@ -996,6 +1001,7 @@ _ALL_STEPS = [
     "parallel_state.destroy_model_parallel",
     "parallel_state.destroy_distributed_environment",
     "gc.collect",
+    "observe engine object",
     "torch.cuda.empty_cache",
 ]
 
@@ -1027,6 +1033,110 @@ def test_v1_engine_core_shutdown_is_used_when_present(protocol, ckpts) -> None:
     reports: list = []
     _engine(protocol, ckpts, FakeBackend(engine_mode="v1"), reports=reports).close()
     assert reports[0]["shutdown_steps"][0]["step"] == "llm_engine.engine_core.shutdown"
+
+
+class _LeakyLLM(FakeLLM):
+    """Something outside the adapter (a library cache, a callback, an error attribute) keeps
+    a strong reference to the engine object."""
+
+    def __init__(self, hub, **kwargs):
+        super().__init__(hub, **kwargs)
+        hub.strong = [self]
+
+
+class _UnrefableLLM:
+    """A stand-in engine object that cannot be weak-referenced."""
+
+    __slots__ = ("hub", "kwargs", "llm_engine")
+
+    def __init__(self, hub, **kwargs):
+        self.hub, self.kwargs = hub, kwargs
+        self.llm_engine = _LLMEngine(hub, kwargs)
+
+    def get_tokenizer(self):
+        return self.hub.tokenizer()
+
+    def get_default_sampling_params(self):
+        return Params(temperature=1.0)
+
+
+def test_a_still_referenced_engine_object_fails_the_close(protocol, ckpts) -> None:
+    reports: list = []
+    e = _engine(protocol, ckpts, FakeBackend(llm_class=_LeakyLLM), reports=reports)
+    with pytest.raises(CloseError, match="still referenced after release"):
+        e.close()
+    assert reports[0]["engine_object_after_release"] == "alive"
+    with pytest.raises(CloseError, match="earlier close failed"):
+        e.close()
+
+
+def test_an_unobservable_engine_object_fails_closed(protocol, ckpts) -> None:
+    reports: list = []
+    e = _engine(protocol, ckpts, FakeBackend(llm_class=_UnrefableLLM), reports=reports)
+    with pytest.raises(CloseError, match="not observable"):
+        e.close()
+    assert reports[0]["engine_object_after_release"] == "not_observable"
+
+
+def test_a_still_referenced_engine_stops_the_run_before_the_next_arm(
+    tmp_path, protocol, ckpts
+) -> None:
+    backend = FakeBackend(llm_class=_LeakyLLM)
+    with pytest.raises(runtime_cli._Aborted) as exc:
+        _cli(tmp_path, protocol.raw, ckpts, backend=backend)
+    assert "still referenced" in exc.value.summary["error"]
+    assert len(backend.calls) == 2  # only the first arm generated
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert [x["status"] for x in manifest["execution"]["loads"]] == ["close_failed"]
+
+
+def test_a_reference_the_best_effort_clearing_misses_is_observed(protocol, ckpts) -> None:
+    # AttributeError.obj holds the object whose attribute lookup failed: frame clearing does
+    # not reach it. The failed load still propagates; the report records the object alive.
+    class MissingAttribute(FakeLLM):
+        def get_tokenizer(self):
+            return self.no_such_attribute
+
+    backend = FakeBackend(llm_class=MissingAttribute)
+    reports: list = []
+    with pytest.raises(AttributeError) as info:
+        _engine(protocol, ckpts, backend, reports=reports)
+    assert reports[0]["engine_object_after_release"] == "alive"
+    del info  # the propagated error is what kept it alive
+    gc.collect()
+    assert backend.llms[0]() is None
+
+
+def test_an_interrupt_while_clearing_frames_still_tears_down(protocol, ckpts, monkeypatch) -> None:
+    def broken():
+        raise RuntimeError("synthetic tokenizer failure")
+
+    def interrupted(exc):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(vllm_adapter, "clear_exception_frames", interrupted)
+    backend = FakeBackend(tokenizer=broken)
+    reports: list = []
+    with pytest.raises(KeyboardInterrupt):
+        _engine(protocol, ckpts, backend, reports=reports)
+    assert backend.events[0] == "llm_engine.shutdown"  # the teardown was not skipped
+    assert reports[0]["interrupted"] is True
+
+
+def test_a_note_that_cannot_be_attached_keeps_the_original_error(protocol, ckpts) -> None:
+    class Odd(RuntimeError):
+        pass
+
+    def broken():
+        err = Odd("synthetic tokenizer failure")
+        err.__notes__ = "not a list"
+        raise err
+
+    backend = FakeBackend(tokenizer=broken, engine_error=RuntimeError("synthetic shutdown failure"))
+    reports: list = []
+    with pytest.raises(Odd, match="synthetic tokenizer failure"):
+        _engine(protocol, ckpts, backend, reports=reports)
+    assert reports[0]["note_not_attached"] is True and reports[0]["errors"]
 
 
 def test_close_fails_if_files_changed_parent_memory_or_children_remain(
@@ -1070,7 +1180,7 @@ def test_failed_shutdown_keeps_every_step_and_is_never_reported_as_success(proto
     (report,) = reports
     steps = report["shutdown_steps"]
     assert [s["step"] for s in steps] == _ALL_STEPS  # the later steps still ran
-    assert [s["status"] for s in steps] == ["failed", "ok", "ok", "ok", "ok"]
+    assert [s["status"] for s in steps] == ["failed", "ok", "ok", "ok", "ok", "ok"]
     assert backend.events[1:] == [
         "destroy_model_parallel",
         "destroy_distributed_environment",
@@ -1593,6 +1703,45 @@ def test_module_versions_are_reconciled_in_preflight_without_normalisation(
         modules={"vllm": local, "transformers": TF_VERSION},
     )  # fmt: skip
     assert summary["run_status"] == "complete"
+    for bad in ("9.9.9", VERSION + "+"):
+        raw2 = copy.deepcopy(protocol.raw)
+        for a in raw2["arms"]:
+            a["engine"]["vllm_module_version"] = bad  # a different release, or an empty suffix
+        with pytest.raises(SettingsError, match="local version suffix"):
+            _cli(tmp_path, raw2, ckpts, modules={"vllm": bad, "transformers": TF_VERSION})
+
+
+def test_the_report_is_written_atomically_or_not_at_all(
+    tmp_path, protocol, ckpts, monkeypatch
+) -> None:
+    def failing_fsync(fd):
+        raise OSError("synthetic disk failure")
+
+    monkeypatch.setattr(runtime_cli.os, "fsync", failing_fsync)
+    summary, _ = _cli(tmp_path, protocol.raw, ckpts)
+    assert summary["runtime_report_error"] == "OSError: synthetic disk failure"
+    assert sorted(p.name for p in (tmp_path / "run").iterdir()) == [
+        "manifest.json",
+        "records.jsonl",
+    ]  # no partial report and no temporary file left
+
+
+def test_a_second_interrupt_during_the_report_keeps_the_first(
+    tmp_path, protocol, ckpts, monkeypatch
+) -> None:
+    first = KeyboardInterrupt("first")
+
+    def interrupt(prompt, params):
+        raise first
+
+    def second(*args):
+        raise KeyboardInterrupt("second")
+
+    monkeypatch.setattr(runtime_cli, "_write_report", second)
+    with pytest.raises(KeyboardInterrupt) as info:
+        _cli(tmp_path, protocol.raw, ckpts, backend=FakeBackend(answer=interrupt))
+    assert info.value is first
+    assert not (tmp_path / "run" / "runtime_report.json").exists()
 
 
 def test_an_interrupt_during_the_run_keeps_the_report(tmp_path, protocol, ckpts) -> None:
@@ -1605,7 +1754,11 @@ def test_an_interrupt_during_the_run_keeps_the_report(tmp_path, protocol, ckpts)
     assert manifest["run_status"] == "aborted"
     report = json.loads((tmp_path / "run" / "runtime_report.json").read_text())
     assert report["interrupted"] is True and report["run_id"] == manifest["run_id"]
-    assert report["close_reports"][0]["phase"] == "close"  # the runner closed the engine
+    (close,) = report["close_reports"]
+    assert close["phase"] == "close"  # the runner closed the engine while the interrupt
+    # propagated; its traceback still held the engine's frame, and the observation says so.
+    assert close["engine_object_after_release"] == "alive"
+    assert any("still referenced" in e for e in close["errors"])
 
 
 def test_sampling_read_back_is_checked_before_any_output(tmp_path, protocol, ckpts) -> None:

@@ -18,11 +18,14 @@ before any arm runs or any output is written. Every engine:
 * **reports requested and observed settings separately**, reads back every per-request
   ``SamplingParams`` object, and gets a fresh ``load_id`` per load;
 * **echoes requests**: every vLLM output's prompt must be the prompt rendered for its request;
-* **closes in order**: the engine's own shutdown, then every reference to the engine is dropped,
-  then the process-level release (parallel state, garbage collection, CUDA cache), each step
-  recorded; this process's allocated and reserved PyTorch memory is recorded; a close report is
-  always kept, and a failed close keeps failing. An engine whose initialisation fails after
-  vLLM was created is shut down the same way before the error propagates.
+* **closes in order**: the engine's own shutdown, then the adapter's references are dropped,
+  then the process-level release (parallel state, garbage collection, an observation of
+  whether the vLLM object is gone, CUDA cache), each step recorded; a vLLM object that is still
+  referenced, or whose release cannot be observed, fails the close (Python object lifetime
+  only, not worker exit or device memory); this process's allocated and reserved PyTorch
+  memory is recorded; a close report is always kept, and a failed close keeps failing. An
+  engine whose initialisation fails after vLLM was created is shut down the same way before
+  the error propagates.
 
 The before/after hashes show snapshot consistency only (the files were the same when hashed at
 load and at close), which is why the storage itself must be read-only. Local checks cannot
@@ -43,6 +46,7 @@ import re
 import stat
 import traceback
 import uuid
+import weakref
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,10 +83,9 @@ _ENGINE_KEYS: dict[str, type] = {
 _DTYPES = ("bfloat16", "float16", "float32")  # "auto" would let vLLM choose
 # Descriptive engine keys: recorded with the protocol, not passed to vLLM; pinned strings.
 _ENGINE_DESCRIPTIVE = frozenset({"batching", "sharding", "hardware"})
-# Optional, explicit acceptance of a module ``__version__`` string that differs in format from
-# the package-metadata version pinned in ``version`` / ``transformers_version`` (for example a
-# local "+cu124" suffix). Without them both sources must equal the pin exactly; nothing is
-# stripped or normalised.
+# Optional, explicit acceptance of a module ``__version__`` string that is the package-metadata
+# pin plus a local-version suffix ("<pin>+cu124"). Without them both sources must equal the
+# pin exactly; nothing is stripped or normalised, and a different release is refused.
 _ENGINE_MODULE_VERSIONS = frozenset({"vllm_module_version", "transformers_module_version"})
 # "auto" reads generation_config.json from the (hashed) checkpoint directory; "vllm" uses vLLM's
 # own defaults. A path is refused: vLLM would read a file outside the hashed checkpoint.
@@ -258,6 +261,21 @@ def check_engine(arm: ArmSpec, backend: Any | None = None) -> dict[str, Any]:
         _typed(eng[key], kind, f"arm {arm.id}: engine.{key}")
     for key in sorted((_ENGINE_DESCRIPTIVE | _ENGINE_MODULE_VERSIONS) & set(eng)):
         _typed(eng[key], str, f"arm {arm.id}: engine.{key}")
+    for key, pin_key in (
+        ("vllm_module_version", "version"),
+        ("transformers_module_version", "transformers_version"),
+    ):
+        # Only the pin itself plus a local-version suffix ("<pin>+<local>") can be accepted:
+        # a different release under the module name is a mixed install, not a format.
+        if key in eng and (
+            not isinstance(eng.get(pin_key), str)
+            or not eng[key].startswith(eng[pin_key] + "+")
+            or len(eng[key]) == len(eng[pin_key]) + 1
+        ):
+            raise SettingsError(
+                f"arm {arm.id}: engine.{key} must be engine.{pin_key} plus a local version "
+                f"suffix ('{eng.get(pin_key)}+<local>')"
+            )
     if eng["dtype"] not in _DTYPES:
         raise SettingsError(f"arm {arm.id}: engine.dtype must be one of {_DTYPES}")
     if eng["generation_config"] not in _GENERATION_CONFIG:
@@ -689,16 +707,19 @@ class VllmBackend:
         name, fn = _engine_shutdown(llm)
         return [_step(name, fn, required=True)]
 
-    def release(self) -> list[dict[str, Any]]:
-        """Process-level teardown, run after the caller has dropped every reference to the
-        engine: parallel state, garbage collection, then the CUDA cache, so memory freed by
-        the collection is returned too. Never raises an ``Exception``; whether this frees the
-        GPU must be validated on the GPU host."""
+    def release(self, before_cache: Callable[[], Any] | None = None) -> list[dict[str, Any]]:
+        """Process-level teardown, run after the caller has dropped its references to the
+        engine: parallel state, garbage collection, ``before_cache`` (the caller's observation
+        of whether the engine object is gone), then the CUDA cache, so memory freed by the
+        collection is returned too. Never raises an ``Exception``; whether this frees the GPU
+        must be validated on the GPU host."""
         steps: list[dict[str, Any]] = []
         for name in ("destroy_model_parallel", "destroy_distributed_environment"):
             fn = getattr(self.parallel_state, name, None)
             steps.append(_step(f"parallel_state.{name}", fn if callable(fn) else None))
         steps.append(_step("gc.collect", gc.collect))
+        if before_cache is not None:
+            steps.append(_step("observe engine object", before_cache))
         cuda = getattr(self.torch, "cuda", None)
 
         def empty_cache() -> None:
@@ -768,7 +789,9 @@ class VllmEngine:
         self._close_state: str | None = None  # None, "ok" or "failed"
         self._close_error: str | None = None
         self._llm: Any = None
+        self._llm_ref: weakref.ref[Any] | None = None
         self._tokenizer: Any = None
+        self.engine_object_after_release: str | None = None
 
         sampling = check_inference(arm)
         kwargs = check_engine(arm, backend)
@@ -783,6 +806,8 @@ class VllmEngine:
             self._llm = backend.make_llm(
                 model=str(self.checkpoint_dir), tokenizer=str(self.checkpoint_dir), **kwargs
             )
+            self._llm_ref = _weak(self._llm)
+            self._llm_unrefable = self._llm_ref is None
             self._tokenizer = self._llm.get_tokenizer()
             observed_sampling = self._sampling_params(1, 0)[1]
             builtin = getattr(self._tokenizer, "chat_template", None)
@@ -864,8 +889,20 @@ class VllmEngine:
                     # The traceback's frames would otherwise keep the engine alive.
                     traceback.clear_frames(exc.__traceback__)
         del llm
+        created = self._llm_ref is not None or getattr(self, "_llm_unrefable", False)
+
+        def observe() -> None:
+            # Python object lifetime only (not worker exit or device memory).
+            if not created:
+                self.engine_object_after_release = "no_engine"
+            elif self._llm_ref is None:
+                self.engine_object_after_release = "not_observable"
+            else:
+                alive = self._llm_ref() is not None
+                self.engine_object_after_release = "alive" if alive else "released"
+
         try:
-            steps += self.backend.release()
+            steps += self.backend.release(before_cache=observe)
         except BaseException as exc:
             steps.append(
                 {
@@ -885,8 +922,16 @@ class VllmEngine:
         # Frames anywhere in the error's cause/context chain (for example inside the engine's
         # own methods, or an inner error vLLM re-raised) would otherwise keep the engine alive
         # through the release steps: their locals are cleared, the errors themselves are kept.
-        clear_exception_frames(exc)
+        # Best-effort only: it does not find references held by library objects (an error's
+        # attributes, exception-group members, frames reachable only through f_back); the
+        # observation below records whether the engine object actually went away.
+        pending: BaseException | None = None
+        try:
+            clear_exception_frames(exc)
+        except BaseException as clear_exc:  # never skip the teardown
+            pending = None if isinstance(clear_exc, Exception) else clear_exc
         steps, interrupted = self._teardown()
+        interrupted = interrupted or pending
         errors = step_failures(steps)
         self._close_state = "failed"
         self._close_error = _err(exc)
@@ -898,6 +943,8 @@ class VllmEngine:
             "shutdown_steps": steps,
             "errors": errors,
             "interrupted": interrupted is not None,
+            # Recorded only: a failed load aborts the run.
+            "engine_object_after_release": self.engine_object_after_release,
         }
         if self._reports is not None:
             self._reports.append(dict(self.close_report))
@@ -907,8 +954,15 @@ class VllmEngine:
             interrupted.__context__ = exc
             raise interrupted
         if errors:
-            # Ordinary cleanup failures are attached to the original error, which is re-raised.
-            exc.add_note(f"cleanup after this failed load also failed: {'; '.join(errors)}")
+            # Ordinary cleanup failures are attached to the original error, which is re-raised;
+            # if the error cannot take a note (a library replaced __notes__), the report keeps
+            # them and the original error is still the one raised.
+            try:
+                exc.add_note(f"cleanup after this failed load also failed: {'; '.join(errors)}")
+            except Exception:
+                self.close_report["note_not_attached"] = True
+                if self._reports is not None:
+                    self._reports[-1]["note_not_attached"] = True
 
     def describe(self) -> dict[str, Any]:
         return _copy(self._describe)
@@ -989,6 +1043,17 @@ class VllmEngine:
         steps, interrupted = self._teardown()
         report["shutdown_steps"] = steps
         errors += step_failures(steps)
+        report["engine_object_after_release"] = self.engine_object_after_release
+        if self.engine_object_after_release == "alive":
+            errors.append(
+                "the vLLM object is still referenced after release (Python object lifetime); "
+                "not loading the next arm"
+            )
+        elif self.engine_object_after_release in ("not_observable", None):
+            errors.append(
+                "release of the vLLM object is not observable (it cannot be weak-referenced, or "
+                "the observation did not run); not treated as released"
+            )
         report["errors"] = errors
         if interrupted is not None:
             # The engine shutdown was interrupted: the references are dropped and the release
@@ -1050,6 +1115,13 @@ class VllmEngine:
             raise cls(f"arm {self.arm.id}: close failed; not loading the next arm: {errors}")
         self._close_state = "ok"
         self._close_error = None
+
+
+def _weak(obj: Any) -> weakref.ref[Any] | None:
+    try:
+        return weakref.ref(obj)
+    except TypeError:
+        return None
 
 
 def _copy(value: Any) -> Any:
