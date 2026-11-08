@@ -31,15 +31,14 @@ import re
 import unicodedata
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from wsp_eval.dataset import Item, check_items, dataset_sha256
-from wsp_eval.hashing import sha256_json
+from wsp_eval.hashing import sha256_bytes, sha256_json
 
 from .grader import last_boxed
-from .provenance import sha256_path
 
 SHAPES = {"math500": "heldout", "math_train": "development"}
 NORMALIZATION = "NFKC, casefold, whitespace runs collapsed to one space, stripped"
@@ -61,6 +60,7 @@ class DatasetReport:
     split: str
     id_source: str
     n_source_rows: int
+    source_ids_sha256: str
     limit: int | None
     n_items: int
     ids_sha256: str
@@ -79,18 +79,18 @@ def ids_sha256(items: Sequence[Item]) -> str:
     return sha256_json(sorted(i.id for i in items))
 
 
-def _rows(path: Path) -> list[tuple[int, dict[str, Any]]]:
+def _rows(name: str, text: str) -> list[tuple[int, dict[str, Any]]]:
     rows = []
     # Split on "\n" only, like the harness: U+2028 and friends may occur inside JSON strings.
-    for n, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+    for n, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise DatasetLoadError(f"{path.name} line {n}: not valid JSON") from exc
+            raise DatasetLoadError(f"{name} line {n}: not valid JSON") from exc
         if not isinstance(row, dict):
-            raise DatasetLoadError(f"{path.name} line {n}: not an object")
+            raise DatasetLoadError(f"{name} line {n}: not an object")
         rows.append((n, row))
     return rows
 
@@ -112,9 +112,10 @@ def load(
     expected_ids_sha256: str | None = None,
     limit: int | None = None,
 ) -> tuple[list[Item], DatasetReport]:
-    """Load and validate the whole of ``path``; then ``limit`` keeps the first ``limit`` items in
-    file order (the smoke run's selection, recorded in the report). ``expected_count`` and
-    ``expected_ids_sha256`` refer to the whole file."""
+    """Load and validate the whole of ``path`` from one byte snapshot (the hash and the parsed
+    rows come from the same bytes); then ``limit`` keeps the first ``limit`` items in file order
+    (see :func:`select`). ``expected_count`` and ``expected_ids_sha256`` refer to the whole
+    file. An empty file is refused."""
     if shape not in SHAPES:
         raise DatasetLoadError(f"shape must be one of {sorted(SHAPES)}")
     if split != SHAPES[shape]:
@@ -124,10 +125,17 @@ def load(
     if limit is not None and (type(limit) is not int or limit < 1):
         raise DatasetLoadError("limit must be a positive integer")
     path = Path(path)
-    source = sha256_path(path)
+    data = path.read_bytes()
+    source = sha256_bytes(data)
     if expected_source_sha256 is not None and source != expected_source_sha256:
         raise DatasetLoadError(f"{path.name} SHA-256 differs from the registered value")
-    rows = _rows(path)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DatasetLoadError(f"{path.name} is not UTF-8") from exc
+    rows = _rows(path.name, text)
+    if not rows:
+        raise DatasetLoadError(f"{path.name} contains no items")
     items: list[Item] = []
     id_sources: set[str] = set()
     for n, row in rows:
@@ -171,23 +179,40 @@ def load(
     ids = ids_sha256(items)
     if expected_ids_sha256 is not None and ids != expected_ids_sha256:
         raise DatasetLoadError("item ID set differs from the registered ids_sha256")
-    n_source = len(items)
-    if limit is not None:
-        items = items[:limit]
     report = DatasetReport(
         source_file=path.name,
         source_sha256=source,
         shape=shape,
         split=split,
-        id_source=next(iter(id_sources), "none"),
-        n_source_rows=n_source,
-        limit=limit,
+        id_source=next(iter(id_sources)),
+        n_source_rows=len(items),
+        source_ids_sha256=ids,
+        limit=None,
         n_items=len(items),
-        ids_sha256=ids_sha256(items),
+        ids_sha256=ids,
         items_sha256=dataset_sha256(items),
         checks=checks,
     )
-    return items, report
+    return select(items, report, limit)
+
+
+def select(
+    items: Sequence[Item], report: DatasetReport, limit: int | None
+) -> tuple[list[Item], DatasetReport]:
+    """Keep the first ``limit`` items in file order (all if ``None``). The report keeps the
+    whole file's row count and ID-set hash and records the selection's."""
+    if limit is not None and (type(limit) is not int or limit < 1):
+        raise DatasetLoadError("limit must be a positive integer")
+    if report.limit is not None:
+        raise DatasetLoadError("items were already limited")
+    chosen = list(items) if limit is None else list(items)[:limit]
+    return chosen, replace(
+        report,
+        limit=limit,
+        n_items=len(chosen),
+        ids_sha256=ids_sha256(chosen),
+        items_sha256=dataset_sha256(chosen),
+    )
 
 
 def _duplicate_problems(items: Sequence[Item]) -> list[list[str]]:

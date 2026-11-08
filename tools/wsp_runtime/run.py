@@ -2,35 +2,40 @@
 
     python tools/wsp_runtime/run.py --protocol P.json \\
         --source /research/data/math_train.jsonl --shape math_train --limit 20 \\
-        --leakage-reference math500=/research/data/math500_test.jsonl \\
+        --leakage-reference math500=<sha256>=/research/data/math500_test.jsonl \\
         --checkpoint base=/research/ckpt/base --checkpoint edited=/research/ckpt/edited \\
         --checkpoint base_reload=/research/ckpt/base --split development \\
         --operator op1 --purpose smoke --output /research/runs/RUN [--keep-outputs]
 
-The items come from a local source file through the C3 loader (``--source`` / ``--shape``),
-which validates the whole file and checks it against every ``--leakage-reference`` (a source
-file of the other split): any problem whose normalised text also occurs there is refused,
-whatever the answers say. Every arm needs exactly one ``--checkpoint ARM=DIR`` (a local,
-read-only directory; nothing is downloaded). The protocol must declare ``execution.order:
-per_arm_sequential`` and complete, pinned inference and engine settings.
+Everything that can be checked without a GPU is checked before any arm runs or any output is
+written: the protocol, the whole source file (``--source`` / ``--shape``, validated before
+``--limit``), every ``--leakage-reference`` (a nonempty source file of the other split, given
+with its registered SHA-256; any problem whose normalised text also occurs there is refused,
+whatever the answers say), the grader's dependency versions, and for every arm its settings,
+read-only storage and loaded-file inventory. Every arm needs exactly one ``--checkpoint ARM=DIR``
+(a local directory on a read-only mount; nothing is downloaded).
 
 Held-out execution is refused while the grader is unreviewed (R9), and needs the registered
-source and ID-set hashes. After the run, ``runtime_report.json`` is written next to the manifest:
-dataset and leakage provenance, grader dependency versions and every engine's close report, with
-the manifest's SHA-256 (the manifest does not cover this file; this file names the manifest).
-The report is supplementary evidence: a decision relying on it must verify a separately
-protected identifier for it, since naming the manifest does not protect the report itself.
+source and ID-set hashes. After the run, ``runtime_report.json`` is written next to the
+manifest, only if the manifest there carries this invocation's run ID. It holds the dataset and
+leakage provenance, grader dependency versions and every engine's close report, plus the
+manifest's SHA-256, and its own SHA-256 is printed in the summary so it can be recorded
+externally. The report is **supplementary evidence**: printing its hash does not protect it,
+and a decision relying on it must verify a separately protected record of that hash.
 
 This command needs vLLM, transformers, torch and math-verify, which are installed only on the
-isolated host. It has been exercised only with stub engines (``tests/test_wsp_runtime.py``).
-Exit codes: 0 ok, 1 run or validation failure (including any error record), 2 usage error.
+isolated host. It has been exercised only with stand-in modules (``tests/test_wsp_runtime.py``).
+Exit codes: 0 ok, 1 run or validation failure (including any error record or a report that
+could not be written), 2 usage error.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import uuid
 from collections.abc import Callable, Sequence
 from importlib import metadata
 from pathlib import Path
@@ -41,15 +46,22 @@ sys.path.insert(0, str(HERE.parent / "wsp"))
 sys.path.insert(0, str(HERE))
 
 from wsp_eval.dataset import DatasetError  # noqa: E402
-from wsp_eval.hashing import sha256_file  # noqa: E402
+from wsp_eval.hashing import sha256_bytes, sha256_file  # noqa: E402
 from wsp_eval.protocol import ProtocolError, load_protocol  # noqa: E402
 from wsp_eval.runner import RunError, run_paired  # noqa: E402
 from wsp_runtime import RUNTIME_VERSION, datasets  # noqa: E402
 from wsp_runtime.grader import MathQAGrader, MathVerifyBackend, check_dependencies  # noqa: E402
 from wsp_runtime.provenance import runtime_code_sha256  # noqa: E402
-from wsp_runtime.vllm_adapter import VllmBackend, arm_loader  # noqa: E402
+from wsp_runtime.vllm_adapter import (  # noqa: E402
+    ProvenanceError,
+    VllmBackend,
+    arm_loader,
+    preflight,
+    verify_storage,
+)
 
 REPORT_FILE = "runtime_report.json"
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _pairs(values: Sequence[str], flag: str) -> list[tuple[str, Path]]:
@@ -59,6 +71,19 @@ def _pairs(values: Sequence[str], flag: str) -> list[tuple[str, Path]]:
         if not sep or not key or not path:
             raise ValueError(f"{flag} must be KEY=PATH (got {value!r})")
         out.append((key, Path(path)))
+    return out
+
+
+def _references(values: Sequence[str]) -> list[tuple[str, str, Path]]:
+    out = []
+    for value in values:
+        parts = value.split("=", 2)
+        if len(parts) != 3 or not all(parts) or not _SHA256.fullmatch(parts[1]):
+            raise ValueError(
+                f"--leakage-reference must be SHAPE=SHA256=PATH with a registered SHA-256 "
+                f"(got {value!r})"
+            )
+        out.append((parts[0], parts[1], Path(parts[2])))
     return out
 
 
@@ -79,6 +104,7 @@ def run(
     backend_factory: Callable[[], Any] = VllmBackend.load,
     verify_backend_factory: Callable[[], Any] = MathVerifyBackend.load,
     dependency_lookup: Callable[[str], str] = metadata.version,
+    storage_check: Callable[[Path], dict] = verify_storage,
 ) -> dict[str, Any]:
     p = argparse.ArgumentParser(prog="wsp-runtime-run", description=__doc__.split("\n\n")[0])
     p.add_argument("--protocol", type=Path, required=True)
@@ -92,8 +118,8 @@ def run(
         "--leakage-reference",
         action="append",
         default=[],
-        metavar="SHAPE=PATH",
-        help="source file of the other split to check against (at least one)",
+        metavar="SHAPE=SHA256=PATH",
+        help="source file of the other split, with its registered SHA-256 (at least one)",
     )
     p.add_argument("--checkpoint", action="append", default=[], metavar="ARM=DIR")
     p.add_argument("--split", choices=("development", "heldout"), required=True)
@@ -129,35 +155,41 @@ def run(
                 "held-out execution needs --expected-source-sha256 and --expected-ids-sha256"
             )
 
-    items, dataset_report = datasets.load(
+    # Dataset: the whole source file, validated and leak-checked before the limit is applied.
+    source_items, source_report = datasets.load(
         args.source,
         shape=args.shape,
         split=args.split,
         expected_count=args.expected_count,
         expected_source_sha256=args.expected_source_sha256,
         expected_ids_sha256=args.expected_ids_sha256,
-        limit=args.limit,
     )
-    references = _pairs(args.leakage_reference, "--leakage-reference")
+    references = _references(args.leakage_reference)
     if not references:
         raise ValueError("at least one --leakage-reference (the other split's source) is required")
     ref_items: list[Any] = []
     ref_reports = []
-    for shape, path in references:
+    for shape, sha, path in references:
         if shape not in datasets.SHAPES:
             raise ValueError(f"--leakage-reference shape must be one of {sorted(datasets.SHAPES)}")
         ref_split = datasets.SHAPES[shape]
         if ref_split == args.split:
             raise ValueError(f"--leakage-reference {shape} is the run's own split ({ref_split})")
-        loaded, ref_report = datasets.load(path, shape=shape, split=ref_split)
+        loaded, ref_report = datasets.load(
+            path, shape=shape, split=ref_split, expected_source_sha256=sha
+        )
         ref_items += loaded
         ref_reports.append(ref_report.as_dict())
-    leakage = datasets.check_disjoint(items, ref_items)
+    leakage = datasets.check_disjoint(source_items, ref_items)
+    items, dataset_report = datasets.select(source_items, source_report, args.limit)
     grader_dependencies = check_dependencies(
         protocol.grader.get("dependencies"), lookup=dependency_lookup
     )
 
+    # Every arm's settings, storage and inventory, before any arm runs.
     dirs = _checkpoints(args.checkpoint, [a.id for a in protocol.arms])
+    preflights = [preflight(a, dirs[a.id], storage_check=storage_check) for a in protocol.arms]
+
     reports: list[dict[str, Any]] = []
     loaders = {
         a.id: arm_loader(
@@ -166,11 +198,14 @@ def run(
             backend_factory,
             max_parent_memory_after_close=args.max_parent_torch_memory_after_close,
             reports=reports,
+            storage_check=storage_check,
         )
         for a in protocol.arms
     }
     grader = MathQAGrader(verify_backend_factory())
+    run_id = f"wsp-{uuid.uuid4().hex[:12]}"
     runtime_report: dict[str, Any] = {
+        "run_id": run_id,
         "runtime_version": RUNTIME_VERSION,
         "runtime_code_sha256": runtime_code_sha256(),
         "dataset": dataset_report.as_dict(),
@@ -182,26 +217,29 @@ def run(
             "reviewed": grader.reviewed,
             "dependencies": grader_dependencies,
         },
+        "preflight": preflights,
         "close_reports": reports,
     }
-    summary: dict[str, Any] = {"close_reports": reports}
+    out = args.output.expanduser()
+    summary: dict[str, Any] = {"run_id": run_id, "close_reports": reports}
     try:
         result = run_paired(
             protocol,
             items,
             None,
             grader,
-            args.output,
+            out,
             loaders=loaders,
             split=args.split,
             purpose=args.purpose,
             operator=args.operator,
             heldout_authorized_by=args.heldout_authorized_by,
             keep_outputs=args.keep_outputs,
+            run_id=run_id,
         )
     except Exception as exc:  # interrupts propagate; the runner already wrote the manifest
         summary.update(run_status="aborted", error=f"{type(exc).__name__}: {exc}"[:300])
-        summary["runtime_report"] = _write_report(args.output, runtime_report, dataset_report)
+        _report_into(summary, out, run_id, runtime_report, dataset_report)
         raise _Aborted(summary) from exc
     counts = result.manifest["counts"]
     summary.update(
@@ -209,27 +247,55 @@ def run(
         run_dir=str(result.out_dir),
         counts=counts,
         error_records=counts.get("error", 0),
-        runtime_report=_write_report(result.out_dir, runtime_report, dataset_report),
     )
+    _report_into(summary, result.out_dir, run_id, runtime_report, dataset_report)
     return summary
 
 
-def _write_report(out: Path, report: dict[str, Any], dataset_report: Any) -> str | None:
+def _report_into(
+    summary: dict[str, Any],
+    out: Path,
+    run_id: str,
+    report: dict[str, Any],
+    dataset_report: Any,
+) -> None:
+    """Write the supplementary report and record the outcome in ``summary``; never raises, so
+    a failure to write it cannot replace the run's own failure."""
+    try:
+        summary.update(_write_report(out, run_id, report, dataset_report))
+    except Exception as exc:
+        summary.update(runtime_report=None, runtime_report_error=_short(exc))
+
+
+def _short(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
+def _write_report(
+    out: Path, run_id: str, report: dict[str, Any], dataset_report: Any
+) -> dict[str, Any]:
+    out = out.expanduser().resolve()
     manifest_path = out / "manifest.json"
     if not manifest_path.is_file():
-        return None  # the run failed before the runner wrote anything
+        return {"runtime_report": None, "runtime_report_skipped": "no manifest from this run"}
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    report = {
+    if manifest.get("run_id") != run_id:
+        # Another run's directory (for example a rerun into a used --output): never touch it.
+        return {
+            "runtime_report": None,
+            "runtime_report_skipped": "the manifest there belongs to another run",
+        }
+    body = {
         **report,
         "manifest_sha256": sha256_file(manifest_path),
         "manifest_items_sha256_matches": (
             manifest.get("dataset", {}).get("items_file_sha256") == dataset_report.items_sha256
         ),
     }
-    with (out / REPORT_FILE).open("x", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2, sort_keys=True)
-        fh.write("\n")
-    return REPORT_FILE
+    data = (json.dumps(body, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with (out / REPORT_FILE).open("xb") as fh:
+        fh.write(data)
+    return {"runtime_report": REPORT_FILE, "runtime_report_sha256": sha256_bytes(data)}
 
 
 class _Aborted(Exception):
@@ -244,12 +310,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except _Aborted as exc:
         print(json.dumps(exc.summary, indent=2, sort_keys=True))
         return 1
-    except (ProtocolError, DatasetError, RunError, ValueError, OSError) as exc:
+    except (ProtocolError, DatasetError, RunError, ProvenanceError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(summary, indent=2, sort_keys=True))
-    if summary["error_records"]:
+    if summary.get("error_records"):
         print(f"error: {summary['error_records']} records are errors", file=sys.stderr)
+        return 1
+    if summary.get("runtime_report_error"):
+        print(
+            f"error: runtime report not written: {summary['runtime_report_error']}", file=sys.stderr
+        )
         return 1
     return 0
 

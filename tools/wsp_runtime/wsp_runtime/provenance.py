@@ -24,8 +24,8 @@ def git_blob_sha1(data: bytes) -> str:
 def hash_tree(root: Path) -> dict[str, str]:
     """SHA-256 of every regular file under ``root``, keyed by POSIX path relative to ``root``.
 
-    Symbolic links are refused: a checkpoint directory whose files point elsewhere could be
-    changed without changing anything this function reads.
+    Symbolic links and other non-regular files are refused: a checkpoint directory whose
+    files point elsewhere could be changed without changing anything this function reads.
     """
     root = Path(root)
     if not root.is_dir():
@@ -37,6 +37,9 @@ def hash_tree(root: Path) -> dict[str, str]:
             raise ValueError(f"{rel} is a symbolic link; copy the real file into the checkpoint")
         if path.is_file():
             out[rel] = sha256_path(path)
+        elif not path.is_dir():
+            # A FIFO, socket or device would be neither hashed nor counted as a file.
+            raise ValueError(f"{rel} is not a regular file or directory")
     if not out:
         raise ValueError(f"checkpoint directory {root} contains no files")
     return out

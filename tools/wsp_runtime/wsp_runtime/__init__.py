@@ -13,8 +13,8 @@ the package can be imported and tested (with stub engines and synthetic strings)
 libraries are not installed. Nothing here downloads a model or dataset: the adapters accept
 local paths only and force the Hugging Face libraries into offline mode.
 
-Status 2026-11-08: tested with stub engines only. No model has been loaded and no inference
+Status 2026-11-08: tested with stand-in modules only. No model has been loaded and no inference
 has run. See ``docs/wsp/runtime.md`` for what still needs a real GPU.
 """
 
-RUNTIME_VERSION = "0.2.0"
+RUNTIME_VERSION = "0.3.0"

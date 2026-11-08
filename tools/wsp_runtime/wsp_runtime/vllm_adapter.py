@@ -1,34 +1,33 @@
 """C1: a vLLM inference engine for ``per_arm_sequential`` WSP runs.
 
 :class:`VllmEngine` implements the harness's ``BatchGenerator`` interface for one arm, and
-:func:`arm_loader` returns the ``ArmLoader`` the runner calls once per arm. Every engine:
+:func:`arm_loader` returns the ``ArmLoader`` the runner calls once per arm. :func:`preflight`
+runs every check that needs no backend (settings, storage, loaded-file inventory) so the CLI can
+refuse a bad arm before any arm runs. Every engine:
 
 * **refuses incomplete or mistyped settings**: every inference key the engine uses must be
   present with the right type, every engine key must be known, pinned and typed, and the
   installed vLLM and transformers versions must equal the protocol's;
-* **checks provenance before loading**: hashes every file in the checkpoint directory; every
-  loadable file must be registered in the protocol's ``checkpoint.loadable_files_sha256`` (an
-  unregistered file is refused, because vLLM might load it), the weights file must match
-  ``weights_sha256_lfs``, ``chat_template.jinja`` must match the protocol's git blob id, and the
-  checkpoint must be read-only for this process;
+* **checks storage and provenance before loading**: the checkpoint must sit on a read-only
+  mount with no replaceable parent directory (:func:`verify_storage`); every file is hashed and
+  every loadable file must be registered in ``checkpoint.loadable_files_sha256``; the weights
+  file must match ``weights_sha256_lfs`` and ``chat_template.jinja`` the protocol's git blob id;
 * **renders with the registered template**: the bytes of ``chat_template.jinja`` that were
   checked are passed explicitly to ``apply_chat_template``;
-* **reports requested and observed settings separately** (``describe()["requested"]`` and
-  ``describe()["observed"]``), with a fresh ``load_id`` per load;
-* **echoes requests**: each ``BatchItem`` carries the request it answers, and every vLLM
-  output's prompt must be the prompt rendered for that request (a mismatch fails the batch);
-* **closes step by step**: every shutdown step is attempted and its failure kept, a close
-  report is always recorded, and a close that failed is never reported as a success later. An
-  engine whose initialisation fails after vLLM was created is shut down before the error
-  propagates.
+* **reports requested and observed settings separately**, reads back every per-request
+  ``SamplingParams`` object, and gets a fresh ``load_id`` per load;
+* **echoes requests**: every vLLM output's prompt must be the prompt rendered for its request;
+* **closes step by step**: every shutdown step is attempted and recorded, a close report is
+  always kept, and a failed close keeps failing. An engine whose initialisation fails after vLLM
+  was created is shut down before the error propagates.
 
-The before/after hashes show that the checkpoint was the same at load and at close (snapshot
-consistency); they do not show what vLLM read in between, which is why the files must also be
-protected (read-only) during the run. All of this is exercised with a stub backend. Whether
-vLLM's shutdown releases GPU memory, whether its worker processes exit, which files it opens
-and the effective defaults it applies must be validated on the isolated GPU host
-(``docs/wsp/runtime.md``). vLLM, transformers and torch are imported only by
-:meth:`VllmBackend.load`, never at module import.
+The before/after hashes show snapshot consistency only (the files were the same when hashed at
+load and at close), which is why the storage itself must be read-only. Local checks cannot
+establish everything about the storage; the operator's verification stays explicit (see
+:data:`STORAGE_OPERATOR_CHECKS`). The telemetry variables and the shutdown hook names are
+assumptions about vLLM that depend on its version and must be checked against the pinned
+release. All of this is exercised with stand-in vLLM and torch objects; vLLM, transformers and
+torch are imported only by :meth:`VllmBackend.load`, never at module import.
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ import importlib
 import multiprocessing
 import os
 import re
+import stat
 import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -72,25 +72,58 @@ _ENGINE_KEYS: dict[str, type] = {
     "tensor_parallel_size": int,
     "generation_config": str,
 }
-# Descriptive engine keys: recorded with the protocol, not passed to vLLM; strings if present.
+_DTYPES = ("bfloat16", "float16", "float32")  # "auto" would let vLLM choose
+# Descriptive engine keys: recorded with the protocol, not passed to vLLM; pinned strings.
 _ENGINE_DESCRIPTIVE = frozenset({"batching", "sharding", "hardware"})
 # "auto" reads generation_config.json from the (hashed) checkpoint directory; "vllm" uses vLLM's
 # own defaults. A path is refused: vLLM would read a file outside the hashed checkpoint.
 _GENERATION_CONFIG = ("auto", "vllm")
+# vllm.LLM arguments this adapter does not set; vLLM chooses them (by version and hardware) and
+# their effective values must be read back on the GPU host before a confirmatory run.
+ENGINE_ARGS_LEFT_AT_DEFAULTS = (
+    "max_num_seqs",
+    "max_num_batched_tokens",
+    "enable_prefix_caching",
+    "enforce_eager",
+    "compilation_config",
+    "kv_cache_dtype",
+    "attention backend (VLLM_ATTENTION_BACKEND)",
+    "scheduler and chunked-prefill settings",
+)
 # Repository files that inference does not read, at the checkpoint root only. They are hashed
-# and reported apart from the loadable files; anything else must be registered.
+# and reported apart from the loadable files unless the protocol registers them as loadable.
 _DOC_FILES = re.compile(r"(?i)^(?:(?:readme|license|notice)(?:\.(?:md|txt|rst))?|\.gitattributes)$")
 _TEMPLATE_FILE = "chat_template.jinja"
 _BLOB = re.compile(r"git blob ([0-9a-f]{40})")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_OFFLINE_VARS = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
+# Offline and no-telemetry variables. The Hugging Face names are documented by those libraries;
+# VLLM_NO_USAGE_STATS / DO_NOT_TRACK are vLLM's usage-stats opt-outs as documented, an
+# assumption to check against the pinned vLLM version.
+_FORCED_ENV = (
+    "HF_HUB_OFFLINE",
+    "TRANSFORMERS_OFFLINE",
+    "HF_DATASETS_OFFLINE",
+    "VLLM_NO_USAGE_STATS",
+    "DO_NOT_TRACK",
+)
 _RECORDED_ENV = ("VLLM_", "HF_", "TRANSFORMERS_", "TORCH", "PYTORCH_", "CUDA_", "NCCL_")
 _SECRET_ENV = re.compile(r"(?i)token|key|secret|password|credential")
 _MAX_ERROR = 300
 
+STORAGE_OPERATOR_CHECKS = (
+    "the read-only mount is enforced by the host (mount options or an immutable image), not "
+    "only reported by statvfs inside a container",
+    "no other mount, bind mount or overlay exposes the same storage writably, to this or any "
+    "other user or process",
+    "no ACL, group membership or privileged process outside this one can write the checkpoint "
+    "or its parent directories",
+    "the files on the mount are the ones fetched and registered (re-hashed after mounting)",
+)
+
 
 class ProvenanceError(RuntimeError):
-    """The files about to be loaded are not the ones the protocol registered."""
+    """The files about to be loaded are not the ones the protocol registered, or the storage
+    they are on is not read-only."""
 
 
 class SettingsError(ValueError):
@@ -119,15 +152,17 @@ def _err(exc: BaseException) -> str:
 
 
 def force_offline(environ: MutableMapping[str, str] | None = None) -> dict[str, str]:
-    """Set the Hugging Face libraries to offline mode. A variable already set to anything but
-    ``1`` is refused rather than overridden, so an online operator environment is visible."""
+    """Set the offline and no-telemetry variables to ``1``. A variable already set to anything
+    else is refused rather than overridden, so a conflicting operator environment is visible.
+    Whether vLLM honours these names is version-dependent and must be checked on the pinned
+    release (for example with egress blocked and logged)."""
     environ = os.environ if environ is None else environ
-    for var in _OFFLINE_VARS:
+    for var in _FORCED_ENV:
         current = environ.get(var)
         if current is not None and current != "1":
             raise SettingsError(f"{var}={current!r} is set; the runtime runs offline only")
         environ[var] = "1"
-    return {var: environ[var] for var in _OFFLINE_VARS}
+    return {var: environ[var] for var in _FORCED_ENV}
 
 
 def process_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -137,7 +172,7 @@ def process_environment(environ: Mapping[str, str] | None = None) -> dict[str, s
     return {
         k: ("<redacted>" if _SECRET_ENV.search(k) else v)
         for k, v in sorted(environ.items())
-        if k.startswith(_RECORDED_ENV)
+        if k.startswith(_RECORDED_ENV) or k == "DO_NOT_TRACK"
     }
 
 
@@ -145,7 +180,7 @@ def _typed(value: Any, kind: type, name: str) -> Any:
     ok = type(value) is kind or (kind is float and type(value) is int)
     if not ok:
         raise SettingsError(f"{name} must be set to a {kind.__name__} (got {value!r})")
-    if kind is str and (not value.strip() or value.startswith("REPLACE")):
+    if kind is str and (not value.strip() or value.strip().upper().startswith("REPLACE")):
         raise SettingsError(f"{name} must be pinned in the protocol (got {value!r})")
     return value
 
@@ -177,33 +212,24 @@ def check_inference(arm: ArmSpec) -> dict[str, Any]:
     return {k: inf[k] for k in _SAMPLING_KEYS}
 
 
-def check_engine(arm: ArmSpec, backend: Any) -> dict[str, Any]:
-    """The arm's engine settings, complete, typed and matching the installed versions; returns
-    the keyword arguments for ``vllm.LLM`` (without the model and tokenizer paths)."""
+def check_engine(arm: ArmSpec, backend: Any | None = None) -> dict[str, Any]:
+    """The arm's engine settings, complete and typed; with a ``backend``, also matching the
+    installed versions. Returns the keyword arguments for ``vllm.LLM`` (without paths)."""
     eng = arm.engine
     unknown = sorted(set(eng) - set(_ENGINE_KEYS) - _ENGINE_DESCRIPTIVE)
     if unknown:
         raise SettingsError(f"arm {arm.id}: engine keys not understood: {unknown}")
-    if eng.get("name") != backend.engine:
+    if eng.get("name") != "vllm" or (backend is not None and backend.engine != "vllm"):
         raise SettingsError(f"arm {arm.id}: protocol engine is {eng.get('name')!r}")
     missing = sorted(set(_ENGINE_KEYS) - set(eng))
     if missing:
         raise SettingsError(f"arm {arm.id}: engine keys missing: {missing}")
     for key, kind in _ENGINE_KEYS.items():
         _typed(eng[key], kind, f"arm {arm.id}: engine.{key}")
-    for key in _ENGINE_DESCRIPTIVE & set(eng):
-        if not isinstance(eng[key], str):
-            raise SettingsError(f"arm {arm.id}: engine.{key} must be a string")
-    if backend.version != eng["version"]:
-        raise ProvenanceError(
-            f"arm {arm.id}: engine version {backend.version!r} is not the protocol's "
-            f"{eng['version']!r}"
-        )
-    if backend.transformers_version != eng["transformers_version"]:
-        raise ProvenanceError(
-            f"arm {arm.id}: transformers {backend.transformers_version!r} is not the protocol's "
-            f"{eng['transformers_version']!r}"
-        )
+    for key in sorted(_ENGINE_DESCRIPTIVE & set(eng)):
+        _typed(eng[key], str, f"arm {arm.id}: engine.{key}")
+    if eng["dtype"] not in _DTYPES:
+        raise SettingsError(f"arm {arm.id}: engine.dtype must be one of {_DTYPES}")
     if eng["generation_config"] not in _GENERATION_CONFIG:
         raise SettingsError(
             f"arm {arm.id}: engine.generation_config must be one of {_GENERATION_CONFIG}; a "
@@ -215,6 +241,17 @@ def check_engine(arm: ArmSpec, backend: Any) -> dict[str, Any]:
         raise SettingsError(f"arm {arm.id}: tensor_parallel_size and max_model_len must be >= 1")
     if arm.inference.get("max_tokens", 0) >= eng["max_model_len"]:
         raise SettingsError(f"arm {arm.id}: inference.max_tokens must be below max_model_len")
+    if backend is not None:
+        if backend.version != eng["version"]:
+            raise ProvenanceError(
+                f"arm {arm.id}: engine version {backend.version!r} is not the protocol's "
+                f"{eng['version']!r}"
+            )
+        if backend.transformers_version != eng["transformers_version"]:
+            raise ProvenanceError(
+                f"arm {arm.id}: transformers {backend.transformers_version!r} is not the "
+                f"protocol's {eng['transformers_version']!r}"
+            )
     return {
         "dtype": eng["dtype"],
         "max_model_len": eng["max_model_len"],
@@ -226,6 +263,172 @@ def check_engine(arm: ArmSpec, backend: Any) -> dict[str, Any]:
         "trust_remote_code": False,
         "load_format": "safetensors",
     }
+
+
+# --- storage --------------------------------------------------------------------------------
+
+
+def _group_or_other_writable(mode: int) -> bool:
+    # A sticky directory (like /tmp) lets others create entries but not rename or remove ours.
+    return bool(mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (
+        stat.S_ISDIR(mode) and mode & stat.S_ISVTX
+    )
+
+
+def verify_storage(
+    path: Path,
+    *,
+    statvfs: Callable[[Any], Any] = os.statvfs,
+    access: Callable[[Any, int], bool] = os.access,
+    lstat: Callable[[Any], os.stat_result] = os.lstat,
+) -> dict[str, Any]:
+    """Local checks that the checkpoint cannot be changed or replaced during the run.
+
+    Required (a failure raises :class:`ProvenanceError`):
+
+    * the path has no symbolic-link component and the checkpoint contains no symbolic link;
+    * every directory of the checkpoint reports a read-only mount (``statvfs`` ``ST_RDONLY``);
+    * no entry of the checkpoint is writable by this process (``access``, which also applies
+      ACLs for this process's identity);
+    * no parent directory, up to ``/``, is writable by this process or carries a group/other
+      write bit (sticky directories excepted), so the checkpoint cannot be renamed away and
+      replaced by another directory.
+
+    Recorded, not required: mode bits that would allow writing on a writable mount (the mount,
+    not the mode bits, is relied on). Not established by any local check: see
+    :data:`STORAGE_OPERATOR_CHECKS`, which the operator must verify and record.
+    """
+    given = Path(path).absolute()
+    resolved = given.resolve(strict=True)
+    problems: list[str] = []
+    if resolved != given:
+        problems.append(f"the checkpoint path goes through a symbolic link ({given} -> {resolved})")
+    entries = [resolved, *sorted(resolved.rglob("*"))]
+
+    def rel(p: Path) -> str:
+        return p.relative_to(resolved).as_posix() or "."
+
+    links = [rel(p) for p in entries if p.is_symlink()]
+    if links:
+        problems.append(f"contains symbolic links: {links[:5]}")
+    entries = [p for p in entries if not p.is_symlink()]
+    dirs = [p for p in entries if p.is_dir()]
+    rw_mount = [rel(d) for d in dirs if not statvfs(d).f_flag & os.ST_RDONLY]
+    if rw_mount:
+        problems.append(f"not on a read-only mount: {rw_mount[:5]}")
+    writable = [rel(p) for p in entries if access(p, os.W_OK)]
+    if writable:
+        problems.append(f"writable by this process: {writable[:5]}")
+    parents = [
+        str(a)
+        for a in resolved.parents
+        if access(a, os.W_OK) or _group_or_other_writable(lstat(a).st_mode)
+    ]
+    if parents:
+        problems.append(f"replaceable parent directories (writable): {parents[:5]}")
+    mode_bits = [rel(p) for p in entries if lstat(p).st_mode & 0o222]
+    report = {
+        "path": str(resolved),
+        "read_only_mount": not rw_mount,
+        "writable_by_process": writable[:20],
+        "replaceable_parents": parents[:20],
+        "entries_with_write_mode_bits": mode_bits[:20],
+        "not_established_locally": list(STORAGE_OPERATOR_CHECKS),
+    }
+    if problems:
+        raise ProvenanceError(
+            "the checkpoint must be on a read-only mount with no replaceable parent: "
+            + "; ".join(problems)
+        )
+    return report
+
+
+# --- loaded-file inventory ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CheckpointSnapshot:
+    path: Path
+    loaded: dict[str, str]
+    other: dict[str, str]
+    template: str
+    storage: dict[str, Any]
+
+
+def inspect_checkpoint(
+    arm: ArmSpec, checkpoint_dir: Path, *, storage_check: Callable[[Path], dict] = verify_storage
+) -> CheckpointSnapshot:
+    """Storage check, then hash the directory and compare it with the protocol's registration.
+    Needs no backend; run by :func:`preflight` before any arm runs and again at every load."""
+    storage = storage_check(Path(checkpoint_dir))
+    root = Path(storage["path"])
+    tree = hash_tree(root)
+    ckpt, arm_id = arm.checkpoint, arm.id
+    weights, digest = ckpt.get("weights_file"), ckpt.get("weights_sha256_lfs")
+    registered = ckpt.get("loadable_files_sha256")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ProvenanceError(f"arm {arm_id}: checkpoint.weights_sha256_lfs must be registered")
+    if not (
+        isinstance(registered, dict)
+        and registered
+        and all(isinstance(v, str) and _SHA256.fullmatch(v) for v in registered.values())
+    ):
+        raise ProvenanceError(
+            f"arm {arm_id}: checkpoint.loadable_files_sha256 must map every loadable file "
+            "to its SHA-256 (record it after the approved fetch)"
+        )
+    if not isinstance(weights, str) or registered.get(weights) != digest:
+        raise ProvenanceError(
+            f"arm {arm_id}: loadable_files_sha256 must list weights_file with weights_sha256_lfs"
+        )
+    if _TEMPLATE_FILE not in registered:
+        raise ProvenanceError(f"arm {arm_id}: loadable_files_sha256 must list {_TEMPLATE_FILE}")
+    # Root-level documentation is not loadable unless the protocol registers it as such.
+    loaded = {
+        k: v
+        for k, v in tree.items()
+        if k in registered or not ("/" not in k and _DOC_FILES.match(k))
+    }
+    other = {k: v for k, v in tree.items() if k not in loaded}
+    if weights not in loaded:
+        raise ProvenanceError(f"arm {arm_id}: registered weights file {weights!r} missing")
+    if loaded[weights] != digest:
+        raise ProvenanceError(f"arm {arm_id}: {weights} SHA-256 differs from the registered value")
+    blob = _BLOB.search(arm.inference.get("chat_template") or "")
+    path = root / _TEMPLATE_FILE
+    data = path.read_bytes() if path.is_file() else None
+    if data is None or blob is None or git_blob_sha1(data) != blob.group(1):
+        raise ProvenanceError(f"arm {arm_id}: {_TEMPLATE_FILE} is not the registered git blob")
+    if sha256_bytes(data) != loaded.get(_TEMPLATE_FILE):
+        raise ProvenanceError(f"arm {arm_id}: {_TEMPLATE_FILE} changed while it was hashed")
+    unregistered = sorted(set(loaded) - set(registered))
+    if unregistered:
+        raise ProvenanceError(
+            f"arm {arm_id}: files not registered in loadable_files_sha256 (vLLM could load "
+            f"them): {unregistered[:5]}"
+        )
+    missing = sorted(set(registered) - set(loaded))
+    if missing:
+        raise ProvenanceError(f"arm {arm_id}: registered files missing: {missing[:5]}")
+    differ = sorted(k for k in registered if registered[k] != loaded[k])
+    if differ:
+        raise ProvenanceError(
+            f"arm {arm_id}: files differ from their registered SHA-256: {differ[:5]}"
+        )
+    return CheckpointSnapshot(root, loaded, other, data.decode("utf-8"), storage)
+
+
+def preflight(
+    arm: ArmSpec, checkpoint_dir: Path, *, storage_check: Callable[[Path], dict] = verify_storage
+) -> dict[str, Any]:
+    """Every check that needs no backend: settings, storage and the loaded-file inventory."""
+    check_inference(arm)
+    check_engine(arm)
+    snap = inspect_checkpoint(arm, checkpoint_dir, storage_check=storage_check)
+    return {"arm": arm.id, "path": str(snap.path), "loadable_files": len(snap.loaded)}
+
+
+# --- backend --------------------------------------------------------------------------------
 
 
 def _step(name: str, fn: Callable[[], Any] | None, *, required: bool = False) -> dict[str, Any]:
@@ -252,10 +455,24 @@ def step_failures(steps: Sequence[Mapping[str, Any]]) -> list[str]:
     ]
 
 
+def _engine_shutdown(llm: Any) -> tuple[str, Callable[[], Any] | None]:
+    # Version-dependent assumption: older vLLM engines expose llm_engine.shutdown(); the V1
+    # engine exposes llm_engine.engine_core.shutdown(). Check against the pinned release.
+    engine = getattr(llm, "llm_engine", None)
+    for name, owner in (
+        ("llm_engine.shutdown", engine),
+        ("llm_engine.engine_core.shutdown", getattr(engine, "engine_core", None)),
+    ):
+        fn = getattr(owner, "shutdown", None)
+        if callable(fn):
+            return name, fn
+    return "llm_engine.shutdown", None
+
+
 @dataclass
 class VllmBackend:
-    """The real backend: vLLM, transformers and torch, imported only here. Untested without
-    those libraries; every method must be validated on the GPU host."""
+    """The real backend: vLLM, transformers and torch, imported only in :meth:`load`. Tests run
+    these methods with stand-in modules; every call must be validated on the GPU host."""
 
     vllm: Any
     torch: Any | None
@@ -318,26 +535,34 @@ class VllmBackend:
         get = getattr(llm, "get_default_sampling_params", None)
         return self.describe_sampling(get()) if callable(get) else None
 
+    def engine_config(self, llm: Any) -> dict[str, Any] | None:
+        """Best-effort read-back of the engine's model configuration (attribute names are
+        version-dependent; ``None`` when unavailable). Not a substitute for recording the
+        effective engine configuration on the GPU host."""
+        config = getattr(getattr(llm, "llm_engine", None), "model_config", None)
+        if config is None:
+            return None
+        return {f: _plain(getattr(config, f, None)) for f in ("dtype", "max_model_len", "seed")}
+
     def shutdown(self, llm: Any) -> list[dict[str, Any]]:
-        """Attempt every teardown step and record each outcome; never raises. The engine's own
-        shutdown is required; which steps exist and whether they free the GPU depends on the
-        vLLM version and must be validated on the GPU host."""
+        """Attempt every teardown step and record each outcome; never raises an ``Exception``.
+        The engine's own shutdown is required. The hook names are version-dependent assumptions,
+        and whether these steps free the GPU must be validated on the GPU host."""
         steps: list[dict[str, Any]] = []
         if llm is not None:
-            engine = getattr(llm, "llm_engine", None)
-            fn = None
-            for name in ("shutdown", "engine_core_shutdown"):
-                if callable(getattr(engine, name, None)):
-                    fn = getattr(engine, name)
-                    break
-            steps.append(_step("llm_engine.shutdown", fn, required=True))
+            name, fn = _engine_shutdown(llm)
+            steps.append(_step(name, fn, required=True))
         for name in ("destroy_model_parallel", "destroy_distributed_environment"):
             fn = getattr(self.parallel_state, name, None)
             steps.append(_step(f"parallel_state.{name}", fn if callable(fn) else None))
         steps.append(_step("gc.collect", gc.collect))
         cuda = getattr(self.torch, "cuda", None)
-        available = cuda is not None and cuda.is_available()
-        steps.append(_step("torch.cuda.empty_cache", cuda.empty_cache if available else None))
+
+        def empty_cache() -> None:
+            if cuda.is_available():
+                cuda.empty_cache()
+
+        steps.append(_step("torch.cuda.empty_cache", empty_cache if cuda is not None else None))
         return steps
 
     def parent_torch_memory_allocated(self) -> int | None:
@@ -375,12 +600,7 @@ def _plain(value: Any) -> Any:
     return repr(value)
 
 
-def _writable(root: Path) -> list[str]:
-    return [
-        (p.relative_to(root).as_posix() or ".")
-        for p in [root, *sorted(root.rglob("*"))]
-        if os.access(p, os.W_OK)
-    ]
+# --- engine ---------------------------------------------------------------------------------
 
 
 class VllmEngine:
@@ -394,10 +614,10 @@ class VllmEngine:
         *,
         max_parent_memory_after_close: int | None = None,
         reports: list[dict[str, Any]] | None = None,
+        storage_check: Callable[[Path], dict] = verify_storage,
     ):
         self.arm = arm
         self._reports = reports
-        self.checkpoint_dir = Path(checkpoint_dir)
         self.backend = backend
         self.max_parent_memory_after_close = max_parent_memory_after_close
         self.close_report: dict[str, Any] | None = None
@@ -408,18 +628,11 @@ class VllmEngine:
 
         sampling = check_inference(arm)
         kwargs = check_engine(arm, backend)
-
-        # Provenance before anything is loaded: the files the engine will read.
-        tree = hash_tree(self.checkpoint_dir)
-        self._loaded = {k: v for k, v in tree.items() if not ("/" not in k and _DOC_FILES.match(k))}
-        self._other = {k: v for k, v in tree.items() if k not in self._loaded}
-        self._template = self._check_registered_files()
-        writable = _writable(self.checkpoint_dir)
-        if writable:
-            raise ProvenanceError(
-                f"arm {arm.id}: the checkpoint must be read-only for this process during the run "
-                f"(mount it read-only); writable: {writable[:5]}"
-            )
+        # Storage and provenance before anything is loaded: the files the engine will read.
+        snap = inspect_checkpoint(arm, checkpoint_dir, storage_check=storage_check)
+        self.checkpoint_dir = snap.path
+        self._loaded, self._other, self._template = snap.loaded, snap.other, snap.template
+        self._sampling = sampling
 
         self.load_id = f"{arm.id}-{uuid.uuid4().hex}"
         try:
@@ -427,13 +640,7 @@ class VllmEngine:
                 model=str(self.checkpoint_dir), tokenizer=str(self.checkpoint_dir), **kwargs
             )
             self._tokenizer = self._llm.get_tokenizer()
-            probe = backend.make_sampling_params(n=1, seed=0, **sampling)
-            observed_sampling = backend.describe_sampling(probe)
-            changed = [k for k in _SAMPLING_KEYS if observed_sampling.get(k) != sampling[k]]
-            if changed:
-                raise SettingsError(
-                    f"arm {arm.id}: SamplingParams did not keep the requested values for {changed}"
-                )
+            observed_sampling = self._sampling_params(1, 0)[1]
             builtin = getattr(self._tokenizer, "chat_template", None)
             self._describe = {
                 "provider": "vllm",
@@ -450,6 +657,7 @@ class VllmEngine:
                 # What the adapter asked for, from the protocol.
                 "requested": {
                     "engine_kwargs": dict(kwargs),
+                    "engine_args_left_at_vllm_defaults": list(ENGINE_ARGS_LEFT_AT_DEFAULTS),
                     "sampling": dict(sampling),
                     "chat_template_kwargs": {
                         "add_generation_prompt": True,
@@ -458,76 +666,38 @@ class VllmEngine:
                         "explicitly)",
                     },
                 },
-                # What the backend reported back. The stop set vLLM applies at generation time
-                # (after merging any generation config) is not observable here: record it on
-                # the GPU host.
+                # What the backend reported back. The effective engine configuration and the
+                # stop set vLLM applies at generation time are not fully observable here:
+                # record them on the GPU host.
                 "observed": {
                     "sampling_params": observed_sampling,
                     "engine_default_sampling": backend.default_sampling(self._llm),
+                    "engine_config": backend.engine_config(self._llm),
                     "eos_token_id": _plain(getattr(self._tokenizer, "eos_token_id", None)),
                     "tokenizer_builtin_template_matches": (
                         None if builtin is None else builtin == self._template
                     ),
                     "environment": backend.environment(),
                     "process_environment": process_environment(),
+                    "storage": snap.storage,
                 },
             }
         except BaseException as exc:
             self._cleanup_failed_load(exc)
             raise
 
-    def _check_registered_files(self) -> str:
-        """Compare the hashed directory with the protocol's registration; returns the template
-        text whose bytes were checked."""
-        ckpt, arm_id = self.arm.checkpoint, self.arm.id
-        weights, digest = ckpt.get("weights_file"), ckpt.get("weights_sha256_lfs")
-        registered = ckpt.get("loadable_files_sha256")
-        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
-            raise ProvenanceError(f"arm {arm_id}: checkpoint.weights_sha256_lfs must be registered")
-        if not (
-            isinstance(registered, dict)
-            and registered
-            and all(isinstance(v, str) and _SHA256.fullmatch(v) for v in registered.values())
-        ):
-            raise ProvenanceError(
-                f"arm {arm_id}: checkpoint.loadable_files_sha256 must map every loadable file "
-                "to its SHA-256 (record it after the approved fetch)"
+    def _sampling_params(self, n: int, seed: int) -> tuple[Any, dict[str, Any]]:
+        """Build a ``SamplingParams`` object and read it back; a requested value the object does
+        not hold is refused."""
+        wanted = {"n": n, "seed": seed, **self._sampling}
+        params = self.backend.make_sampling_params(**wanted)
+        observed = self.backend.describe_sampling(params)
+        changed = sorted(k for k, v in wanted.items() if observed.get(k) != v)
+        if changed:
+            raise SettingsError(
+                f"arm {self.arm.id}: SamplingParams did not keep the requested values for {changed}"
             )
-        if not isinstance(weights, str) or registered.get(weights) != digest:
-            raise ProvenanceError(
-                f"arm {arm_id}: loadable_files_sha256 must list weights_file with "
-                "weights_sha256_lfs"
-            )
-        if _TEMPLATE_FILE not in registered:
-            raise ProvenanceError(f"arm {arm_id}: loadable_files_sha256 must list {_TEMPLATE_FILE}")
-        if weights not in self._loaded:
-            raise ProvenanceError(f"arm {arm_id}: registered weights file {weights!r} missing")
-        if self._loaded[weights] != digest:
-            raise ProvenanceError(
-                f"arm {arm_id}: {weights} SHA-256 differs from the registered value"
-            )
-        blob = _BLOB.search(self.arm.inference["chat_template"])
-        path = self.checkpoint_dir / _TEMPLATE_FILE
-        data = path.read_bytes() if path.is_file() else None
-        if data is None or blob is None or git_blob_sha1(data) != blob.group(1):
-            raise ProvenanceError(f"arm {arm_id}: {_TEMPLATE_FILE} is not the registered git blob")
-        if sha256_bytes(data) != self._loaded[_TEMPLATE_FILE]:
-            raise ProvenanceError(f"arm {arm_id}: {_TEMPLATE_FILE} changed while it was hashed")
-        unregistered = sorted(set(self._loaded) - set(registered))
-        if unregistered:
-            raise ProvenanceError(
-                f"arm {arm_id}: files not registered in loadable_files_sha256 (vLLM could load "
-                f"them): {unregistered[:5]}"
-            )
-        missing = sorted(set(registered) - set(self._loaded))
-        if missing:
-            raise ProvenanceError(f"arm {arm_id}: registered files missing: {missing[:5]}")
-        differ = sorted(k for k in registered if registered[k] != self._loaded[k])
-        if differ:
-            raise ProvenanceError(
-                f"arm {arm_id}: files differ from their registered SHA-256: {differ[:5]}"
-            )
-        return data.decode("utf-8")
+        return params, observed
 
     def _cleanup_failed_load(self, exc: BaseException) -> None:
         # The runner never receives this engine, so it cannot close it: shut down here whatever
@@ -575,9 +745,7 @@ class VllmEngine:
                 items[k] = BatchItem(req, ValueError("request is not for this arm's settings"))
                 continue
             rendered = self._render(req)
-            params = self.backend.make_sampling_params(
-                n=req.n, seed=req.seed, **{key: self.arm.inference[key] for key in _SAMPLING_KEYS}
-            )
+            params, _ = self._sampling_params(req.n, req.seed)  # read back per request
             send.append((k, rendered, params))
         if send:
             outputs = self._llm.generate(
@@ -629,15 +797,22 @@ class VllmEngine:
 
     def _close(self, report: dict[str, Any]) -> None:
         errors: list[str] = []
+        interrupted: BaseException | None = None
         try:
             steps = self.backend.shutdown(self._llm)
-        except Exception as exc:
+        except BaseException as exc:  # an interrupt still drops references and is recorded
             steps = [{"step": "backend.shutdown", "status": "failed", "error": _err(exc)}]
+            if not isinstance(exc, Exception):
+                interrupted = exc
         report["shutdown_steps"] = steps
         errors += step_failures(steps)
         self._llm = None
         self._tokenizer = None
         gc.collect()
+        report["errors"] = errors
+        if interrupted is not None:
+            self._close_error = "; ".join(errors)[:_MAX_ERROR]
+            raise interrupted
         memory: int | None = None
         try:
             memory = self.backend.parent_torch_memory_allocated()
@@ -667,10 +842,10 @@ class VllmEngine:
         report["files_unchanged"] = unchanged
         if unchanged is False:
             errors.insert(0, "checkpoint files changed during the run")
-        report["errors"] = errors
         report["note"] = (
             "parent-process observations only: worker-process exit and device-level GPU memory "
-            "must be checked on the GPU host"
+            "must be checked on the GPU host; the shutdown hook names are version-dependent "
+            "assumptions"
         )
         if errors:
             self._close_error = "; ".join(errors)[:_MAX_ERROR]
@@ -695,20 +870,24 @@ def arm_loader(
     *,
     max_parent_memory_after_close: int | None = None,
     reports: list[dict[str, Any]] | None = None,
+    storage_check: Callable[[Path], dict] = verify_storage,
 ) -> Callable[[], VllmEngine]:
-    """An ``ArmLoader``: each call is a separate load with a fresh engine and ``load_id``.
+    """An ``ArmLoader``: each call is a separate load with a fresh engine and ``load_id``. The
+    backend-free checks run again before the backend is created.
 
     ``reports`` (optional) collects each engine's close report, and the report of a load that
     failed after vLLM was created; the loader keeps no reference to the engine itself.
     """
 
     def load() -> VllmEngine:
+        preflight(arm, checkpoint_dir, storage_check=storage_check)
         return VllmEngine(
             arm,
             checkpoint_dir,
             backend_factory(),
             max_parent_memory_after_close=max_parent_memory_after_close,
             reports=reports,
+            storage_check=storage_check,
         )
 
     return load
