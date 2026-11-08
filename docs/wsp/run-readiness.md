@@ -67,10 +67,10 @@ artifact.
    the local storage checks cannot establish (privileged remounts, overlays, writable aliases)
    stays an explicit operator verification. Running with effective uid 0 is refused, and both
    version sources (package metadata and module `__version__`) are reconciled in preflight.
-   **Open design point:** the readiness proposal specifies each arm as a separate process; the
-   adapter runs all arms in one process with in-process cleanup and an engine-object
-   observation. Before real execution, implement the per-arm process boundary or revise the
-   execution design explicitly and have it reviewed.
+   *Per-arm processes:* each arm now runs in its own `spawn` worker process, as the readiness
+   proposal specifies (`wsp_runtime/process_worker.py`), tested with stub workers only. A
+   worker that exited does not by itself show that every GPU resource was released;
+   device-level checks remain required on the GPU host.
 2. **Grader adapter** for math-verify, following `mathqa.py`: last `\boxed{}`/`\fbox{}`, no
    box means incorrect, 5 s timeouts. Its `id` and `revision` must match the protocol. Test it
    on synthetic strings only, never on MATH-500 content in the repo.

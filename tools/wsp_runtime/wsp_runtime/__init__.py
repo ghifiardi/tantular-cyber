@@ -5,7 +5,9 @@ This package holds the parts of an evaluation run that need third-party runtime 
 * :mod:`wsp_runtime.vllm_adapter` (C1): an inference engine implementing the harness's
   ``BatchGenerator`` / ``ArmLoader`` interfaces on top of vLLM;
 * :mod:`wsp_runtime.grader` (C2): the pinned MATH grading rule on top of ``math-verify``;
-* :mod:`wsp_runtime.datasets` (C3): local MATH / MATH-500 JSONL files to harness ``Item`` rows.
+* :mod:`wsp_runtime.datasets` (C3): local MATH / MATH-500 JSONL files to harness ``Item`` rows;
+* :mod:`wsp_runtime.process_worker`: one worker process per arm, so the parent never imports
+  vLLM, transformers or torch.
 
 It depends on ``tools/wsp`` (the standard-library harness); ``tools/wsp`` never imports it.
 vLLM, torch and math-verify are imported lazily, only inside the functions that need them, so
@@ -17,4 +19,4 @@ Status 2026-11-08: tested with stand-in modules only. No model has been loaded a
 has run. See ``docs/wsp/runtime.md`` for what still needs a real GPU.
 """
 
-RUNTIME_VERSION = "0.6.0"
+RUNTIME_VERSION = "0.7.0"

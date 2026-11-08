@@ -25,6 +25,7 @@ on the isolated host.
 | C1 inference adapter | `wsp_runtime/vllm_adapter.py` | `VllmEngine` implements the harness's `BatchGenerator` for one arm; `arm_loader()` is its `ArmLoader`; `preflight()` runs every check that needs no GPU or loaded engine |
 | C2 grader adapter | `wsp_runtime/grader.py` | `MathQAGrader`: the pinned grading rule on a `math-verify` backend (**unreviewed**) |
 | C3 dataset loader | `wsp_runtime/datasets.py` | Local MATH-500 / MATH-train JSONL to harness `Item` rows, bound to the protocol's `dataset.runtime_sources` registration, with split and leakage checks |
+| Worker processes | `wsp_runtime/process_worker.py` | One `spawn` worker process per arm (`WorkerEngine`, a `BatchGenerator` proxy) and a short-lived probe worker; the parent never imports vLLM, transformers or torch |
 | CLI | `run.py` | Checks the environment, dataset, leakage reference, versions, sampling read-back and every arm before anything runs, then runs a `per_arm_sequential` protocol with one `--checkpoint ARM=DIR` per arm |
 
 ## Real-run blockers
@@ -32,12 +33,12 @@ on the isolated host.
 None of these can be resolved in this repository. Each must be done, recorded and reviewed
 before a real run:
 
-0. **Execution design: no process boundary between arms.** The readiness proposal (PR #27,
-   §"Sequential loading") specifies each arm as a **separate process** and engine load, with the
-   GPU released between arms. This adapter runs every arm in **one process** and relies on
-   in-process cleanup plus the engine-object observation (C1, close). That is not the specified
-   isolation. Before real execution, either implement the per-arm process boundary, or
-   explicitly revise the execution design and have the revision reviewed.
+0. **Per-arm worker processes: implemented with stub workers only.** As the readiness proposal
+   (PR #27, §"Sequential loading") specifies, each arm now runs in its own worker process (see
+   "One worker process per arm" below). It has been exercised only with stub engines and stub
+   workers. Still open for a real run: the real engine in a worker on the GPU host, and the
+   fact that **a worker that exited does not by itself show that every GPU resource was
+   released** (items 4 and the GPU-host table).
 1. **No runtime lock.** `requirements.in` has no lock file; vLLM and transformers are
    `REPLACE` (R6) and sympy is `REPLACE` (R9). Resolving a lock needs network access and those
    decisions.
@@ -63,6 +64,52 @@ before a real run:
    pinned `engine.transformers_version`; it is refused until they are recorded (after the
    approved fetch and R6), and is intentionally unchanged until then.
 8. The roles, budget, isolated compute account and licence review ([run-readiness.md](run-readiness.md)).
+
+## One worker process per arm (`process_worker.py`, tested with stub workers)
+
+The command line always runs each arm in its own **worker process**, started with the `spawn`
+start method (a fresh interpreter), in protocol order. The parent (the CLI and the harness
+runner) never imports vLLM, transformers or torch; it talks to the worker through
+`WorkerEngine`, which implements the harness's `BatchGenerator`. (`run()` also has an
+`isolation="in-process"` seam that builds the engines in the parent; it exists for the adapter
+tests only, and no command-line option selects it.)
+
+- **Load.** The worker re-parses the protocol (its SHA-256 must equal the parent's), creates the
+  arm's engine (the real factory builds `VllmEngine` with `VllmBackend`, inside the worker) and
+  replies with the engine's `describe()`, which must carry a `load_id`. The parent adds
+  `isolation` (mode, start method, worker pid). A failed load is reported, the worker exits,
+  and the run aborts as before.
+- **Before the run**, a short-lived **probe worker** imports vLLM and transformers, reports their
+  `__version__` (reconciled with the pins as before) and builds and reads back a
+  `SamplingParams` object for every (n, seed) of every arm; it must exit with code 0. This is
+  how preflight keeps those imports out of the parent.
+- **Batches.** One message per shard, in the runner's order; the worker answers in order.
+  Messages are JSON bytes over a pipe (the parent never unpickles worker output), and every
+  reply is validated strictly: exact keys and types (no booleans for integers), one entry per
+  request, each echoing its request exactly. The parent returns `BatchItem`s carrying its own
+  request objects. A request the engine failed comes back as that request's error
+  (`WorkerRequestError`); a batch the engine failed as a whole fails that batch
+  (`WorkerBatchError`) and the worker stays usable.
+- **Crashes, timeouts, malformed replies.** A worker that exits, does not reply within
+  `--batch-timeout`, or sends anything malformed is marked dead (and terminated, then killed,
+  if still running). That batch fails, every later batch of the arm fails at once
+  (`WorkerDied`), and the close fails, so the runner stops before the next arm and writes its
+  aborted manifest with every record kept.
+- **Close.** The worker closes its engine, replies with the engine's close report, and exits.
+  `close()` returns only once the worker has **exited with code 0 and been reaped**; a worker
+  that fails to close, exits with another code, or does not exit within `--close-timeout` is
+  terminated (after `--kill-grace`, killed) and the close fails. The next arm is therefore never
+  started while the previous worker is alive. The close report records the worker's pid, exit
+  code and how it ended, and includes the engine's own close report.
+- **Interrupts.** The worker ignores SIGINT (a terminal Ctrl-C reaches the whole process group);
+  the parent decides. An interrupt in the parent while a batch is in flight terminates the
+  worker during the runner's close, and the close report records that.
+- **What process exit does not show.** A worker that exited does **not** by itself show that
+  every GPU resource was released: processes the engine started (vLLM's own workers) may outlive
+  it, and the driver releases device memory asynchronously. Device-level checks (NVML /
+  `nvidia-smi` and the process list after each arm) remain required on the GPU host.
+- **Timeouts** (`--load-timeout` 3600 s, `--batch-timeout` 14400 s, `--close-timeout` 600 s,
+  `--kill-grace` 30 s) are provisional defaults to set for the host and the run.
 
 ## C1: what the engine guarantees (control flow, tested with stand-in modules)
 
@@ -383,6 +430,7 @@ recorded, and reviewed before the confirmatory run.
 | Check | Why it is open |
 |---|---|
 | **Runtime lock** | No lock exists; the versions the checks below run against are unknown until it is resolved (R6, R9) |
+| **The real engine in a worker process** | `vllm_engine` and `runtime_probe` (in the worker) have not run with the real libraries; confirm that vLLM starts, serves and shuts down inside a `spawn` worker that is not a daemon, and how long a load and a close take, to set the timeouts |
 | **Engine shutdown, worker exit and GPU-memory release** | `close()` calls the shutdown hooks it finds (names version-dependent). Whether vLLM's worker processes exit and the device memory is freed before the next arm loads must be measured at device level (NVML / `nvidia-smi` and the process list after each close, allowing for the engine process's exit time). This process's PyTorch figures do not show it |
 | **Effective engine settings** | Read back and record the effective values of the engine arguments left at vLLM's defaults (batch limits, prefix caching, eager/compilation, KV-cache dtype, attention backend, scheduler) and the effective model configuration |
 | Storage | The operator checks listed under C1, storage |

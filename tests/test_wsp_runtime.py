@@ -1348,6 +1348,7 @@ def _cli(
         sampling_params_factory=lambda: params,
         module_versions=lambda: modules or {"vllm": VERSION, "transformers": TF_VERSION},
         environ={} if environ is None else environ,
+        isolation="in-process",  # these tests drive the adapter in this process
     )
     return summary, backend
 
@@ -2126,8 +2127,13 @@ def test_runtime_is_isolated_and_imports_heavy_libraries_lazily() -> None:
                 for n in names:
                     assert n.split(".")[0] not in _NEVER, f"{path.name} imports {n}"
             if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "import_module":
-                # importlib.import_module must stay inside functions and name only vLLM modules.
+                # importlib.import_module must stay inside functions and name only vLLM modules,
+                # except in process_worker.resolve, which imports the worker's engine factory and
+                # probe from a validated "module:name" reference (in the worker process).
                 (arg,) = node.args
+                if path.name == "process_worker.py":
+                    assert isinstance(arg, ast.Name) and arg.id == "module"
+                    continue
                 assert isinstance(arg, ast.Constant) and arg.value.startswith("vllm.")
         for node in tree.body:  # module level: no heavy imports, so tests run without them
             if isinstance(node, ast.Import | ast.ImportFrom):
