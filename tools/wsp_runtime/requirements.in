@@ -11,5 +11,9 @@ antlr4-python3-runtime==4.13.2
 #
 # Inference stack (R6, open; 0.33.0 is a provisional suggestion pending a compatibility check):
 # vllm==REPLACE
-# torch, transformers and CUDA versions follow from the chosen vLLM release and are recorded
-# in the image digest and in each load's describe()["environment"].
+# transformers==REPLACE  (must equal the protocol's engine.transformers_version; checked at load)
+# torch and CUDA versions follow from the chosen vLLM release and are recorded in the image
+# digest and in each load's describe()["observed"]["environment"].
+#
+# Real-run blockers while this file has no lock: the resolved versions are unknown, and the
+# vLLM, transformers and math-verify APIs the adapters call are unverified on them.

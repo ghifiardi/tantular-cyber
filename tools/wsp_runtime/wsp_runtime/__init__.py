@@ -11,10 +11,10 @@ It depends on ``tools/wsp`` (the standard-library harness); ``tools/wsp`` never 
 vLLM, torch and math-verify are imported lazily, only inside the functions that need them, so
 the package can be imported and tested (with stub engines and synthetic strings) where those
 libraries are not installed. Nothing here downloads a model or dataset: the adapters accept
-local paths only and set the Hugging Face libraries to offline mode.
+local paths only and force the Hugging Face libraries into offline mode.
 
 Status 2026-11-08: tested with stub engines only. No model has been loaded and no inference
 has run. See ``docs/wsp/runtime.md`` for what still needs a real GPU.
 """
 
-RUNTIME_VERSION = "0.1.0"
+RUNTIME_VERSION = "0.2.0"

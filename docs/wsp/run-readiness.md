@@ -59,16 +59,24 @@ artifact.
    runs only on the isolated host, unless that control is deliberately changed.
    *Status 2026-11-08:* written in `tools/wsp_runtime` (separate from `tools/wsp`, heavy
    imports lazy) and tested with a stub engine only; see [runtime.md](runtime.md) for what
-   still needs a real GPU, especially engine shutdown and GPU-memory release.
+   still needs a real GPU, especially engine shutdown, worker-process exit and device-level
+   GPU-memory release. It requires complete, typed and pinned settings and a
+   `checkpoint.loadable_files_sha256` registration for every loadable file, which the
+   Experiment 8 draft protocol does not have yet (recorded after the approved fetch).
 2. **Grader adapter** for math-verify, following `mathqa.py`: last `\boxed{}`/`\fbox{}`, no
    box means incorrect, 5 s timeouts. Its `id` and `revision` must match the protocol. Test it
    on synthetic strings only, never on MATH-500 content in the repo.
    *Status 2026-11-08:* written (`wsp_runtime/grader.py`), tested on synthetic strings with a
-   stub math-verify; three interpretations still need review against `mathqa.py` (R9).
+   stub math-verify. **Unreviewed:** twelve interpretations are listed in
+   [runtime.md](runtime.md) for comparison with the released `mathqa.py`, and it stays
+   unreviewed until that comparison is done and the independent evaluator has accepted it
+   (R9). Until then the runtime CLI refuses held-out execution.
 3. **Dataset loader:** a local MATH-500 file at the R8 revision converted to `Item` rows with
    `unique_id` as the ID, then a content-hash and ID check. No network.
    *Status 2026-11-08:* written (`wsp_runtime/datasets.py`) for MATH-500 and the MATH training
-   split (smoke items), tested on synthetic files only.
+   split (smoke items), tested on synthetic files only, and wired into the runtime CLI with a
+   required leakage reference (normalised problem text, answers ignored; this cannot prove
+   disjointness).
 4. **Execution order and batching.** `run_paired` currently interleaves arms per item and
    sends one request per (item, arm). That assumes every arm's model is loaded at the same
    time. Three vLLM instances at the authors' `gpu_memory_utilization` 0.85 cannot share one
