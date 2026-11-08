@@ -1,42 +1,55 @@
 """Run a ``per_arm_sequential`` WSP protocol with the vLLM adapter (isolated GPU host only).
 
     python tools/wsp_runtime/run.py --protocol P.json \\
-        --source /research/data/math_train.jsonl --shape math_train --limit 20 \\
-        --leakage-reference math500=<sha256>=/research/data/math500_test.jsonl \\
+        --source /research/data/math_train.jsonl \\
+        --leakage-reference /research/data/math500_test.jsonl \\
         --checkpoint base=/research/ckpt/base --checkpoint edited=/research/ckpt/edited \\
         --checkpoint base_reload=/research/ckpt/base --split development \\
         --operator op1 --purpose smoke --output /research/runs/RUN [--keep-outputs]
 
-Everything that can be checked without a GPU is checked before any arm runs or any output is
-written: the protocol, the whole source file (``--source`` / ``--shape``, validated before
-``--limit``), every ``--leakage-reference`` (a nonempty source file of the other split, given
-with its registered SHA-256; any problem whose normalised text also occurs there is refused,
-whatever the answers say), the grader's dependency versions, and for every arm its settings,
-read-only storage and loaded-file inventory. Every arm needs exactly one ``--checkpoint ARM=DIR``
-(a local directory on a read-only mount; nothing is downloaded).
+Before any arm runs or any output is written, this command:
 
-Held-out execution is refused while the grader is unreviewed (R9), and needs the registered
-source and ID-set hashes. After the run, ``runtime_report.json`` is written next to the
-manifest, only if the manifest there carries this invocation's run ID. It holds the dataset and
-leakage provenance, grader dependency versions and every engine's close report, plus the
-manifest's SHA-256, and its own SHA-256 is printed in the summary so it can be recorded
-externally. The report is **supplementary evidence**: printing its hash does not protect it,
-and a decision relying on it must verify a separately protected record of that hash.
+* forces the offline and no-telemetry variables (a conflicting value is refused);
+* loads the whole ``--source`` (the run's split) and the whole ``--leakage-reference`` (the
+  other split) against the protocol's ``dataset.runtime_sources`` registration: raw file
+  SHA-256, row count, whole-file ID-set hash, selection rule and, for held-out, the converted
+  items' hash; refuses any problem whose normalised text occurs in both, whatever the answers
+  say; and only then applies the registered selection rule;
+* checks the grader's dependency versions and the installed vLLM and transformers versions
+  (package metadata);
+* builds and reads back a ``SamplingParams`` object for every (n, seed) the run requests;
+* checks every arm's settings, storage (read-only mount below root-owned, non-writable parents)
+  and loaded-file inventory.
+
+What needs a loaded engine (observed engine settings, the tokenizer, the effective stop set) is
+checked or recorded at load time; the effective engine configuration remains a GPU-host check.
+Every arm needs exactly one ``--checkpoint ARM=DIR``. Held-out execution is refused while the
+grader is unreviewed (R9).
+
+After the run (or an abort that left a manifest), ``runtime_report.json`` is written next to the
+manifest only if that manifest carries this invocation's run ID. It holds the dataset and leakage
+provenance, the hash definitions, forced variables, installed versions, grader dependency
+versions, every arm's preflight result and close report, and the manifest's SHA-256. Its own
+SHA-256 is printed in the summary so it can be recorded externally. The report is
+**supplementary evidence**: printing its hash does not protect it, and a decision relying on it
+must verify a separately protected record of that hash.
 
 This command needs vLLM, transformers, torch and math-verify, which are installed only on the
-isolated host. It has been exercised only with stand-in modules (``tests/test_wsp_runtime.py``).
-Exit codes: 0 ok, 1 run or validation failure (including any error record or a report that
-could not be written), 2 usage error.
+isolated host. It has been exercised only with stand-in modules (``tests/test_wsp_runtime.py``),
+which validate control flow, not compatibility with the real libraries. Exit codes: 0 ok, 1 run
+or validation failure (including any error record or a report that could not be written), 2
+usage error. An interrupt (Ctrl-C) or other ``BaseException`` propagates: no report is written,
+and the exit status is the interpreter's.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
+import os
 import sys
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -56,12 +69,12 @@ from wsp_runtime.vllm_adapter import (  # noqa: E402
     ProvenanceError,
     VllmBackend,
     arm_loader,
+    force_offline,
     preflight,
     verify_storage,
 )
 
 REPORT_FILE = "runtime_report.json"
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _pairs(values: Sequence[str], flag: str) -> list[tuple[str, Path]]:
@@ -71,19 +84,6 @@ def _pairs(values: Sequence[str], flag: str) -> list[tuple[str, Path]]:
         if not sep or not key or not path:
             raise ValueError(f"{flag} must be KEY=PATH (got {value!r})")
         out.append((key, Path(path)))
-    return out
-
-
-def _references(values: Sequence[str]) -> list[tuple[str, str, Path]]:
-    out = []
-    for value in values:
-        parts = value.split("=", 2)
-        if len(parts) != 3 or not all(parts) or not _SHA256.fullmatch(parts[1]):
-            raise ValueError(
-                f"--leakage-reference must be SHAPE=SHA256=PATH with a registered SHA-256 "
-                f"(got {value!r})"
-            )
-        out.append((parts[0], parts[1], Path(parts[2])))
     return out
 
 
@@ -98,6 +98,23 @@ def _checkpoints(values: Sequence[str], arm_ids: Sequence[str]) -> dict[str, Pat
     return out
 
 
+def _installed(lookup: Callable[[str], str]) -> dict[str, str | None]:
+    out: dict[str, str | None] = {}
+    for package in ("vllm", "transformers"):
+        try:
+            out[package] = lookup(package)
+        except metadata.PackageNotFoundError:
+            out[package] = None
+    return out
+
+
+def _vllm_sampling_params() -> Callable[..., Any]:
+    # Imported here only (no GPU needed); the object is built and read back in preflight.
+    from vllm import SamplingParams
+
+    return SamplingParams
+
+
 def run(
     argv: Sequence[str],
     *,
@@ -105,21 +122,22 @@ def run(
     verify_backend_factory: Callable[[], Any] = MathVerifyBackend.load,
     dependency_lookup: Callable[[str], str] = metadata.version,
     storage_check: Callable[[Path], dict] = verify_storage,
+    sampling_params_factory: Callable[[], Callable[..., Any]] = _vllm_sampling_params,
+    environ: MutableMapping[str, str] | None = None,
 ) -> dict[str, Any]:
     p = argparse.ArgumentParser(prog="wsp-runtime-run", description=__doc__.split("\n\n")[0])
     p.add_argument("--protocol", type=Path, required=True)
-    p.add_argument("--source", type=Path, required=True, help="local MATH / MATH-500 JSONL")
-    p.add_argument("--shape", choices=sorted(datasets.SHAPES), required=True)
-    p.add_argument("--limit", type=int)
-    p.add_argument("--expected-count", type=int, help="rows in the whole source file")
-    p.add_argument("--expected-source-sha256")
-    p.add_argument("--expected-ids-sha256", help="ID set of the whole source file")
+    p.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="local JSONL for the run's split, registered in dataset.runtime_sources",
+    )
     p.add_argument(
         "--leakage-reference",
-        action="append",
-        default=[],
-        metavar="SHAPE=SHA256=PATH",
-        help="source file of the other split, with its registered SHA-256 (at least one)",
+        type=Path,
+        required=True,
+        help="local JSONL for the other split, registered in dataset.runtime_sources",
     )
     p.add_argument("--checkpoint", action="append", default=[], metavar="ARM=DIR")
     p.add_argument("--split", choices=("development", "heldout"), required=True)
@@ -133,62 +151,66 @@ def run(
         type=int,
         default=None,
         help=(
-            "bytes; fail the close if this process's PyTorch allocator still holds more. This "
-            "does not measure vLLM worker processes and never shows the GPU was released"
+            "bytes; fail the close if this process's PyTorch allocator still has more "
+            "allocated or reserved. This does not measure vLLM worker processes and never "
+            "shows the GPU was released"
         ),
     )
     args = p.parse_args(list(argv))
 
+    # Environment first: a conflicting offline or telemetry variable is refused before
+    # anything is read or written, and the forced values apply to every later import.
+    offline = force_offline(os.environ if environ is None else environ)
     protocol = load_protocol(args.protocol)
     if protocol.execution_order != "per_arm_sequential":
         raise ValueError("this runner needs a protocol with execution.order per_arm_sequential")
     if protocol.synthetic:
         raise ValueError("this runner is for real (non-synthetic) protocols; use wsp.py smoke")
-    if args.split == "heldout":
-        if not MathQAGrader.reviewed:
-            raise ValueError(
-                "held-out execution is refused while the grader is unreviewed (R9: compare "
-                "with the released mathqa.py and obtain the independent evaluator's acceptance)"
-            )
-        if not (args.expected_source_sha256 and args.expected_ids_sha256):
-            raise ValueError(
-                "held-out execution needs --expected-source-sha256 and --expected-ids-sha256"
-            )
-
-    # Dataset: the whole source file, validated and leak-checked before the limit is applied.
-    source_items, source_report = datasets.load(
-        args.source,
-        shape=args.shape,
-        split=args.split,
-        expected_count=args.expected_count,
-        expected_source_sha256=args.expected_source_sha256,
-        expected_ids_sha256=args.expected_ids_sha256,
-    )
-    references = _references(args.leakage_reference)
-    if not references:
-        raise ValueError("at least one --leakage-reference (the other split's source) is required")
-    ref_items: list[Any] = []
-    ref_reports = []
-    for shape, sha, path in references:
-        if shape not in datasets.SHAPES:
-            raise ValueError(f"--leakage-reference shape must be one of {sorted(datasets.SHAPES)}")
-        ref_split = datasets.SHAPES[shape]
-        if ref_split == args.split:
-            raise ValueError(f"--leakage-reference {shape} is the run's own split ({ref_split})")
-        loaded, ref_report = datasets.load(
-            path, shape=shape, split=ref_split, expected_source_sha256=sha
+    if args.split == "heldout" and not MathQAGrader.reviewed:
+        raise ValueError(
+            "held-out execution is refused while the grader is unreviewed (R9: compare "
+            "with the released mathqa.py and obtain the independent evaluator's acceptance)"
         )
-        ref_items += loaded
-        ref_reports.append(ref_report.as_dict())
+
+    # Dataset identity comes from the protocol (dataset.runtime_sources): raw file hash, row
+    # count and ID-set hash of the whole file, the selection rule and, for held-out, the
+    # converted items' hash. The whole source is leak-checked against the whole reference
+    # before the selection rule is applied.
+    other = "heldout" if args.split == "development" else "development"
+    source_items, source_report = datasets.load_registered(
+        args.source, protocol.dataset, args.split
+    )
+    ref_items, ref_report = datasets.load_registered(
+        args.leakage_reference, protocol.dataset, other
+    )
     leakage = datasets.check_disjoint(source_items, ref_items)
-    items, dataset_report = datasets.select(source_items, source_report, args.limit)
+    items, dataset_report = datasets.select_registered(
+        source_items, source_report, protocol.dataset, args.split
+    )
     grader_dependencies = check_dependencies(
         protocol.grader.get("dependencies"), lookup=dependency_lookup
     )
 
-    # Every arm's settings, storage and inventory, before any arm runs.
+    # Every arm, before any arm runs: settings, installed versions, the read-back of a
+    # SamplingParams object for every (n, seed) the run requests, storage and inventory.
+    if protocol.sampling_mode == "n_per_request":
+        shapes = [(protocol.samples_per_item, protocol.seeds[0])]
+    else:
+        shapes = [(1, seed) for seed in protocol.seeds]
+    installed = _installed(dependency_lookup)
+    make_params = sampling_params_factory()
     dirs = _checkpoints(args.checkpoint, [a.id for a in protocol.arms])
-    preflights = [preflight(a, dirs[a.id], storage_check=storage_check) for a in protocol.arms]
+    preflights = [
+        preflight(
+            a,
+            dirs[a.id],
+            storage_check=storage_check,
+            installed=installed,
+            sampling_params=make_params,
+            sample_shapes=shapes,
+        )
+        for a in protocol.arms
+    ]
 
     reports: list[dict[str, Any]] = []
     loaders = {
@@ -209,8 +231,11 @@ def run(
         "runtime_version": RUNTIME_VERSION,
         "runtime_code_sha256": runtime_code_sha256(),
         "dataset": dataset_report.as_dict(),
-        "leakage_references": ref_reports,
+        "leakage_reference": ref_report.as_dict(),
         "leakage_check": leakage,
+        "hash_definitions": dict(datasets.HASH_DEFINITION_TEXT),
+        "forced_environment": offline,
+        "installed_versions": installed,
         "grader": {
             "id": grader.id,
             "revision": grader.revision,

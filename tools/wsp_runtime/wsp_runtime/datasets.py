@@ -249,6 +249,105 @@ def check_disjoint(items: Sequence[Item], reference: Sequence[Item]) -> dict[str
     }
 
 
+# --- protocol-registered sources ----------------------------------------------------------
+
+HASH_DEFINITIONS = "wsp-runtime-dataset-1"
+HASH_DEFINITION_TEXT = {
+    "source_file_sha256": "SHA-256 of the raw source file bytes as fetched (before conversion)",
+    "source_rows": "number of items converted from the whole source file",
+    "source_ids_sha256": "SHA-256 of the canonical JSON of the sorted item IDs of the whole file",
+    "items_sha256": (
+        "the harness dataset_sha256 of the converted items after the selection rule (IDs, "
+        "split and prompt/answer content hashes); not a hash of the source file"
+    ),
+}
+SELECTION_RULES = ("all", "first_n_in_file_order")
+_SHA = re.compile(r"[0-9a-f]{64}")
+
+
+def registered_source(dataset: dict[str, Any], split: str) -> dict[str, Any]:
+    """The protocol's registration of the source for ``split``:
+    ``dataset.runtime_sources[split]`` with ``shape``, ``source_file_sha256``, ``source_rows``,
+    ``source_ids_sha256``, ``selection`` and (required for held-out) ``items_sha256``, under
+    ``dataset.runtime_sources.hash_definitions == HASH_DEFINITIONS``. Placeholders are refused."""
+    sources = dataset.get("runtime_sources")
+    where = f"dataset.runtime_sources.{split}"
+    if not isinstance(sources, dict) or sources.get("hash_definitions") != HASH_DEFINITIONS:
+        raise DatasetLoadError(
+            f"the protocol must register dataset.runtime_sources with hash_definitions "
+            f"{HASH_DEFINITIONS!r}"
+        )
+    spec = sources.get(split)
+    if not isinstance(spec, dict):
+        raise DatasetLoadError(f"the protocol does not register {where}")
+    known = {"shape", "source_file_sha256", "source_rows", "source_ids_sha256", "selection"}
+    unknown = sorted(set(spec) - known - {"items_sha256", "note"})
+    if unknown:
+        raise DatasetLoadError(f"{where}: keys not understood: {unknown}")
+    missing = sorted(known - set(spec))
+    if split == "heldout" and "items_sha256" not in spec:
+        missing.append("items_sha256")
+    if missing:
+        raise DatasetLoadError(f"{where}: missing {missing}")
+    if spec["shape"] not in SHAPES or SHAPES[spec["shape"]] != split:
+        raise DatasetLoadError(f"{where}.shape must be the {split} shape")
+    for key in ("source_file_sha256", "source_ids_sha256", "items_sha256"):
+        if key in spec and not (isinstance(spec[key], str) and _SHA.fullmatch(spec[key])):
+            raise DatasetLoadError(f"{where}.{key} must be a registered SHA-256")
+    if type(spec["source_rows"]) is not int or spec["source_rows"] < 1:
+        raise DatasetLoadError(f"{where}.source_rows must be a positive integer")
+    sel = spec["selection"]
+    rule = sel.get("rule") if isinstance(sel, dict) else None
+    if rule not in SELECTION_RULES:
+        raise DatasetLoadError(f"{where}.selection.rule must be one of {SELECTION_RULES}")
+    if rule == "all" and set(sel) != {"rule"}:
+        raise DatasetLoadError(f"{where}.selection: rule 'all' takes no other keys")
+    if rule == "first_n_in_file_order" and (
+        set(sel) != {"rule", "n"} or type(sel["n"]) is not int or sel["n"] < 1
+    ):
+        raise DatasetLoadError(f"{where}.selection: first_n_in_file_order needs a positive n")
+    if rule == "first_n_in_file_order" and sel["n"] > spec["source_rows"]:
+        raise DatasetLoadError(f"{where}.selection.n asks for more than source_rows items")
+    if split == "heldout" and rule != "all":
+        raise DatasetLoadError(f"{where}.selection: held-out items are all evaluated")
+    declared = dataset.get("n_items")
+    if split == "heldout" and type(declared) is int and declared != spec["source_rows"]:
+        raise DatasetLoadError(f"{where}.source_rows differs from dataset.n_items")
+    return dict(spec)
+
+
+def load_registered(
+    path: Path, dataset: dict[str, Any], split: str
+) -> tuple[list[Item], DatasetReport]:
+    """Load the whole file against the protocol's registration for ``split`` (raw file hash,
+    row count, whole-file ID set), then apply its selection rule and check the converted items'
+    hash if registered. Returns the **whole** file's items with a report of the selection; use
+    :func:`select_registered` to get the selected items after any whole-file checks."""
+    spec = registered_source(dataset, split)
+    items, report = load(
+        path,
+        shape=spec["shape"],
+        split=split,
+        expected_count=spec["source_rows"],
+        expected_source_sha256=spec["source_file_sha256"],
+        expected_ids_sha256=spec["source_ids_sha256"],
+    )
+    return items, report
+
+
+def select_registered(
+    items: Sequence[Item], report: DatasetReport, dataset: dict[str, Any], split: str
+) -> tuple[list[Item], DatasetReport]:
+    spec = registered_source(dataset, split)
+    sel = spec["selection"]
+    chosen, out = select(items, report, sel["n"] if sel["rule"] != "all" else None)
+    if "items_sha256" in spec and out.items_sha256 != spec["items_sha256"]:
+        raise DatasetLoadError(
+            f"dataset.runtime_sources.{split}.items_sha256 differs from the selected items"
+        )
+    return chosen, out
+
+
 def combine(*groups: Sequence[Item]) -> list[Item]:
     """Concatenate item groups and re-run the checks across them: the harness checks
     (duplicate IDs, identical content across splits) and :func:`check_disjoint` between the

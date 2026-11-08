@@ -63,8 +63,9 @@ artifact.
    GPU-memory release, and the effective engine settings. It requires complete, typed and
    pinned settings, a `checkpoint.loadable_files_sha256` registration for every loadable file
    (which the Experiment 8 draft protocol does not have yet; recorded after the approved
-   fetch), and checkpoints on a read-only mount with no replaceable parent; what the local
-   storage checks cannot establish stays an explicit operator verification.
+   fetch), and checkpoints on a read-only mount below root-owned, non-writable parents; what
+   the local storage checks cannot establish (privileged remounts, overlays, writable aliases)
+   stays an explicit operator verification.
 2. **Grader adapter** for math-verify, following `mathqa.py`: last `\boxed{}`/`\fbox{}`, no
    box means incorrect, 5 s timeouts. Its `id` and `revision` must match the protocol. Test it
    on synthetic strings only, never on MATH-500 content in the repo.
@@ -76,10 +77,12 @@ artifact.
 3. **Dataset loader:** a local MATH-500 file at the R8 revision converted to `Item` rows with
    `unique_id` as the ID, then a content-hash and ID check. No network.
    *Status 2026-11-08:* written (`wsp_runtime/datasets.py`) for MATH-500 and the MATH training
-   split (smoke items), tested on synthetic files only, and wired into the runtime CLI: the
-   whole source is validated and checked against a nonempty, registered leakage reference
-   before `--limit` (normalised problem text, answers ignored; this cannot prove
-   disjointness).
+   split (smoke items), tested on synthetic files only, and wired into the runtime CLI. The
+   source and the leakage reference are bound to the protocol's `dataset.runtime_sources`
+   (raw file hash, row count, ID-set hash, selection rule, converted-items hash; the
+   Experiment 8 draft does not have it yet); the whole source is checked against the whole
+   reference before the selection rule (normalised problem text, answers ignored; this cannot
+   prove disjointness).
 4. **Execution order and batching.** `run_paired` currently interleaves arms per item and
    sends one request per (item, arm). That assumes every arm's model is loaded at the same
    time. Three vLLM instances at the authors' `gpu_memory_utilization` 0.85 cannot share one

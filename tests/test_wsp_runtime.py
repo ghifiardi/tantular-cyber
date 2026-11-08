@@ -160,6 +160,8 @@ class _Hub:
         self.calls: list = []
         self.llms: list = []
         self.events: list = []
+        self.alive_at_empty_cache: list = []
+        self.reserved_extra = 0
         self.answer, self.post, self.memory = answer, post, memory
         self.engine_mode, self.engine_error, self.llm_error = engine_mode, engine_error, llm_error
         self.tokenizer, self.SamplingParams = tokenizer, params
@@ -189,8 +191,13 @@ class _Cuda:
     def memory_allocated(self):
         return self.hub.memory
 
+    def memory_reserved(self):
+        return self.hub.memory + self.hub.reserved_extra
+
     def empty_cache(self):
         self.hub.events.append("torch.cuda.empty_cache")
+        # Was any engine object still alive when the cache was cleared?
+        self.hub.alive_at_empty_cache.append(any(r() is not None for r in self.hub.llms))
 
 
 class _ParallelState:
@@ -226,6 +233,7 @@ class FakeBackend(VllmBackend):
         tokenizer=Tokenizer,
         params=Params,
         llm_error=None,
+        reserved_extra=0,
     ):
         hub = _Hub(
             answer=answer or _correct,
@@ -246,6 +254,7 @@ class FakeBackend(VllmBackend):
             parallel_state=_ParallelState(hub),
         )
         self.hub = hub
+        hub.reserved_extra = reserved_extra
 
     @property
     def calls(self):
@@ -294,13 +303,13 @@ def _read_only_mount(path):
 
 
 def _storage_for(root: Path, statvfs=_read_only_mount):
-    """The real ``verify_storage``; parents above ``root`` (outside the test's control) are
-    treated as protected, everything at or below ``root`` is checked for real."""
+    """The real ``verify_storage``. ``root`` and its parents are outside what a test can make
+    root-owned, so they are presented as root-owned, mode 0755 and not writable; everything
+    strictly below ``root`` (the checkpoints) is checked for real."""
     root = root.resolve()
 
     def inside(p) -> bool:
-        p = Path(p)
-        return p == root or root in p.parents
+        return root in Path(p).parents
 
     def access(p, mode):
         return os.access(p, mode) if inside(p) else False
@@ -401,14 +410,42 @@ def ckpts(tmp_path):
     root = tmp_path / "ckpt"
     base = _checkpoint(root, "base", b"synthetic base weights")
     edited = _checkpoint(root, "edited", b"synthetic edited weights")
-    root.chmod(0o555)  # the parent cannot be used to swap a checkpoint
+    root.chmod(0o555)  # presented as root-owned to the storage check (see _storage_for)
     yield base, edited
     root.chmod(0o755)
 
 
+def _data(tmp_path, *, train_rows=None, held_rows=None, dev_selection=None):
+    """Write the synthetic source files and return their protocol registration."""
+    train = _jsonl(
+        tmp_path / "data" / "train.jsonl", _train_rows() if train_rows is None else train_rows
+    )
+    held = _jsonl(
+        tmp_path / "data" / "math500.jsonl", _math500_rows() if held_rows is None else held_rows
+    )
+    sources = {"hash_definitions": datasets.HASH_DEFINITIONS}
+    for split, path, shape, sel in (
+        ("development", train, "math_train", dev_selection or {"rule": "all"}),
+        ("heldout", held, "math500", {"rule": "all"}),
+    ):
+        items, report = datasets.load(path, shape=shape, split=split)
+        _, sel_report = datasets.select(items, report, sel.get("n"))
+        sources[split] = {
+            "shape": shape,
+            "source_file_sha256": report.source_sha256,
+            "source_rows": report.n_source_rows,
+            "source_ids_sha256": report.source_ids_sha256,
+            "selection": dict(sel),
+            "items_sha256": sel_report.items_sha256,
+        }
+    return train, held, sources
+
+
 @pytest.fixture
-def protocol(ckpts):
-    return parse_protocol(_protocol_raw(*ckpts))
+def protocol(ckpts, tmp_path):
+    raw = _protocol_raw(*ckpts)
+    raw["dataset"]["runtime_sources"] = _data(tmp_path)[2]
+    return parse_protocol(raw)
 
 
 def _modified(ckpts, edit, arms=None):
@@ -606,50 +643,64 @@ def test_storage_checks_and_what_they_do_not_establish(ckpts, tmp_path) -> None:
     check = _storage_for(tmp_path / "ckpt")
     report = check(ckpts[0])
     assert report["read_only_mount"] is True and report["replaceable_parents"] == []
-    assert any("bind mount" in s for s in report["not_established_locally"])
+    assert len(report["devices"]) == 1
+    listed = " ".join(report["not_established_locally"])
+    assert "bind mount" in listed and "mount over" in listed and "remount" in listed
     rw = _storage_for(tmp_path / "ckpt", statvfs=lambda p: SimpleNamespace(f_flag=0))
     with pytest.raises(ProvenanceError, match="not on a read-only mount"):
         rw(ckpts[0])
-    (ckpts[0] / "config.json").chmod(0o644)
+    # One file bind-mounted from writable storage into the read-only tree.
+    target = ckpts[0] / "config.json"
+
+    def one_rw_file(p):
+        return SimpleNamespace(f_flag=0 if Path(p) == target else os.ST_RDONLY)
+
+    with pytest.raises(ProvenanceError, match=r"not on a read-only mount: \['config.json'\]"):
+        _storage_for(tmp_path / "ckpt", statvfs=one_rw_file)(ckpts[0])
+    target.chmod(0o644)
     with pytest.raises(ProvenanceError, match="writable by this process"):
         check(ckpts[0])
-    (ckpts[0] / "config.json").chmod(0o444)
-    (tmp_path / "ckpt").chmod(0o755)  # a writable parent could swap the whole directory
-    with pytest.raises(ProvenanceError, match="replaceable parent"):
-        check(ckpts[0])
-    (tmp_path / "ckpt").chmod(0o555)
+    target.chmod(0o444)
     link = tmp_path / "link"
     link.symlink_to(ckpts[0])
     with pytest.raises(ProvenanceError, match="symbolic link"):
         check(link)
+    with pytest.raises(ProvenanceError, match=r"contains '\.\.'"):
+        check(ckpts[0] / ".." / "base")
 
 
-def test_group_writable_parents_are_replaceable_unless_sticky(ckpts, tmp_path) -> None:
-    outside = Path("/")
+def test_a_parent_owned_by_this_user_is_replaceable(ckpts, tmp_path) -> None:
+    # tmp_path/ckpt is owned by the test user with mode 0555: its owner could chmod it, rename
+    # the checkpoint away and put another directory in its place, so it is refused.
+    check = _storage_for(tmp_path)  # tmp_path/ckpt is now checked for real
+    with pytest.raises(ProvenanceError, match=r"ckpt \(not owned by root\)"):
+        check(ckpts[0])
 
-    def lstat_with(mode):
-        def lstat(p):
-            if Path(p) == outside:
-                return os.stat_result((stat.S_IFDIR | mode, *[0] * 9))
-            return os.lstat(p)
 
-        return lstat
+@pytest.mark.parametrize(
+    ("uid", "mode", "refused"),
+    [
+        (0, 0o755, None),
+        (0, 0o775, "group/other-writable"),
+        (0, 0o1777, "group/other-writable"),  # no sticky-directory exemption
+        (1000, 0o755, "not owned by root"),
+    ],
+)
+def test_parents_must_be_root_owned_and_not_writable(ckpts, tmp_path, uid, mode, refused) -> None:
+    protected = _storage_for(tmp_path / "ckpt")
+    lstat = protected.keywords["lstat"]
 
-    def access(p, mode):
-        return os.access(p, mode) if tmp_path in Path(p).parents else False
+    def with_root_dir(p):
+        if Path(p) == Path("/"):
+            return os.stat_result((stat.S_IFDIR | mode, 0, 0, 0, uid, *[0] * 5))
+        return lstat(p)
 
-    for mode, ok in ((0o775, False), (0o1777, True), (0o755, True)):
-        check = partial(
-            verify_storage, statvfs=_read_only_mount, access=access, lstat=lstat_with(mode)
-        )
-        # Parents between "/" and tmp_path are real and may be group-writable on a CI host;
-        # check only the verdict about "/".
-        try:
+    check = partial(protected, lstat=with_root_dir)
+    if refused is None:
+        check(ckpts[0])
+    else:
+        with pytest.raises(ProvenanceError, match=rf"/ \({refused}"):
             check(ckpts[0])
-            refused = ""
-        except ProvenanceError as exc:
-            refused = str(exc)
-        assert ("'/'" in refused) is not ok
 
 
 def test_writable_checkpoint_is_refused(protocol, ckpts) -> None:
@@ -767,8 +818,8 @@ def test_failure_after_engine_creation_shuts_it_down(protocol, ckpts) -> None:
         "destroy_distributed_environment",
         "torch.cuda.empty_cache",
     ]
-    gc.collect()
-    assert backend.llms[0]() is None  # and it was released
+    assert backend.hub.alive_at_empty_cache == [False]  # released before the cache step
+    assert backend.llms[0]() is None
     (report,) = reports
     assert report["phase"] == "load_failed" and "synthetic tokenizer" in report["load_error"]
     assert report["errors"] == []
@@ -871,6 +922,9 @@ def test_close_runs_every_step_releases_and_reports(protocol, ckpts) -> None:
     assert [s["step"] for s in report["shutdown_steps"]] == _ALL_STEPS
     assert {s["status"] for s in report["shutdown_steps"]} == {"ok"} and report["errors"] == []
     assert backend.events[-1] == "torch.cuda.empty_cache"
+    # The references were dropped before collection and cache clearing (adapter control flow;
+    # whether the real allocator returns the memory is a GPU-host check).
+    assert backend.hub.alive_at_empty_cache == [False]
     assert report["files_unchanged"] is True
     assert report["parent_process_torch_allocated_bytes"] == 0
     assert report["multiprocessing_children_after_close"] == []
@@ -896,8 +950,19 @@ def test_close_fails_if_files_changed_parent_memory_or_children_remain(
     with _unlocked(ckpts[0]) as d:
         (d / "config.json").write_text('{"model_type": "synthetic"}')
     e2 = _engine(protocol, ckpts, FakeBackend(memory=10), max_parent_memory_after_close=0)
-    with pytest.raises(CloseError, match="still allocated in this process"):
+    with pytest.raises(CloseError, match="reserved still in this process"):
         e2.close()
+    reports: list = []
+    e4 = _engine(
+        protocol,
+        ckpts,
+        FakeBackend(reserved_extra=10),
+        max_parent_memory_after_close=0,
+        reports=reports,
+    )
+    with pytest.raises(CloseError, match="0 bytes allocated / 10 reserved"):
+        e4.close()  # only reserved memory remains: still a failure
+    assert reports[0]["parent_process_torch_reserved_bytes"] == 10
     e3 = _engine(protocol, ckpts)
     monkeypatch.setattr(
         vllm_adapter.multiprocessing, "active_children", lambda: [SimpleNamespace(pid=4242)]
@@ -945,31 +1010,40 @@ def test_an_interrupt_during_shutdown_still_releases_and_records(protocol, ckpts
     e = _engine(protocol, ckpts, backend, reports=reports)
     with pytest.raises(KeyboardInterrupt):
         e.close()
-    gc.collect()
-    assert backend.llms[0]() is None
-    assert reports[0]["errors"] and reports[0]["shutdown_steps"][0]["status"] == "failed"
+    assert backend.llms[0]() is None  # released before the interrupt propagated
+    (report,) = reports
+    assert report["interrupted"] is True and report["errors"]
+    steps = report["shutdown_steps"]
+    assert steps[0]["status"] == "failed"
+    assert [s["step"] for s in steps[1:]] == _ALL_STEPS[1:]  # the release steps still ran
+    assert backend.hub.alive_at_empty_cache == [False]
+    assert "files_unchanged" not in report  # memory, children and re-hash checks do not run
     with pytest.raises(CloseError, match="earlier close failed"):
         e.close()
 
 
 def test_backend_shutdown_exception_is_recorded(protocol, ckpts) -> None:
     class Raising(FakeBackend):
-        def shutdown(self, llm):
+        def shutdown_engine(self, llm):
             raise RuntimeError("synthetic shutdown crash")
 
     reports: list = []
     e = _engine(protocol, ckpts, Raising(), reports=reports)
     with pytest.raises(CloseError, match="synthetic shutdown crash"):
         e.close()
-    assert reports[0]["shutdown_steps"][0]["status"] == "failed"
+    steps = reports[0]["shutdown_steps"]
+    assert steps[0]["status"] == "failed"
+    assert [s["step"] for s in steps[1:]] == _ALL_STEPS[1:]  # release still ran
 
 
 def test_real_backend_without_cuda_or_parallel_state() -> None:
     backend = VllmBackend(vllm=None, torch=None, version="v", transformers_version="t")
-    steps = backend.shutdown(None)
+    steps = backend.release()
     assert [s["status"] for s in steps] == ["unavailable", "unavailable", "ok", "unavailable"]
     assert step_failures(steps) == []  # only the engine's own shutdown is required
-    assert backend.parent_torch_memory_allocated() is None
+    (missing,) = backend.shutdown_engine(SimpleNamespace(llm_engine=SimpleNamespace()))
+    assert missing["status"] == "unavailable" and step_failures([missing])
+    assert backend.parent_torch_memory() is None
     assert "gpu" not in backend.environment()  # no device query in the parent process
 
 
@@ -992,22 +1066,43 @@ def _argv(
     ckpts,
     *,
     protocol_raw=None,
-    reference_rows=None,
     split="development",
-    reference_sha=None,
+    register=None,
+    **data,
 ):
+    """Write the data files, register them in the protocol (``register`` may then alter the
+    registration), and return the CLI arguments."""
+    train, held, sources = _data(tmp_path, **data)
+    raw = copy.deepcopy(protocol_raw or _protocol_raw(*ckpts))
+    raw["dataset"]["runtime_sources"] = sources
+    if register is not None:
+        register(raw["dataset"])
     ppath = tmp_path / "protocol.json"
-    ppath.write_text(json.dumps(protocol_raw or _protocol_raw(*ckpts)))
-    source = _jsonl(tmp_path / "train.jsonl", _train_rows())
-    argv = ["--protocol", str(ppath), "--source", str(source), "--shape", "math_train"]
-    if reference_rows is not False:
-        ref = _jsonl(tmp_path / "math500.jsonl", reference_rows or _math500_rows())
-        sha = reference_sha or sha256_file(ref)
-        argv += ["--leakage-reference", f"math500={sha}={ref}"]
+    ppath.write_text(json.dumps(raw))
+    source, reference = (train, held) if split == "development" else (held, train)
+    argv = [
+        "--protocol",
+        str(ppath),
+        "--source",
+        str(source),
+        "--leakage-reference",
+        str(reference),
+    ]
     for arm, d in (("base", ckpts[0]), ("edited", ckpts[1]), ("base_reload", ckpts[0])):
         argv += ["--checkpoint", f"{arm}={d}"]
     argv += ["--split", split, "--operator", "op1", "--purpose", "stub"]
     return [*argv, "--output", str(tmp_path / "run")]
+
+
+def _lookup(**override):
+    versions = {"vllm": VERSION, "transformers": TF_VERSION, **override}
+
+    def lookup(name):
+        if name not in versions:
+            raise PackageNotFoundError(name)
+        return versions[name]
+
+    return lookup
 
 
 def _cli(
@@ -1018,7 +1113,9 @@ def _cli(
     backend=None,
     extra=(),
     verify=ExactGrader,
-    lookup=lambda name: "0",
+    lookup=None,
+    environ=None,
+    params=Params,
     **kw,
 ):
     backend = backend or FakeBackend()
@@ -1027,8 +1124,10 @@ def _cli(
         argv,
         backend_factory=lambda: backend,
         verify_backend_factory=verify,
-        dependency_lookup=lookup,
+        dependency_lookup=lookup or _lookup(),
         storage_check=STORAGE["check"],
+        sampling_params_factory=lambda: params,
+        environ={} if environ is None else environ,
     )
     return summary, backend
 
@@ -1064,7 +1163,19 @@ def test_end_to_end_run_with_stub_engines(tmp_path, protocol, ckpts) -> None:
     leakage = report["leakage_check"]
     assert leakage["ok"] is True and "cannot prove" in leakage["limit"]
     assert leakage["n_reference"] == 3
-    assert report["leakage_references"][0]["shape"] == "math500"
+    assert report["leakage_reference"]["shape"] == "math500"
+    assert (
+        report["dataset"]["source_sha256"]
+        == protocol.dataset["runtime_sources"]["development"]["source_file_sha256"]
+    )
+    assert set(report["hash_definitions"]) == {
+        "source_file_sha256",
+        "source_rows",
+        "source_ids_sha256",
+        "items_sha256",
+    }
+    assert report["forced_environment"]["VLLM_NO_USAGE_STATS"] == "1"
+    assert report["installed_versions"] == {"vllm": VERSION, "transformers": TF_VERSION}
     assert report["grader"]["reviewed"] is False
     assert [p["arm"] for p in report["preflight"]] == ["base", "edited", "base_reload"]
     assert [r["errors"] for r in report["close_reports"]] == [[], [], []]
@@ -1124,7 +1235,7 @@ def test_parent_memory_left_after_close_stops_before_the_next_arm(
             backend=backend,
             extra=["--max-parent-torch-memory-after-close", "0"],
         )
-    assert "still allocated in this process" in exc.value.summary["error"]
+    assert "reserved still in this process" in exc.value.summary["error"]
     manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
     assert manifest["run_status"] == "aborted"
     assert [x["status"] for x in manifest["execution"]["loads"]] == ["close_failed"]
@@ -1198,7 +1309,7 @@ def test_a_failed_report_write_does_not_replace_the_original_failure(
             extra=["--max-parent-torch-memory-after-close", "0"],
         )
     summary = exc.value.summary
-    assert "still allocated" in summary["error"]
+    assert "reserved still in this process" in summary["error"]
     assert summary["runtime_report_error"] == "OSError: synthetic disk full"
 
 
@@ -1215,44 +1326,153 @@ def test_cli_refuses_wrong_checkpoint_mapping_and_protocols(tmp_path, protocol, 
         _cli(tmp_path, interleaved, ckpts)
 
 
-def test_cli_leakage_reference_must_be_registered_nonempty_and_disjoint(
+@pytest.mark.parametrize(
+    ("register", "message"),
+    [
+        (lambda d: d.pop("runtime_sources"), "must register dataset.runtime_sources"),
+        (lambda d: d["runtime_sources"].update(hash_definitions="v0"), "hash_definitions"),
+        (lambda d: d["runtime_sources"].pop("heldout"), "does not register"),
+        (
+            lambda d: d["runtime_sources"]["heldout"].update(source_file_sha256="0" * 64),
+            "SHA-256 differs",
+        ),
+        (
+            lambda d: d["runtime_sources"]["development"].update(source_file_sha256="REPLACE"),
+            "registered SHA-256",
+        ),
+        (lambda d: d["runtime_sources"]["development"].update(source_rows=4), "expected 4 items"),
+        (
+            lambda d: d["runtime_sources"]["development"].update(source_ids_sha256="0" * 64),
+            "ID set differs",
+        ),
+        (
+            lambda d: d["runtime_sources"]["development"].update(items_sha256="0" * 64),
+            "items_sha256 differs",
+        ),
+        (
+            lambda d: d["runtime_sources"]["development"].update(selection={"rule": "random"}),
+            "selection.rule",
+        ),
+        (
+            lambda d: d["runtime_sources"]["development"].update(
+                selection={"rule": "first_n_in_file_order", "n": 9}
+            ),
+            "more than",
+        ),
+        (
+            lambda d: d["runtime_sources"]["heldout"].pop("items_sha256"),
+            "missing \\['items_sha256'\\]",
+        ),
+        (
+            lambda d: d["runtime_sources"]["heldout"].update(
+                selection={"rule": "first_n_in_file_order", "n": 1}
+            ),
+            "all evaluated",
+        ),
+        (lambda d: d["runtime_sources"]["heldout"].update(shape="math_train"), "shape"),
+        (lambda d: d.update(n_items=500), "differs from dataset.n_items"),
+        (lambda d: d["runtime_sources"]["development"].update(limit=2), "not understood"),
+    ],
+)
+def test_cli_dataset_identity_comes_from_the_protocol(
+    tmp_path, protocol, ckpts, register, message
+) -> None:
+    backend = FakeBackend()
+    with pytest.raises(datasets.DatasetLoadError, match=message):
+        _cli(tmp_path, protocol.raw, ckpts, backend=backend, register=register)
+    assert not (tmp_path / "run").exists() and backend.calls == []
+
+
+def test_cli_leaks_are_checked_on_the_whole_source_before_the_selection(
     tmp_path, protocol, ckpts
 ) -> None:
-    with pytest.raises(ValueError, match="leakage-reference"):
-        _cli(tmp_path, protocol.raw, ckpts, reference_rows=False)
-    with pytest.raises(datasets.DatasetLoadError, match="SHA-256 differs"):
-        _cli(tmp_path, protocol.raw, ckpts, reference_sha="0" * 64)
-    empty = tmp_path / "empty.jsonl"
-    empty.write_text("")
-    argv = _argv(tmp_path, ckpts, protocol_raw=protocol.raw, reference_rows=False)
-    argv += ["--leakage-reference", f"math500={sha256_file(empty)}={empty}"]
-    with pytest.raises(datasets.DatasetLoadError, match="contains no items"):
-        runtime_cli.run(argv, backend_factory=FakeBackend, storage_check=STORAGE["check"])
-    with pytest.raises(ValueError, match="SHAPE=SHA256=PATH"):
-        runtime_cli._references([f"math500={empty}"])
     # The same problem as development row 4, formatted differently with a differently written
-    # answer: refused although --limit 2 would not select that row.
+    # answer: refused although the selection (first 2 rows) would not include that row.
     leaked = [
+        *_math500_rows(),
         {
             "unique_id": "synthetic/held.json",
             "problem": "  SYNTHETIC:   compute 4 + 5. ",
             "answer": "\\frac{18}{2}",
-        }
+        },
     ]
     with pytest.raises(datasets.DatasetLoadError, match="leakage: 1 problems"):
-        _cli(tmp_path, protocol.raw, ckpts, reference_rows=leaked, extra=["--limit", "2"])
+        _cli(
+            tmp_path,
+            protocol.raw,
+            ckpts,
+            held_rows=leaked,
+            dev_selection={"rule": "first_n_in_file_order", "n": 2},
+        )
     assert not (tmp_path / "run").exists()  # refused before anything ran
+    with pytest.raises(datasets.DatasetLoadError, match="contains no items"):
+        _argv(tmp_path, ckpts, held_rows=[])  # an empty reference cannot even be registered
+
+
+def test_cli_applies_the_registered_selection(tmp_path, protocol, ckpts) -> None:
+    summary, _ = _cli(
+        tmp_path, protocol.raw, ckpts, dev_selection={"rule": "first_n_in_file_order", "n": 2}
+    )
+    assert summary["counts"]["records"] == 2 * 4 * 3
+    report = json.loads((tmp_path / "run" / "runtime_report.json").read_text())
+    assert report["dataset"]["limit"] == 2 and report["dataset"]["n_source_rows"] == 5
+    assert report["leakage_check"]["n_items"] == 5  # the whole source was checked
+
+
+@pytest.mark.parametrize(
+    ("kw", "error", "message"),
+    [
+        ({"environ": {"HF_HUB_OFFLINE": "0"}}, SettingsError, "HF_HUB_OFFLINE"),
+        ({"environ": {"VLLM_NO_USAGE_STATS": "0"}}, SettingsError, "VLLM_NO_USAGE_STATS"),
+        ({"lookup": _lookup(vllm="9.9.9")}, ProvenanceError, "installed vllm is '9.9.9'"),
+        ({"lookup": "no-transformers"}, ProvenanceError, "installed transformers is None"),
+    ],
+)
+def test_environment_and_installed_versions_are_checked_before_any_output(
+    tmp_path, protocol, ckpts, kw, error, message
+) -> None:
+    if kw.get("lookup") == "no-transformers":
+        kw = {"lookup": _lookup_without("transformers")}
+    backend = FakeBackend()
+    with pytest.raises(error, match=message):
+        _cli(tmp_path, protocol.raw, ckpts, backend=backend, **kw)
+    assert not (tmp_path / "run").exists() and backend.calls == [] and backend.llms == []
+
+
+def _lookup_without(package):
+    full = _lookup()
+
+    def lookup(name):
+        if name == package:
+            raise PackageNotFoundError(name)
+        return full(name)
+
+    return lookup
+
+
+def test_sampling_read_back_is_checked_before_any_output(tmp_path, protocol, ckpts) -> None:
+    class IgnoresSeedForSamples(Params):
+        def __init__(self, **kw):
+            super().__init__(**{**kw, "seed": None if kw["n"] > 1 else kw["seed"]})
+
+    backend = FakeBackend()
+    with pytest.raises(SettingsError, match="seed"):
+        _cli(tmp_path, protocol.raw, ckpts, backend=backend, params=IgnoresSeedForSamples)
+    assert not (tmp_path / "run").exists() and backend.llms == []
 
 
 def test_cli_checks_grader_dependencies(tmp_path, protocol, ckpts) -> None:
     raw = copy.deepcopy(protocol.raw)
     raw["grader"]["dependencies"] = {"math-verify": "0.9.0", "sympy": "REPLACE (open)"}
-    with pytest.raises(ValueError, match="pins '0\\.9\\.0'"):
-        _cli(tmp_path, raw, ckpts, lookup=lambda name: "0.8.0")
+    with pytest.raises(ValueError, match=r"pins '0\.9\.0'"):
+        _cli(tmp_path, raw, ckpts, lookup=_lookup(**{"math-verify": "0.8.0"}))
     assert not (tmp_path / "run").exists()
-    _cli(tmp_path, raw, ckpts, lookup=lambda name: "0.9.0")
+    _cli(tmp_path, raw, ckpts, lookup=_lookup(**{"math-verify": "0.9.0", "sympy": "1.13"}))
     report = json.loads((tmp_path / "run" / "runtime_report.json").read_text())
-    assert report["grader"]["dependencies"]["sympy"] == {"pinned": None, "installed": "0.9.0"}
+    assert report["grader"]["dependencies"] == {
+        "math-verify": {"pinned": "0.9.0", "installed": "0.9.0"},
+        "sympy": {"pinned": None, "installed": "1.13"},
+    }
 
 
 def test_cli_refuses_heldout_while_the_grader_is_unreviewed(tmp_path, protocol, ckpts) -> None:

@@ -2,14 +2,15 @@
 
 :class:`VllmEngine` implements the harness's ``BatchGenerator`` interface for one arm, and
 :func:`arm_loader` returns the ``ArmLoader`` the runner calls once per arm. :func:`preflight`
-runs every check that needs no backend (settings, storage, loaded-file inventory) so the CLI can
-refuse a bad arm before any arm runs. Every engine:
+runs every check that needs no GPU and no loaded engine (settings, installed versions,
+``SamplingParams`` read-back, storage, loaded-file inventory) so the CLI can refuse a bad arm
+before any arm runs or any output is written. Every engine:
 
 * **refuses incomplete or mistyped settings**: every inference key the engine uses must be
   present with the right type, every engine key must be known, pinned and typed, and the
   installed vLLM and transformers versions must equal the protocol's;
 * **checks storage and provenance before loading**: the checkpoint must sit on a read-only
-  mount with no replaceable parent directory (:func:`verify_storage`); every file is hashed and
+  mount below root-owned, non-writable parents (:func:`verify_storage`); every file is hashed and
   every loadable file must be registered in ``checkpoint.loadable_files_sha256``; the weights
   file must match ``weights_sha256_lfs`` and ``chat_template.jinja`` the protocol's git blob id;
 * **renders with the registered template**: the bytes of ``chat_template.jinja`` that were
@@ -17,9 +18,11 @@ refuse a bad arm before any arm runs. Every engine:
 * **reports requested and observed settings separately**, reads back every per-request
   ``SamplingParams`` object, and gets a fresh ``load_id`` per load;
 * **echoes requests**: every vLLM output's prompt must be the prompt rendered for its request;
-* **closes step by step**: every shutdown step is attempted and recorded, a close report is
-  always kept, and a failed close keeps failing. An engine whose initialisation fails after vLLM
-  was created is shut down before the error propagates.
+* **closes in order**: the engine's own shutdown, then every reference to the engine is dropped,
+  then the process-level release (parallel state, garbage collection, CUDA cache), each step
+  recorded; this process's allocated and reserved PyTorch memory is recorded; a close report is
+  always kept, and a failed close keeps failing. An engine whose initialisation fails after
+  vLLM was created is shut down the same way before the error propagates.
 
 The before/after hashes show snapshot consistency only (the files were the same when hashed at
 load and at close), which is why the storage itself must be read-only. Local checks cannot
@@ -38,6 +41,7 @@ import multiprocessing
 import os
 import re
 import stat
+import traceback
 import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -113,8 +117,10 @@ _MAX_ERROR = 300
 STORAGE_OPERATOR_CHECKS = (
     "the read-only mount is enforced by the host (mount options or an immutable image), not "
     "only reported by statvfs inside a container",
-    "no other mount, bind mount or overlay exposes the same storage writably, to this or any "
-    "other user or process",
+    "no writable alias of the same storage exists: no other mount, bind mount or overlay "
+    "exposes it writably, to this or any other user or process",
+    "no privileged process can mount over, remount read-write or replace the checkpoint or any "
+    "parent between the check and vLLM opening the files (root is trusted by the local checks)",
     "no ACL, group membership or privileged process outside this one can write the checkpoint "
     "or its parent directories",
     "the files on the mount are the ones fetched and registered (re-hashed after mounting)",
@@ -268,13 +274,6 @@ def check_engine(arm: ArmSpec, backend: Any | None = None) -> dict[str, Any]:
 # --- storage --------------------------------------------------------------------------------
 
 
-def _group_or_other_writable(mode: int) -> bool:
-    # A sticky directory (like /tmp) lets others create entries but not rename or remove ours.
-    return bool(mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (
-        stat.S_ISDIR(mode) and mode & stat.S_ISVTX
-    )
-
-
 def verify_storage(
     path: Path,
     *,
@@ -286,21 +285,28 @@ def verify_storage(
 
     Required (a failure raises :class:`ProvenanceError`):
 
-    * the path has no symbolic-link component and the checkpoint contains no symbolic link;
-    * every directory of the checkpoint reports a read-only mount (``statvfs`` ``ST_RDONLY``);
-    * no entry of the checkpoint is writable by this process (``access``, which also applies
-      ACLs for this process's identity);
-    * no parent directory, up to ``/``, is writable by this process or carries a group/other
-      write bit (sticky directories excepted), so the checkpoint cannot be renamed away and
-      replaced by another directory.
+    * the path is absolute after normalisation, has no ``..`` component, has no symbolic-link
+      component, and the checkpoint contains no symbolic link;
+    * **every entry** (directories and files) reports a read-only mount (``statvfs``
+      ``ST_RDONLY``), so a file bind-mounted from writable storage is refused;
+    * no entry is writable by this process (``access``, which also applies ACLs for this
+      process's identity);
+    * every parent directory, up to ``/``, is **owned by root**, carries no group/other write
+      bit and is not writable by this process, so no ordinary user can rename the checkpoint
+      away and put another directory in its place. There is no exemption for sticky
+      directories: a checkpoint below ``/tmp`` is refused. Running as root is refused too,
+      because every parent on a writable filesystem is then writable by this process.
 
     Recorded, not required: mode bits that would allow writing on a writable mount (the mount,
     not the mode bits, is relied on). Not established by any local check: see
     :data:`STORAGE_OPERATOR_CHECKS`, which the operator must verify and record.
     """
-    given = Path(path).absolute()
-    resolved = given.resolve(strict=True)
     problems: list[str] = []
+    raw = Path(path)
+    if ".." in raw.parts:
+        problems.append(f"the checkpoint path contains '..' ({raw}); give the resolved path")
+    given = Path(os.path.abspath(raw))
+    resolved = given.resolve(strict=True)
     if resolved != given:
         problems.append(f"the checkpoint path goes through a symbolic link ({given} -> {resolved})")
     entries = [resolved, *sorted(resolved.rglob("*"))]
@@ -312,24 +318,34 @@ def verify_storage(
     if links:
         problems.append(f"contains symbolic links: {links[:5]}")
     entries = [p for p in entries if not p.is_symlink()]
-    dirs = [p for p in entries if p.is_dir()]
-    rw_mount = [rel(d) for d in dirs if not statvfs(d).f_flag & os.ST_RDONLY]
+    rw_mount = [rel(p) for p in entries if not statvfs(p).f_flag & os.ST_RDONLY]
     if rw_mount:
         problems.append(f"not on a read-only mount: {rw_mount[:5]}")
+    devices = sorted({lstat(p).st_dev for p in entries})
     writable = [rel(p) for p in entries if access(p, os.W_OK)]
     if writable:
         problems.append(f"writable by this process: {writable[:5]}")
-    parents = [
-        str(a)
-        for a in resolved.parents
-        if access(a, os.W_OK) or _group_or_other_writable(lstat(a).st_mode)
-    ]
+    parents = []
+    for a in resolved.parents:
+        st = lstat(a)
+        reasons = [
+            r
+            for r, bad in (
+                ("not owned by root", st.st_uid != 0),
+                ("group/other-writable", bool(st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))),
+                ("writable by this process", access(a, os.W_OK)),
+            )
+            if bad
+        ]
+        if reasons:
+            parents.append(f"{a} ({', '.join(reasons)})")
     if parents:
-        problems.append(f"replaceable parent directories (writable): {parents[:5]}")
+        problems.append(f"replaceable parent directories: {parents[:5]}")
     mode_bits = [rel(p) for p in entries if lstat(p).st_mode & 0o222]
     report = {
         "path": str(resolved),
         "read_only_mount": not rw_mount,
+        "devices": devices,
         "writable_by_process": writable[:20],
         "replaceable_parents": parents[:20],
         "entries_with_write_mode_bits": mode_bits[:20],
@@ -337,8 +353,8 @@ def verify_storage(
     }
     if problems:
         raise ProvenanceError(
-            "the checkpoint must be on a read-only mount with no replaceable parent: "
-            + "; ".join(problems)
+            "the checkpoint must be on a read-only mount below root-owned, non-writable "
+            "parents: " + "; ".join(problems)
         )
     return report
 
@@ -418,14 +434,87 @@ def inspect_checkpoint(
     return CheckpointSnapshot(root, loaded, other, data.decode("utf-8"), storage)
 
 
+SAMPLING_FIELDS = (
+    "n",
+    "seed",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "repetition_penalty",
+    "max_tokens",
+    "min_tokens",
+    "stop",
+    "stop_token_ids",
+    "ignore_eos",
+    "skip_special_tokens",
+)
+
+
+def describe_sampling(params: Any) -> dict[str, Any]:
+    """The values a ``SamplingParams`` object actually holds (read back, not requested)."""
+    return {f: _plain(getattr(params, f, None)) for f in SAMPLING_FIELDS}
+
+
+def check_sampling(
+    make: Callable[..., Any],
+    wanted: Mapping[str, Any],
+    arm_id: str,
+    describe: Callable[[Any], dict[str, Any]] = describe_sampling,
+) -> tuple[Any, dict[str, Any]]:
+    """Build a ``SamplingParams`` object and read it back; a requested value it does not hold
+    is refused."""
+    params = make(**wanted)
+    observed = describe(params)
+    changed = sorted(k for k, v in wanted.items() if observed.get(k) != v)
+    if changed:
+        raise SettingsError(
+            f"arm {arm_id}: SamplingParams did not keep the requested values for {changed}"
+        )
+    return params, observed
+
+
+def check_installed(arm: ArmSpec, installed: Mapping[str, str | None]) -> None:
+    """The installed package versions (from package metadata, before anything is imported)
+    must equal the protocol's."""
+    for key, package in (("version", "vllm"), ("transformers_version", "transformers")):
+        if installed.get(package) != arm.engine.get(key):
+            raise ProvenanceError(
+                f"arm {arm.id}: installed {package} is {installed.get(package)!r}, the protocol "
+                f"pins {arm.engine.get(key)!r}"
+            )
+
+
 def preflight(
-    arm: ArmSpec, checkpoint_dir: Path, *, storage_check: Callable[[Path], dict] = verify_storage
+    arm: ArmSpec,
+    checkpoint_dir: Path,
+    *,
+    storage_check: Callable[[Path], dict] = verify_storage,
+    installed: Mapping[str, str | None] | None = None,
+    sampling_params: Callable[..., Any] | None = None,
+    sample_shapes: Sequence[tuple[int, int]] = (),
 ) -> dict[str, Any]:
-    """Every check that needs no backend: settings, storage and the loaded-file inventory."""
-    check_inference(arm)
+    """Every check that needs no GPU and no loaded engine: settings, storage, the loaded-file
+    inventory and, when given, the installed versions and the read-back of a ``SamplingParams``
+    object for every (n, seed) the run will request. Observed engine settings need a loaded
+    engine and stay a check on the GPU host."""
+    sampling = check_inference(arm)
     check_engine(arm)
+    if installed is not None:
+        check_installed(arm, installed)
+    for n, seed in sample_shapes if sampling_params is not None else ():
+        check_sampling(sampling_params, {"n": n, "seed": seed, **sampling}, arm.id)
     snap = inspect_checkpoint(arm, checkpoint_dir, storage_check=storage_check)
-    return {"arm": arm.id, "path": str(snap.path), "loadable_files": len(snap.loaded)}
+    return {
+        "arm": arm.id,
+        "path": str(snap.path),
+        "loadable_files": len(snap.loaded),
+        "installed_checked": installed is not None,
+        "sampling_shapes_checked": [list(x) for x in sample_shapes] if sampling_params else [],
+        "storage_devices": snap.storage.get("devices"),
+    }
 
 
 # --- backend --------------------------------------------------------------------------------
@@ -509,27 +598,8 @@ class VllmBackend:
     def make_sampling_params(self, **kwargs: Any) -> Any:
         return self.vllm.SamplingParams(**kwargs)
 
-    _SAMPLING_FIELDS = (
-        "n",
-        "seed",
-        "temperature",
-        "top_p",
-        "top_k",
-        "min_p",
-        "presence_penalty",
-        "frequency_penalty",
-        "repetition_penalty",
-        "max_tokens",
-        "min_tokens",
-        "stop",
-        "stop_token_ids",
-        "ignore_eos",
-        "skip_special_tokens",
-    )
-
     def describe_sampling(self, params: Any) -> dict[str, Any]:
-        """The values a ``SamplingParams`` object actually holds (read back, not requested)."""
-        return {f: _plain(getattr(params, f, None)) for f in self._SAMPLING_FIELDS}
+        return describe_sampling(params)
 
     def default_sampling(self, llm: Any) -> dict[str, Any] | None:
         get = getattr(llm, "get_default_sampling_params", None)
@@ -544,14 +614,18 @@ class VllmBackend:
             return None
         return {f: _plain(getattr(config, f, None)) for f in ("dtype", "max_model_len", "seed")}
 
-    def shutdown(self, llm: Any) -> list[dict[str, Any]]:
-        """Attempt every teardown step and record each outcome; never raises an ``Exception``.
-        The engine's own shutdown is required. The hook names are version-dependent assumptions,
-        and whether these steps free the GPU must be validated on the GPU host."""
+    def shutdown_engine(self, llm: Any) -> list[dict[str, Any]]:
+        """The engine's own shutdown (required); never raises an ``Exception``. The hook names
+        are version-dependent assumptions."""
+        name, fn = _engine_shutdown(llm)
+        return [_step(name, fn, required=True)]
+
+    def release(self) -> list[dict[str, Any]]:
+        """Process-level teardown, run after the caller has dropped every reference to the
+        engine: parallel state, garbage collection, then the CUDA cache, so memory freed by
+        the collection is returned too. Never raises an ``Exception``; whether this frees the
+        GPU must be validated on the GPU host."""
         steps: list[dict[str, Any]] = []
-        if llm is not None:
-            name, fn = _engine_shutdown(llm)
-            steps.append(_step(name, fn, required=True))
         for name in ("destroy_model_parallel", "destroy_distributed_environment"):
             fn = getattr(self.parallel_state, name, None)
             steps.append(_step(f"parallel_state.{name}", fn if callable(fn) else None))
@@ -565,13 +639,14 @@ class VllmBackend:
         steps.append(_step("torch.cuda.empty_cache", empty_cache if cuda is not None else None))
         return steps
 
-    def parent_torch_memory_allocated(self) -> int | None:
-        """This process's PyTorch allocator only. vLLM's worker processes, CUDA contexts and
-        NCCL buffers are not counted, so this never shows that the GPU was released."""
+    def parent_torch_memory(self) -> dict[str, int] | None:
+        """This process's PyTorch allocator only: memory allocated to tensors and memory
+        reserved by the caching allocator. vLLM's worker processes, CUDA contexts and NCCL
+        buffers are not counted, so this never shows that the GPU was released."""
         cuda = getattr(self.torch, "cuda", None)
         if cuda is None or not cuda.is_available():
             return None
-        return int(cuda.memory_allocated())
+        return {"allocated": int(cuda.memory_allocated()), "reserved": int(cuda.memory_reserved())}
 
     def live_children(self) -> list[int]:
         """Child processes started through ``multiprocessing`` that are still alive. Processes
@@ -689,26 +764,61 @@ class VllmEngine:
     def _sampling_params(self, n: int, seed: int) -> tuple[Any, dict[str, Any]]:
         """Build a ``SamplingParams`` object and read it back; a requested value the object does
         not hold is refused."""
-        wanted = {"n": n, "seed": seed, **self._sampling}
-        params = self.backend.make_sampling_params(**wanted)
-        observed = self.backend.describe_sampling(params)
-        changed = sorted(k for k, v in wanted.items() if observed.get(k) != v)
-        if changed:
-            raise SettingsError(
-                f"arm {self.arm.id}: SamplingParams did not keep the requested values for {changed}"
+        return check_sampling(
+            self.backend.make_sampling_params,
+            {"n": n, "seed": seed, **self._sampling},
+            self.arm.id,
+            self.backend.describe_sampling,
+        )
+
+    def _teardown(self) -> tuple[list[dict[str, Any]], BaseException | None]:
+        """Shut the engine down, drop every reference to it, then release process-level
+        resources (so garbage collection and the cache clearing come after the engine is no
+        longer referenced). Returns the steps and an interrupt to re-raise, if any."""
+        steps: list[dict[str, Any]] = []
+        interrupted: BaseException | None = None
+        llm, self._llm, self._tokenizer = self._llm, None, None
+        if llm is not None:
+            try:
+                steps += self.backend.shutdown_engine(llm)
+            except BaseException as exc:
+                steps.append(
+                    {
+                        "step": "backend.shutdown_engine",
+                        "status": "failed",
+                        "error": _err(exc),
+                        "required": True,
+                    }
+                )
+                if not isinstance(exc, Exception):
+                    interrupted = exc
+                    # The traceback's frames would otherwise keep the engine alive.
+                    traceback.clear_frames(exc.__traceback__)
+        del llm
+        try:
+            steps += self.backend.release()
+        except BaseException as exc:
+            steps.append(
+                {
+                    "step": "backend.release",
+                    "status": "failed",
+                    "error": _err(exc),
+                    "required": True,
+                }
             )
-        return params, observed
+            if interrupted is None and not isinstance(exc, Exception):
+                interrupted = exc
+        return steps, interrupted
 
     def _cleanup_failed_load(self, exc: BaseException) -> None:
         # The runner never receives this engine, so it cannot close it: shut down here whatever
         # was created (if vLLM itself failed to construct, only the process-level steps run).
-        try:
-            steps = self.backend.shutdown(self._llm)
-        except BaseException as cleanup_exc:  # keep the original error as the one raised
-            steps = [{"step": "backend.shutdown", "status": "failed", "error": _err(cleanup_exc)}]
-        self._llm = None
-        self._tokenizer = None
-        gc.collect()
+        # The original error is the one raised, even if the cleanup is interrupted. Its
+        # traceback's frames (for example inside the engine's own methods) would otherwise keep
+        # the engine alive through the release steps; their locals are cleared, the traceback
+        # itself is kept.
+        traceback.clear_frames(exc.__traceback__)
+        steps, _ = self._teardown()
         self._close_state = "failed"
         self._close_error = _err(exc)
         self.close_report = {
@@ -798,32 +908,29 @@ class VllmEngine:
     def _close(self, report: dict[str, Any]) -> None:
         errors: list[str] = []
         interrupted: BaseException | None = None
-        try:
-            steps = self.backend.shutdown(self._llm)
-        except BaseException as exc:  # an interrupt still drops references and is recorded
-            steps = [{"step": "backend.shutdown", "status": "failed", "error": _err(exc)}]
-            if not isinstance(exc, Exception):
-                interrupted = exc
+        steps, interrupted = self._teardown()
         report["shutdown_steps"] = steps
         errors += step_failures(steps)
-        self._llm = None
-        self._tokenizer = None
-        gc.collect()
         report["errors"] = errors
         if interrupted is not None:
+            # The engine shutdown was interrupted: the references are dropped and the release
+            # steps ran, but the memory, child-process and re-hash checks do not run.
+            report["interrupted"] = True
             self._close_error = "; ".join(errors)[:_MAX_ERROR]
             raise interrupted
-        memory: int | None = None
+        memory: dict[str, int] | None = None
         try:
-            memory = self.backend.parent_torch_memory_allocated()
+            memory = self.backend.parent_torch_memory()
         except Exception as exc:
-            errors.append(f"parent_torch_memory_allocated: {_err(exc)}")
-        report["parent_process_torch_allocated_bytes"] = memory
+            errors.append(f"parent_torch_memory: {_err(exc)}")
+        report["parent_process_torch_allocated_bytes"] = memory and memory["allocated"]
+        report["parent_process_torch_reserved_bytes"] = memory and memory["reserved"]
         limit = self.max_parent_memory_after_close
         report["parent_process_memory_limit_bytes"] = limit
-        if limit is not None and memory is not None and memory > limit:
+        if limit is not None and memory is not None and max(memory.values()) > limit:
             errors.append(
-                f"{memory} bytes still allocated in this process after close (limit {limit})"
+                f"{memory['allocated']} bytes allocated / {memory['reserved']} reserved still in "
+                f"this process after close (limit {limit})"
             )
         try:
             children = list(self.backend.live_children())
