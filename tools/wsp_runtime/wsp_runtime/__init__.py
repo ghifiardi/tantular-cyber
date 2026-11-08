@@ -17,4 +17,4 @@ Status 2026-11-08: tested with stand-in modules only. No model has been loaded a
 has run. See ``docs/wsp/runtime.md`` for what still needs a real GPU.
 """
 
-RUNTIME_VERSION = "0.4.0"
+RUNTIME_VERSION = "0.5.0"

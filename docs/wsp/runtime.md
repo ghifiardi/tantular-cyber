@@ -67,7 +67,8 @@ before a real run:
   other inference key is refused. Engine keys must all be known: `name`, `version`,
   `transformers_version`, `dtype`, `max_model_len`, `llm_seed`, `gpu_memory_utilization`,
   `tensor_parallel_size` and `generation_config` are required and pinned, and `batching`,
-  `sharding`, `hardware` are optional pinned strings. `REPLACE` (any case, leading spaces
+  `sharding`, `hardware` are optional pinned strings, and so are `vllm_module_version` /
+  `transformers_module_version` (see versions below). `REPLACE` (any case, leading spaces
   ignored) is refused everywhere. Any other engine key (for example `quantization` or
   `trust_remote_code`) is refused, not dropped. `dtype` must be `bfloat16`, `float16` or
   `float32` (`auto` would let vLLM choose). `generation_config` must be `auto` (read from the
@@ -77,11 +78,18 @@ before a real run:
 - **Checked before any arm runs or any output is written** (`run.py`, in this order): the
   offline and no-telemetry variables are forced (a conflicting value is refused); the dataset
   and leakage reference are loaded against the protocol (C3); the grader's dependency versions
-  and the installed vLLM and transformers versions (package metadata) are checked; a
+  are checked and both version sources of vLLM and transformers are reconciled (below); a
   `SamplingParams` object is built and read back for every (n, seed) the run requests; and
   every arm's settings, storage and loaded-file inventory are checked (`preflight()`). Each load
   repeats the settings, storage and inventory checks before the backend is created, and checks
-  the imported vLLM and transformers versions against the protocol again. What needs a loaded
+  the imported modules' versions against the protocol again.
+- **Versions, compared exactly.** The protocol's `version` / `transformers_version` are the
+  **package-metadata** versions (`importlib.metadata`); preflight requires the installed
+  metadata to equal them. The modules' `__version__` strings, read in preflight (an import, no
+  GPU) and again at load, must equal the same pins, or an explicitly registered
+  `vllm_module_version` / `transformers_module_version` when the module reports a differently
+  formatted string (for example a local `+cu124` suffix). Nothing is stripped or normalised: a
+  format difference is refused until it is registered. What needs a loaded
   engine (the tokenizer, observed engine settings) is checked or recorded at load time; the
   effective engine configuration stays a GPU-host check.
 - **Storage (`verify_storage`).** Required, or the load is refused:
@@ -95,8 +103,12 @@ before a real run:
   - every parent directory up to `/` is **owned by root**, has no group or other write bit and
     is not writable by this process, so no ordinary user can rename the checkpoint away and put
     another directory in its place. **There is no exemption for sticky directories**: a
-    checkpoint below `/tmp` is refused. A process running as root is refused as well, because
+    checkpoint below `/tmp` is refused. A process running as root is also caught here, because
     every parent on a writable filesystem is writable by root; run as an unprivileged user.
+  - the process does not run with **effective uid 0**: refused explicitly, whatever the
+    filesystem reports (on a fully read-only filesystem root's writes fail, so the parent check
+    alone would not catch it). Writability is checked with the process's **effective** ids
+    (`os.access(..., effective_ids=True)`).
 
   Recorded, not required: entries whose mode bits would allow writing on a writable mount (the
   mount, not the mode bits, is relied on). **Not established by any local check**, so the
@@ -107,7 +119,8 @@ before a real run:
   - that no writable alias exists: no other mount, bind mount or overlay exposes the same
     storage writably, to this or any other user or process;
   - that no privileged process can mount over, remount read-write or replace the checkpoint or
-    any parent between the check and vLLM opening the files (the local checks trust root);
+    any parent **at any time during the run**, including after load (files may be opened lazily,
+    and the close re-hash reads them again); the local checks trust root;
   - that no ACL, group membership or privileged process outside this one can write the
     checkpoint or its parents;
   - that the files on the mount are the ones fetched and registered (re-hashed after mounting).
@@ -156,10 +169,21 @@ before a real run:
 - **Failed loads are cleaned up.** If anything fails after vLLM was created (the tokenizer, the
   settings read-back, `describe`), the engine is torn down the same way as in a close before the
   error propagates, since the runner never receives it; if vLLM's constructor itself fails, only
-  the release steps run. The original error's traceback frames have their local variables
-  cleared first (the traceback itself is kept), because a frame inside the engine's own methods
-  would otherwise keep the engine alive through the release. The cleanup is recorded as a
-  `load_failed` report.
+  the release steps run. The cleanup is recorded as a `load_failed` report.
+  - **Frames in the whole error chain are cleared first.** A frame inside the engine's own
+    methods would otherwise keep the engine alive through the release, and such a frame may sit
+    in the propagating error's traceback or in the traceback of an error it was raised from
+    (`__cause__`) or during (`__context__`). The local variables of every frame in the whole
+    chain are cleared (cycles are detected; frames still executing are left alone). The errors
+    themselves, their types, messages, chaining and traceback lines are kept. **This reduces
+    post-mortem debugging information:** a debugger can no longer inspect those frames' local
+    variables.
+  - **Ordinary cleanup failures** (a failed or missing shutdown step) are attached to the
+    original error as a note (`cleanup after this failed load also failed: …`) and recorded in
+    the report; the original error is re-raised.
+  - **An interrupt during the cleanup** propagates instead of the original error; the original
+    failure stays reachable as the interrupt's `__context__`, and the report records
+    `interrupted: true`.
 - **Close, in this order.** (1) The engine's own shutdown, a required step:
   `llm_engine.shutdown`, or `llm_engine.engine_core.shutdown` on the V1 engine (these names are
   **version-dependent assumptions**; a version with neither fails every close). (2) Every
@@ -176,9 +200,19 @@ before a real run:
   the engine's shutdown hook ends that step (recorded as failed); the references are still
   dropped and the release steps still run, but the memory, child-process and re-hash checks do
   not, the report records `interrupted: true`, and the interrupt then propagates. An interrupt
-  during the release steps ends them at that point. If the runner closes the engine while
-  another failure is propagating, it records only `closed: false`; the close report (in the CLI
-  summary and `runtime_report.json`) keeps why.
+  during the release steps ends them at that point. An interrupt during the memory,
+  child-process or re-hash checks marks the report `interrupted: true` with what ran so far.
+  If the runner closes the engine while another failure is propagating, it records only
+  `closed: false` in the manifest; why is in the close report.
+
+**What survives an interruption.** The close reports are kept in memory and written only into
+`runtime_report.json`. After an interrupt **during the run** (`run_paired`), the runner writes
+its aborted manifest and records, and `run.py` then writes `runtime_report.json` best-effort,
+marked `interrupted: true`, with every close report recorded so far, before the interrupt
+propagates; no summary is printed. A second interrupt while the report is being written can
+prevent it. After an interrupt **before the run starts** (during the checks) nothing is written
+at all. After an ordinary failure the report and the printed summary both carry the close
+reports.
 
 **What the close does not show.** `torch.cuda.memory_allocated` and `memory_reserved` count only
 this process's PyTorch allocator. vLLM's engine runs in worker processes, and CUDA contexts and
@@ -270,8 +304,9 @@ differs is refused; a `REPLACE` pin is recorded as unpinned) and written to
   not of the source file, and the same value the run manifest records as `items_file_sha256`.
   Selection rules: `all`, or `first_n_in_file_order` with a positive `n` not above
   `source_rows`. Held-out entries must use `all` and register `items_sha256`, and their
-  `source_rows` must equal `dataset.n_items` when that is a number. Unknown keys and
-  placeholders are refused.
+  `source_rows` must equal `dataset.n_items` when present (which must then be an integer).
+  Unknown keys, in a split entry or at the `runtime_sources` level, and placeholders are
+  refused.
 - **Leakage.** `check_disjoint` refuses any item whose normalised problem text (NFKC, case
   folded, whitespace collapsed) or ID also occurs in the reference set, **whatever the answers
   say**, since answer formatting differs between sources. `combine()` runs it between splits as
@@ -280,8 +315,9 @@ differs is refused; a `REPLACE` pin is recorded as unpinned) and written to
   reformatted or translated problems are not detected.
 - **Wired into the CLI.** `run.py` loads the whole `--source` (the run's split) and the whole
   `--leakage-reference` (the other split), each against its registration, refuses any overlap
-  between the **whole** files, and only then applies the registered selection rule and checks
-  the selected items' hash.
+  between the **whole** files, and only then applies each file's registered selection rule and
+  checks its registered converted-items hash, **for both files**: a wrong registration of the
+  other split is found in a development run, not at that split's first run.
 
 ## `runtime_report.json` (supplementary evidence)
 
@@ -298,9 +334,9 @@ manifest's `items_file_sha256` matches the selected items.
 - **The original failure is kept.** If the report cannot be written, the error is recorded in
   the summary as `runtime_report_error` and the run's own failure (if any) is still the one
   reported; the exit code is non-zero.
-- **Interrupts.** On an interrupt (Ctrl-C) or another `BaseException`, the exception propagates
-  without a report or summary; the exit status is the interpreter's, not one of the documented
-  codes. The aborted manifest the runner wrote is still there.
+- **Interrupts.** See "What survives an interruption" above: an interrupt during the run still
+  gets a best-effort report marked `interrupted: true`; the interrupt itself propagates and the
+  exit status is the interpreter's, not one of the documented codes.
 - **Its SHA-256 is printed** in the summary (`runtime_report_sha256`) so it can be recorded
   externally. **Printing the hash does not protect the report**, and naming the manifest's hash
   does not either: anyone who can write the run directory can change the file. Any decision that
@@ -320,12 +356,21 @@ recorded, and reviewed before the confirmatory run.
 | **Effective engine settings** | Read back and record the effective values of the engine arguments left at vLLM's defaults (batch limits, prefix caching, eager/compilation, KV-cache dtype, attention backend, scheduler) and the effective model configuration |
 | Storage | The operator checks listed under C1, storage |
 | Which files vLLM actually opens | Every file in the directory is registered and hashed, offline mode is forced and `generation_config` cannot be a path, but a file read from elsewhere (vLLM's caches, a compile, Triton or FlashInfer cache, environment-selected paths) would be invisible. Check with file-access tracing on the host |
+| Version strings | Record the package-metadata and module `__version__` strings of vLLM and transformers in the image; register a module version explicitly if the formats differ |
 | Telemetry | Confirm that `VLLM_NO_USAGE_STATS` / `DO_NOT_TRACK` disable usage reporting on the pinned vLLM (with egress blocked and logged) |
 | Effective stop tokens | The stop set vLLM applies at generation time is not observable from the adapter; record it on the chosen version and confirm it includes eos `248044`. Check whether `</think>` survives `skip_special_tokens` |
 | vLLM API details | `LLM(...)` keyword names (`generation_config`, `load_format`, `trust_remote_code`), `generate(prompts, params_list)` returning outputs in input order with `.prompt`, `finish_reason` and `token_ids`, `SamplingParams` attributes, `get_default_sampling_params`, `llm_engine.model_config`, the shutdown hooks, `torch.cuda.memory_reserved`, and how child samples of an `n > 1` request are seeded |
 | Chat template rendering | Confirm that `apply_chat_template(..., chat_template=<file>, enable_thinking=True)` on the pinned transformers renders the prompt the authors used |
 | math-verify 0.9.0 | Confirm `parse` / `verify` keyword names (`parsing_timeout`, `timeout_seconds`, `raise_on_error`); that a timeout raises with `raise_on_error=True` instead of returning an empty parse or `False` (stand-in exceptions cannot show this); error behaviour; and the C2 interpretations against `mathqa.py` |
 | Throughput, KV-cache headroom, peak memory | Measured in the development smoke run, not estimated here |
+
+## Follow-ups
+
+- **Repeated hashing (performance).** Each arm's checkpoint is hashed up to four times (CLI
+  preflight, the loader's preflight, the engine's inspection, the close re-hash), and `base` and
+  `base_reload` share a directory. That is correct but slow on large weights; reusing a snapshot
+  between the checks that run back to back is a possible optimisation, kept out of this change.
+- The repository's invisible-character test does not flag U+2028.
 
 ## Running (isolated host only; not authorized yet)
 

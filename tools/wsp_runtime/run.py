@@ -12,11 +12,13 @@ Before any arm runs or any output is written, this command:
 * forces the offline and no-telemetry variables (a conflicting value is refused);
 * loads the whole ``--source`` (the run's split) and the whole ``--leakage-reference`` (the
   other split) against the protocol's ``dataset.runtime_sources`` registration: raw file
-  SHA-256, row count, whole-file ID-set hash, selection rule and, for held-out, the converted
-  items' hash; refuses any problem whose normalised text occurs in both, whatever the answers
-  say; and only then applies the registered selection rule;
-* checks the grader's dependency versions and the installed vLLM and transformers versions
-  (package metadata);
+  SHA-256, row count, whole-file ID-set hash; refuses any problem whose normalised text occurs
+  in both, whatever the answers say; and only then applies each file's registered selection
+  rule and checks its registered converted-items hash (both files, not only the source);
+* checks the grader's dependency versions and reconciles both version sources of vLLM and
+  transformers with the protocol: the package metadata must equal the pins, and the modules'
+  ``__version__`` must equal the pins or an explicitly registered module version (nothing is
+  stripped or normalised);
 * builds and reads back a ``SamplingParams`` object for every (n, seed) the run requests;
 * checks every arm's settings, storage (read-only mount below root-owned, non-writable parents)
   and loaded-file inventory.
@@ -38,8 +40,10 @@ This command needs vLLM, transformers, torch and math-verify, which are installe
 isolated host. It has been exercised only with stand-in modules (``tests/test_wsp_runtime.py``),
 which validate control flow, not compatibility with the real libraries. Exit codes: 0 ok, 1 run
 or validation failure (including any error record or a report that could not be written), 2
-usage error. An interrupt (Ctrl-C) or other ``BaseException`` propagates: no report is written,
-and the exit status is the interpreter's.
+usage error. An interrupt (Ctrl-C) or other ``BaseException`` during the run propagates
+unchanged after a best-effort ``runtime_report.json`` (marked ``interrupted``) is written next
+to the runner's aborted manifest; no summary is printed and the exit status is the
+interpreter's. An interrupt before the run starts (during the checks) leaves nothing on disk.
 """
 
 from __future__ import annotations
@@ -108,6 +112,17 @@ def _installed(lookup: Callable[[str], str]) -> dict[str, str | None]:
     return out
 
 
+def _module_versions() -> dict[str, str | None]:
+    # Imported here only (no GPU needed), to reconcile with the package metadata in preflight.
+    import transformers
+    import vllm
+
+    return {
+        "vllm": getattr(vllm, "__version__", None),
+        "transformers": getattr(transformers, "__version__", None),
+    }
+
+
 def _vllm_sampling_params() -> Callable[..., Any]:
     # Imported here only (no GPU needed); the object is built and read back in preflight.
     from vllm import SamplingParams
@@ -123,6 +138,7 @@ def run(
     dependency_lookup: Callable[[str], str] = metadata.version,
     storage_check: Callable[[Path], dict] = verify_storage,
     sampling_params_factory: Callable[[], Callable[..., Any]] = _vllm_sampling_params,
+    module_versions: Callable[[], dict[str, str | None]] = _module_versions,
     environ: MutableMapping[str, str] | None = None,
 ) -> dict[str, Any]:
     p = argparse.ArgumentParser(prog="wsp-runtime-run", description=__doc__.split("\n\n")[0])
@@ -187,6 +203,9 @@ def run(
     items, dataset_report = datasets.select_registered(
         source_items, source_report, protocol.dataset, args.split
     )
+    # The reference's registered selection and converted-items hash are checked too, so a wrong
+    # registration of the other split is found now, not at that split's first run.
+    _, ref_selected = datasets.select_registered(ref_items, ref_report, protocol.dataset, other)
     grader_dependencies = check_dependencies(
         protocol.grader.get("dependencies"), lookup=dependency_lookup
     )
@@ -198,6 +217,7 @@ def run(
     else:
         shapes = [(1, seed) for seed in protocol.seeds]
     installed = _installed(dependency_lookup)
+    modules = module_versions()
     make_params = sampling_params_factory()
     dirs = _checkpoints(args.checkpoint, [a.id for a in protocol.arms])
     preflights = [
@@ -206,6 +226,7 @@ def run(
             dirs[a.id],
             storage_check=storage_check,
             installed=installed,
+            modules=modules,
             sampling_params=make_params,
             sample_shapes=shapes,
         )
@@ -236,6 +257,8 @@ def run(
         "hash_definitions": dict(datasets.HASH_DEFINITION_TEXT),
         "forced_environment": offline,
         "installed_versions": installed,
+        "module_versions": modules,
+        "leakage_reference_selection": ref_selected.as_dict(),
         "grader": {
             "id": grader.id,
             "revision": grader.revision,
@@ -262,10 +285,18 @@ def run(
             keep_outputs=args.keep_outputs,
             run_id=run_id,
         )
-    except Exception as exc:  # interrupts propagate; the runner already wrote the manifest
+    except Exception as exc:  # the runner already wrote the aborted manifest
         summary.update(run_status="aborted", error=f"{type(exc).__name__}: {exc}"[:300])
         _report_into(summary, out, run_id, runtime_report, dataset_report)
         raise _Aborted(summary) from exc
+    except BaseException as exc:
+        # An interrupt: the runner already wrote the aborted manifest and records; write the
+        # report (with the close reports so far) best-effort, then let the interrupt propagate
+        # unchanged. No summary is printed.
+        summary.update(run_status="interrupted", error=f"{type(exc).__name__}: {exc}"[:300])
+        runtime_report["interrupted"] = True
+        _report_into(summary, out, run_id, runtime_report, dataset_report)
+        raise
     counts = result.manifest["counts"]
     summary.update(
         run_status=result.manifest["run_status"],

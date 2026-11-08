@@ -277,6 +277,9 @@ def registered_source(dataset: dict[str, Any], split: str) -> dict[str, Any]:
             f"the protocol must register dataset.runtime_sources with hash_definitions "
             f"{HASH_DEFINITIONS!r}"
         )
+    extra = sorted(set(sources) - {"hash_definitions", "development", "heldout", "note"})
+    if extra:
+        raise DatasetLoadError(f"dataset.runtime_sources: keys not understood: {extra}")
     spec = sources.get(split)
     if not isinstance(spec, dict):
         raise DatasetLoadError(f"the protocol does not register {where}")
@@ -289,7 +292,7 @@ def registered_source(dataset: dict[str, Any], split: str) -> dict[str, Any]:
         missing.append("items_sha256")
     if missing:
         raise DatasetLoadError(f"{where}: missing {missing}")
-    if spec["shape"] not in SHAPES or SHAPES[spec["shape"]] != split:
+    if not isinstance(spec["shape"], str) or SHAPES.get(spec["shape"]) != split:
         raise DatasetLoadError(f"{where}.shape must be the {split} shape")
     for key in ("source_file_sha256", "source_ids_sha256", "items_sha256"):
         if key in spec and not (isinstance(spec[key], str) and _SHA.fullmatch(spec[key])):
@@ -311,7 +314,9 @@ def registered_source(dataset: dict[str, Any], split: str) -> dict[str, Any]:
     if split == "heldout" and rule != "all":
         raise DatasetLoadError(f"{where}.selection: held-out items are all evaluated")
     declared = dataset.get("n_items")
-    if split == "heldout" and type(declared) is int and declared != spec["source_rows"]:
+    if declared is not None and type(declared) is not int:
+        raise DatasetLoadError("dataset.n_items must be an integer when present")
+    if split == "heldout" and declared is not None and declared != spec["source_rows"]:
         raise DatasetLoadError(f"{where}.source_rows differs from dataset.n_items")
     return dict(spec)
 
@@ -319,10 +324,10 @@ def registered_source(dataset: dict[str, Any], split: str) -> dict[str, Any]:
 def load_registered(
     path: Path, dataset: dict[str, Any], split: str
 ) -> tuple[list[Item], DatasetReport]:
-    """Load the whole file against the protocol's registration for ``split`` (raw file hash,
-    row count, whole-file ID set), then apply its selection rule and check the converted items'
-    hash if registered. Returns the **whole** file's items with a report of the selection; use
-    :func:`select_registered` to get the selected items after any whole-file checks."""
+    """Load the whole file against the protocol's registration for ``split``: raw file hash,
+    row count and whole-file ID set. Returns the **whole** file's items; the selection rule and
+    the converted items' hash (``items_sha256``) are checked by :func:`select_registered`,
+    which the CLI calls for both the source and the leakage reference."""
     spec = registered_source(dataset, split)
     items, report = load(
         path,

@@ -20,6 +20,7 @@ import os
 import stat
 import sys
 import threading
+import traceback
 import weakref
 from contextlib import contextmanager
 from functools import partial
@@ -63,6 +64,7 @@ from wsp_runtime.vllm_adapter import (  # noqa: E402
     SettingsError,
     VllmBackend,
     VllmEngine,
+    clear_exception_frames,
     force_offline,
     process_environment,
     step_failures,
@@ -162,6 +164,7 @@ class _Hub:
         self.events: list = []
         self.alive_at_empty_cache: list = []
         self.reserved_extra = 0
+        self.llm_class = FakeLLM
         self.answer, self.post, self.memory = answer, post, memory
         self.engine_mode, self.engine_error, self.llm_error = engine_mode, engine_error, llm_error
         self.tokenizer, self.SamplingParams = tokenizer, params
@@ -169,7 +172,7 @@ class _Hub:
     def LLM(self, **kwargs):  # mirrors vllm.LLM
         if self.llm_error is not None:
             raise self.llm_error
-        llm = FakeLLM(self, **kwargs)
+        llm = self.llm_class(self, **kwargs)
         self.llms.append(weakref.ref(llm))
         return llm
 
@@ -234,6 +237,8 @@ class FakeBackend(VllmBackend):
         params=Params,
         llm_error=None,
         reserved_extra=0,
+        llm_class=None,
+        version=VERSION,
     ):
         hub = _Hub(
             answer=answer or _correct,
@@ -249,12 +254,13 @@ class FakeBackend(VllmBackend):
         super().__init__(
             vllm=hub,
             torch=torch,
-            version=VERSION,
+            version=version,
             transformers_version=TF_VERSION,
             parallel_state=_ParallelState(hub),
         )
         self.hub = hub
         hub.reserved_extra = reserved_extra
+        hub.llm_class = llm_class or FakeLLM
 
     @property
     def calls(self):
@@ -566,7 +572,7 @@ def test_inference_settings_must_be_complete_and_typed(ckpts, edit, message) -> 
 @pytest.mark.parametrize(
     ("edit", "message"),
     [
-        (lambda a: a["engine"].update(version="9.9.9"), "engine version"),
+        (lambda a: a["engine"].update(version="9.9.9"), "module __version__ of vllm"),
         (lambda a: a["engine"].update(version="REPLACE (open)"), "must be pinned"),
         (lambda a: a["engine"].update(version=" replace later"), "must be pinned"),
         (lambda a: a["engine"].update(transformers_version="9.9"), "transformers"),
@@ -706,9 +712,15 @@ def test_parents_must_be_root_owned_and_not_writable(ckpts, tmp_path, uid, mode,
 def test_writable_checkpoint_is_refused(protocol, ckpts) -> None:
     (ckpts[0] / "config.json").chmod(0o644)
     backend = FakeBackend()
-    with pytest.raises(ProvenanceError, match="read-only"):
+    with pytest.raises(ProvenanceError, match="writable by this process"):
         _engine(protocol, ckpts, backend)
     assert backend.llms == []
+
+
+def test_effective_uid_0_is_refused(ckpts, tmp_path) -> None:
+    check = partial(_storage_for(tmp_path / "ckpt"), geteuid=lambda: 0)
+    with pytest.raises(ProvenanceError, match="effective uid 0"):
+        check(ckpts[0])
 
 
 def _write(name, data=b"x"):
@@ -823,6 +835,84 @@ def test_failure_after_engine_creation_shuts_it_down(protocol, ckpts) -> None:
     (report,) = reports
     assert report["phase"] == "load_failed" and "synthetic tokenizer" in report["load_error"]
     assert report["errors"] == []
+
+
+class _ChainedLLM(FakeLLM):
+    """Fails inside its own methods, re-raising an inner error (as a wrapping library might);
+    the inner frame holds ``self`` and appears only in the inner error's traceback."""
+
+    def _inner(self):
+        raise ValueError("synthetic inner failure")
+
+    def get_tokenizer(self):
+        if self.hub.chain == "cause_only":
+            # Raised from the inner error outside its handler: only __cause__ links them.
+            try:
+                self._inner()
+            except ValueError as e:
+                inner = e
+            raise RuntimeError("synthetic outer failure") from inner
+        try:
+            self._inner()
+        except ValueError as inner:
+            if self.hub.chain == "cause":
+                raise RuntimeError("synthetic outer failure") from inner
+            raise RuntimeError("synthetic outer failure")  # noqa: B904 - implicit __context__ on purpose
+
+
+@pytest.mark.parametrize("chain", ["cause", "cause_only", "context"])
+def test_engine_frames_anywhere_in_the_error_chain_are_cleared(protocol, ckpts, chain) -> None:
+    backend = FakeBackend(llm_class=_ChainedLLM)
+    backend.hub.chain = chain
+    with pytest.raises(RuntimeError, match="synthetic outer failure") as info:
+        _engine(protocol, ckpts, backend)
+    assert backend.hub.alive_at_empty_cache == [False]  # no frame kept the engine alive
+    exc = info.value
+    inner = exc.__context__ if chain == "context" else exc.__cause__
+    assert isinstance(inner, ValueError) and str(inner) == "synthetic inner failure"
+    assert (exc.__cause__ is not None) is (chain != "context")
+    if chain == "cause_only":
+        assert exc.__context__ is None
+    text = "".join(traceback.format_exception(exc))
+    assert "_inner" in text and "get_tokenizer" in text  # traceback lines are kept
+
+
+def test_clearing_frames_follows_cycles() -> None:
+    a, b = RuntimeError("a"), ValueError("b")
+    a.__context__, b.__context__ = b, a
+    b.__cause__ = a
+    assert clear_exception_frames(a) == 2
+
+
+def test_ordinary_cleanup_failures_are_attached_to_the_original_error(protocol, ckpts) -> None:
+    def broken():
+        raise RuntimeError("synthetic tokenizer failure")
+
+    backend = FakeBackend(tokenizer=broken, engine_error=RuntimeError("synthetic shutdown failure"))
+    reports: list = []
+    with pytest.raises(RuntimeError, match="synthetic tokenizer failure") as info:
+        _engine(protocol, ckpts, backend, reports=reports)
+    (note,) = info.value.__notes__
+    assert "cleanup after this failed load also failed" in note
+    assert "synthetic shutdown failure" in note
+    assert reports[0]["errors"] and reports[0]["interrupted"] is False
+    assert backend.hub.alive_at_empty_cache == [False]
+
+
+def test_an_interrupt_during_failed_load_cleanup_propagates_with_the_original(
+    protocol, ckpts
+) -> None:
+    def broken():
+        raise RuntimeError("synthetic tokenizer failure")
+
+    backend = FakeBackend(tokenizer=broken, engine_error=KeyboardInterrupt())
+    reports: list = []
+    with pytest.raises(KeyboardInterrupt) as info:
+        _engine(protocol, ckpts, backend, reports=reports)
+    original = info.value.__context__
+    assert isinstance(original, RuntimeError) and "synthetic tokenizer" in str(original)
+    assert reports[0]["interrupted"] is True
+    assert backend.hub.alive_at_empty_cache == [False]  # the release still ran
 
 
 def test_failed_engine_construction_runs_process_level_cleanup(protocol, ckpts) -> None:
@@ -1022,6 +1112,24 @@ def test_an_interrupt_during_shutdown_still_releases_and_records(protocol, ckpts
         e.close()
 
 
+def test_an_interrupt_during_the_post_close_checks_is_marked(protocol, ckpts, monkeypatch) -> None:
+    reports: list = []
+    e = _engine(protocol, ckpts, reports=reports)
+
+    def interrupted(root):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(vllm_adapter, "hash_tree", interrupted)  # the close re-hash
+    with pytest.raises(KeyboardInterrupt):
+        e.close()
+    (report,) = reports
+    assert report["interrupted"] is True
+    assert "interrupted during the post-close checks" in report["errors"]
+    assert report["parent_process_torch_reserved_bytes"] == 0  # what ran is kept
+    with pytest.raises(CloseError, match="earlier close failed"):
+        e.close()
+
+
 def test_backend_shutdown_exception_is_recorded(protocol, ckpts) -> None:
     class Raising(FakeBackend):
         def shutdown_engine(self, llm):
@@ -1116,6 +1224,7 @@ def _cli(
     lookup=None,
     environ=None,
     params=Params,
+    modules=None,
     **kw,
 ):
     backend = backend or FakeBackend()
@@ -1127,6 +1236,7 @@ def _cli(
         dependency_lookup=lookup or _lookup(),
         storage_check=STORAGE["check"],
         sampling_params_factory=lambda: params,
+        module_versions=lambda: modules or {"vllm": VERSION, "transformers": TF_VERSION},
         environ={} if environ is None else environ,
     )
     return summary, backend
@@ -1372,6 +1482,14 @@ def test_cli_refuses_wrong_checkpoint_mapping_and_protocols(tmp_path, protocol, 
         (lambda d: d["runtime_sources"]["heldout"].update(shape="math_train"), "shape"),
         (lambda d: d.update(n_items=500), "differs from dataset.n_items"),
         (lambda d: d["runtime_sources"]["development"].update(limit=2), "not understood"),
+        (lambda d: d["runtime_sources"].update(developement={}), "not understood"),
+        (lambda d: d["runtime_sources"]["development"].update(shape=["math_train"]), "shape"),
+        (lambda d: d.update(n_items="500"), "n_items must be an integer"),
+        # The leakage reference's registered converted-items hash is checked as well.
+        (
+            lambda d: d["runtime_sources"]["heldout"].update(items_sha256="0" * 64),
+            "heldout.items_sha256 differs",
+        ),
     ],
 )
 def test_cli_dataset_identity_comes_from_the_protocol(
@@ -1424,8 +1542,12 @@ def test_cli_applies_the_registered_selection(tmp_path, protocol, ckpts) -> None
     [
         ({"environ": {"HF_HUB_OFFLINE": "0"}}, SettingsError, "HF_HUB_OFFLINE"),
         ({"environ": {"VLLM_NO_USAGE_STATS": "0"}}, SettingsError, "VLLM_NO_USAGE_STATS"),
-        ({"lookup": _lookup(vllm="9.9.9")}, ProvenanceError, "installed vllm is '9.9.9'"),
-        ({"lookup": "no-transformers"}, ProvenanceError, "installed transformers is None"),
+        ({"lookup": _lookup(vllm="9.9.9")}, ProvenanceError, "package metadata of vllm is '9.9.9'"),
+        (
+            {"lookup": "no-transformers"},
+            ProvenanceError,
+            "package metadata of transformers is None",
+        ),
     ],
 )
 def test_environment_and_installed_versions_are_checked_before_any_output(
@@ -1448,6 +1570,42 @@ def _lookup_without(package):
         return full(name)
 
     return lookup
+
+
+def test_module_versions_are_reconciled_in_preflight_without_normalisation(
+    tmp_path, protocol, ckpts
+) -> None:
+    local = VERSION + "+cu124"
+    backend = FakeBackend()
+    with pytest.raises(
+        ProvenanceError, match=r"module __version__ of vllm is '0\.0\.0-stub\+cu124'"
+    ):
+        _cli(tmp_path, protocol.raw, ckpts, backend=backend,
+             modules={"vllm": local, "transformers": TF_VERSION})  # fmt: skip
+    assert not (tmp_path / "run").exists() and backend.llms == []
+    # Explicitly registered, the differently formatted module version is accepted, at preflight
+    # and again at load; the package-metadata pin is unchanged.
+    raw = copy.deepcopy(protocol.raw)
+    for a in raw["arms"]:
+        a["engine"]["vllm_module_version"] = local
+    summary, _ = _cli(
+        tmp_path, raw, ckpts, backend=FakeBackend(version=local),
+        modules={"vllm": local, "transformers": TF_VERSION},
+    )  # fmt: skip
+    assert summary["run_status"] == "complete"
+
+
+def test_an_interrupt_during_the_run_keeps_the_report(tmp_path, protocol, ckpts) -> None:
+    def interrupt(prompt, params):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _cli(tmp_path, protocol.raw, ckpts, backend=FakeBackend(answer=interrupt))
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["run_status"] == "aborted"
+    report = json.loads((tmp_path / "run" / "runtime_report.json").read_text())
+    assert report["interrupted"] is True and report["run_id"] == manifest["run_id"]
+    assert report["close_reports"][0]["phase"] == "close"  # the runner closed the engine
 
 
 def test_sampling_read_back_is_checked_before_any_output(tmp_path, protocol, ckpts) -> None:

@@ -65,7 +65,8 @@ artifact.
    (which the Experiment 8 draft protocol does not have yet; recorded after the approved
    fetch), and checkpoints on a read-only mount below root-owned, non-writable parents; what
    the local storage checks cannot establish (privileged remounts, overlays, writable aliases)
-   stays an explicit operator verification.
+   stays an explicit operator verification. Running with effective uid 0 is refused, and both
+   version sources (package metadata and module `__version__`) are reconciled in preflight.
 2. **Grader adapter** for math-verify, following `mathqa.py`: last `\boxed{}`/`\fbox{}`, no
    box means incorrect, 5 s timeouts. Its `id` and `revision` must match the protocol. Test it
    on synthetic strings only, never on MATH-500 content in the repo.

@@ -79,6 +79,11 @@ _ENGINE_KEYS: dict[str, type] = {
 _DTYPES = ("bfloat16", "float16", "float32")  # "auto" would let vLLM choose
 # Descriptive engine keys: recorded with the protocol, not passed to vLLM; pinned strings.
 _ENGINE_DESCRIPTIVE = frozenset({"batching", "sharding", "hardware"})
+# Optional, explicit acceptance of a module ``__version__`` string that differs in format from
+# the package-metadata version pinned in ``version`` / ``transformers_version`` (for example a
+# local "+cu124" suffix). Without them both sources must equal the pin exactly; nothing is
+# stripped or normalised.
+_ENGINE_MODULE_VERSIONS = frozenset({"vllm_module_version", "transformers_module_version"})
 # "auto" reads generation_config.json from the (hashed) checkpoint directory; "vllm" uses vLLM's
 # own defaults. A path is refused: vLLM would read a file outside the hashed checkpoint.
 _GENERATION_CONFIG = ("auto", "vllm")
@@ -120,7 +125,8 @@ STORAGE_OPERATOR_CHECKS = (
     "no writable alias of the same storage exists: no other mount, bind mount or overlay "
     "exposes it writably, to this or any other user or process",
     "no privileged process can mount over, remount read-write or replace the checkpoint or any "
-    "parent between the check and vLLM opening the files (root is trusted by the local checks)",
+    "parent at any time during the run, including after load (files may be opened lazily and "
+    "the close re-hash reads them again); root is trusted by the local checks",
     "no ACL, group membership or privileged process outside this one can write the checkpoint "
     "or its parent directories",
     "the files on the mount are the ones fetched and registered (re-hashed after mounting)",
@@ -155,6 +161,24 @@ def user_message(template: str, problem: str) -> str:
 
 def _err(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:_MAX_ERROR]
+
+
+def clear_exception_frames(exc: BaseException | None) -> int:
+    """Clear the local variables of every frame in ``exc``'s traceback and in the tracebacks of
+    its whole ``__cause__`` / ``__context__`` chain (cycles are detected). The exceptions, their
+    types, messages, chaining and traceback lines are kept; only frame locals go, so a
+    post-mortem debugger can no longer inspect them. Frames still executing are left alone
+    (``traceback.clear_frames`` skips them). Returns the number of exceptions visited."""
+    seen: set[int] = set()
+    todo = [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        traceback.clear_frames(e.__traceback__)
+        todo += [e.__cause__, e.__context__]
+    return len(seen)
 
 
 def force_offline(environ: MutableMapping[str, str] | None = None) -> dict[str, str]:
@@ -222,7 +246,7 @@ def check_engine(arm: ArmSpec, backend: Any | None = None) -> dict[str, Any]:
     """The arm's engine settings, complete and typed; with a ``backend``, also matching the
     installed versions. Returns the keyword arguments for ``vllm.LLM`` (without paths)."""
     eng = arm.engine
-    unknown = sorted(set(eng) - set(_ENGINE_KEYS) - _ENGINE_DESCRIPTIVE)
+    unknown = sorted(set(eng) - set(_ENGINE_KEYS) - _ENGINE_DESCRIPTIVE - _ENGINE_MODULE_VERSIONS)
     if unknown:
         raise SettingsError(f"arm {arm.id}: engine keys not understood: {unknown}")
     if eng.get("name") != "vllm" or (backend is not None and backend.engine != "vllm"):
@@ -232,7 +256,7 @@ def check_engine(arm: ArmSpec, backend: Any | None = None) -> dict[str, Any]:
         raise SettingsError(f"arm {arm.id}: engine keys missing: {missing}")
     for key, kind in _ENGINE_KEYS.items():
         _typed(eng[key], kind, f"arm {arm.id}: engine.{key}")
-    for key in sorted(_ENGINE_DESCRIPTIVE & set(eng)):
+    for key in sorted((_ENGINE_DESCRIPTIVE | _ENGINE_MODULE_VERSIONS) & set(eng)):
         _typed(eng[key], str, f"arm {arm.id}: engine.{key}")
     if eng["dtype"] not in _DTYPES:
         raise SettingsError(f"arm {arm.id}: engine.dtype must be one of {_DTYPES}")
@@ -248,16 +272,12 @@ def check_engine(arm: ArmSpec, backend: Any | None = None) -> dict[str, Any]:
     if arm.inference.get("max_tokens", 0) >= eng["max_model_len"]:
         raise SettingsError(f"arm {arm.id}: inference.max_tokens must be below max_model_len")
     if backend is not None:
-        if backend.version != eng["version"]:
-            raise ProvenanceError(
-                f"arm {arm.id}: engine version {backend.version!r} is not the protocol's "
-                f"{eng['version']!r}"
-            )
-        if backend.transformers_version != eng["transformers_version"]:
-            raise ProvenanceError(
-                f"arm {arm.id}: transformers {backend.transformers_version!r} is not the "
-                f"protocol's {eng['transformers_version']!r}"
-            )
+        check_versions(
+            arm,
+            "imported module __version__",
+            {"vllm": backend.version, "transformers": backend.transformers_version},
+            expected_module_versions(arm),
+        )
     return {
         "dtype": eng["dtype"],
         "max_model_len": eng["max_model_len"],
@@ -278,8 +298,9 @@ def verify_storage(
     path: Path,
     *,
     statvfs: Callable[[Any], Any] = os.statvfs,
-    access: Callable[[Any, int], bool] = os.access,
+    access: Callable[[Any, int], bool] | None = None,
     lstat: Callable[[Any], os.stat_result] = os.lstat,
+    geteuid: Callable[[], int] = os.geteuid,
 ) -> dict[str, Any]:
     """Local checks that the checkpoint cannot be changed or replaced during the run.
 
@@ -294,14 +315,22 @@ def verify_storage(
     * every parent directory, up to ``/``, is **owned by root**, carries no group/other write
       bit and is not writable by this process, so no ordinary user can rename the checkpoint
       away and put another directory in its place. There is no exemption for sticky
-      directories: a checkpoint below ``/tmp`` is refused. Running as root is refused too,
-      because every parent on a writable filesystem is then writable by this process.
+      directories: a checkpoint below ``/tmp`` is refused;
+    * the process does not run with **effective uid 0** (refused explicitly, whatever the
+      filesystem reports).
+
+    Writability is checked with the process's **effective** ids where the platform supports
+    it (``os.access(..., effective_ids=True)``).
 
     Recorded, not required: mode bits that would allow writing on a writable mount (the mount,
     not the mode bits, is relied on). Not established by any local check: see
     :data:`STORAGE_OPERATOR_CHECKS`, which the operator must verify and record.
     """
     problems: list[str] = []
+    if access is None:
+        access = _effective_access
+    if geteuid() == 0:
+        problems.append("running with effective uid 0 (root); run as an unprivileged user")
     raw = Path(path)
     if ".." in raw.parts:
         problems.append(f"the checkpoint path contains '..' ({raw}); give the resolved path")
@@ -357,6 +386,12 @@ def verify_storage(
             "parents: " + "; ".join(problems)
         )
     return report
+
+
+def _effective_access(path: Any, mode: int) -> bool:
+    if os.access in os.supports_effective_ids:
+        return os.access(path, mode, effective_ids=True)
+    return os.access(path, mode)  # pragma: no cover - platforms without effective-id access
 
 
 # --- loaded-file inventory ------------------------------------------------------------------
@@ -476,15 +511,47 @@ def check_sampling(
     return params, observed
 
 
-def check_installed(arm: ArmSpec, installed: Mapping[str, str | None]) -> None:
-    """The installed package versions (from package metadata, before anything is imported)
-    must equal the protocol's."""
-    for key, package in (("version", "vllm"), ("transformers_version", "transformers")):
-        if installed.get(package) != arm.engine.get(key):
+def pinned_versions(arm: ArmSpec) -> dict[str, Any]:
+    """The package-metadata versions the protocol pins."""
+    return {
+        "vllm": arm.engine.get("version"),
+        "transformers": arm.engine.get("transformers_version"),
+    }
+
+
+def expected_module_versions(arm: ArmSpec) -> dict[str, Any]:
+    """The module ``__version__`` strings the protocol accepts: the pinned version itself, or
+    an explicitly registered ``*_module_version`` string. Nothing is stripped or normalised."""
+    pins = pinned_versions(arm)
+    return {
+        "vllm": arm.engine.get("vllm_module_version", pins["vllm"]),
+        "transformers": arm.engine.get("transformers_module_version", pins["transformers"]),
+    }
+
+
+def check_versions(
+    arm: ArmSpec, source: str, found: Mapping[str, Any], expected: Mapping[str, Any]
+) -> None:
+    for package in ("vllm", "transformers"):
+        if found.get(package) != expected.get(package):
             raise ProvenanceError(
-                f"arm {arm.id}: installed {package} is {installed.get(package)!r}, the protocol "
-                f"pins {arm.engine.get(key)!r}"
+                f"arm {arm.id}: {source} of {package} is {found.get(package)!r}, the protocol "
+                f"expects {expected.get(package)!r} (versions are compared exactly; register a "
+                "differently formatted module version explicitly)"
             )
+
+
+def check_installed(
+    arm: ArmSpec,
+    installed: Mapping[str, str | None],
+    modules: Mapping[str, str | None] | None = None,
+) -> None:
+    """Both version sources, reconciled before anything runs: the package metadata must equal
+    the protocol's pins, and (when given) the modules' ``__version__`` must equal the pins or
+    the explicitly registered module versions."""
+    check_versions(arm, "installed package metadata", installed, pinned_versions(arm))
+    if modules is not None:
+        check_versions(arm, "module __version__", modules, expected_module_versions(arm))
 
 
 def preflight(
@@ -493,6 +560,7 @@ def preflight(
     *,
     storage_check: Callable[[Path], dict] = verify_storage,
     installed: Mapping[str, str | None] | None = None,
+    modules: Mapping[str, str | None] | None = None,
     sampling_params: Callable[..., Any] | None = None,
     sample_shapes: Sequence[tuple[int, int]] = (),
 ) -> dict[str, Any]:
@@ -503,7 +571,7 @@ def preflight(
     sampling = check_inference(arm)
     check_engine(arm)
     if installed is not None:
-        check_installed(arm, installed)
+        check_installed(arm, installed, modules)
     for n, seed in sample_shapes if sampling_params is not None else ():
         check_sampling(sampling_params, {"n": n, "seed": seed, **sampling}, arm.id)
     snap = inspect_checkpoint(arm, checkpoint_dir, storage_check=storage_check)
@@ -512,6 +580,7 @@ def preflight(
         "path": str(snap.path),
         "loadable_files": len(snap.loaded),
         "installed_checked": installed is not None,
+        "module_versions_checked": modules is not None,
         "sampling_shapes_checked": [list(x) for x in sample_shapes] if sampling_params else [],
         "storage_devices": snap.storage.get("devices"),
     }
@@ -813,12 +882,12 @@ class VllmEngine:
     def _cleanup_failed_load(self, exc: BaseException) -> None:
         # The runner never receives this engine, so it cannot close it: shut down here whatever
         # was created (if vLLM itself failed to construct, only the process-level steps run).
-        # The original error is the one raised, even if the cleanup is interrupted. Its
-        # traceback's frames (for example inside the engine's own methods) would otherwise keep
-        # the engine alive through the release steps; their locals are cleared, the traceback
-        # itself is kept.
-        traceback.clear_frames(exc.__traceback__)
-        steps, _ = self._teardown()
+        # Frames anywhere in the error's cause/context chain (for example inside the engine's
+        # own methods, or an inner error vLLM re-raised) would otherwise keep the engine alive
+        # through the release steps: their locals are cleared, the errors themselves are kept.
+        clear_exception_frames(exc)
+        steps, interrupted = self._teardown()
+        errors = step_failures(steps)
         self._close_state = "failed"
         self._close_error = _err(exc)
         self.close_report = {
@@ -827,10 +896,19 @@ class VllmEngine:
             "phase": "load_failed",
             "load_error": _err(exc),
             "shutdown_steps": steps,
-            "errors": step_failures(steps),
+            "errors": errors,
+            "interrupted": interrupted is not None,
         }
         if self._reports is not None:
             self._reports.append(dict(self.close_report))
+        if interrupted is not None:
+            # An interrupt during the cleanup propagates; the original failure stays reachable
+            # as its context.
+            interrupted.__context__ = exc
+            raise interrupted
+        if errors:
+            # Ordinary cleanup failures are attached to the original error, which is re-raised.
+            exc.add_note(f"cleanup after this failed load also failed: {'; '.join(errors)}")
 
     def describe(self) -> dict[str, Any]:
         return _copy(self._describe)
@@ -918,6 +996,18 @@ class VllmEngine:
             report["interrupted"] = True
             self._close_error = "; ".join(errors)[:_MAX_ERROR]
             raise interrupted
+        try:
+            self._close_checks(report, errors)
+        except Exception:
+            raise
+        except BaseException:
+            # Interrupted during the checks after teardown: mark the report, keep what ran.
+            report["interrupted"] = True
+            errors.append("interrupted during the post-close checks")
+            self._close_error = "; ".join(errors)[:_MAX_ERROR]
+            raise
+
+    def _close_checks(self, report: dict[str, Any], errors: list[str]) -> None:
         memory: dict[str, int] | None = None
         try:
             memory = self.backend.parent_torch_memory()
