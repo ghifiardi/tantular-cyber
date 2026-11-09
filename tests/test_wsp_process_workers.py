@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import time
 
@@ -35,10 +37,13 @@ FAST = ["--load-timeout", "30", "--batch-timeout", "3", "--close-timeout", "5", 
 @pytest.fixture(autouse=True)
 def _no_workers_left_behind():
     yield
-    for p in multiprocessing.active_children():  # reaps finished ones as a side effect
+    # Detect first (active_children() reaps finished ones and lists the live ones), then clean
+    # up, so a leaked worker fails the test instead of being hidden by the cleanup.
+    leaked = multiprocessing.active_children()
+    for p in leaked:
         p.kill()
         p.join(5)
-    assert multiprocessing.active_children() == []
+    assert leaked == [], f"worker processes were left running: {leaked}"
 
 
 def _run(tmp_path, protocol_raw, ckpts, *, options=None, factory=STUB, probe=PROBE, extra=(),
@@ -268,15 +273,27 @@ def test_requests_round_trip_with_their_identity(protocol, ckpts) -> None:
 # --- malformed worker output ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["exit_before_ready", "ready_not_json", "ready_without_load_id"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "exit_before_ready",
+        "ready_not_json",
+        "ready_without_load_id",
+        "ready_partial_frame",
+        "ready_partial_header",
+        "ready_nan",
+    ],
+)
 def test_malformed_or_missing_ready_fails_the_load(protocol, ckpts, mode) -> None:
     loader = pw.process_arm_loader(
         protocol, "base", ckpts[0], engine_factory=STUB, options={"misbehave": mode},
         timeouts=pw.Timeouts(load=5, batch=2, close=2, kill_grace=1),
         worker=stubs.misbehaving_worker,
     )  # fmt: skip
+    started = time.monotonic()
     with pytest.raises(pw.WorkerError):
         loader()
+    assert time.monotonic() - started < 15  # a partial message times out like no message
 
 
 @pytest.mark.parametrize(
@@ -290,6 +307,14 @@ def test_malformed_or_missing_ready_fails_the_load(protocol, ckpts, mode) -> Non
         "batch_bool_tokens",
         "batch_extra_key",
         "batch_exit",
+        "batch_partial_frame",
+        "batch_oversized",
+        "batch_deep_nesting",
+        "batch_nan",
+        "batch_infinity",
+        "batch_overflowing_float",
+        "batch_echo_bool_seed",
+        "batch_echo_float_n",
     ],
 )
 def test_malformed_batch_replies_fail_the_batch_and_the_arm(protocol, ckpts, mode) -> None:
@@ -303,7 +328,7 @@ def test_malformed_batch_replies_fail_the_batch_and_the_arm(protocol, ckpts, mod
     reqs = [
         t._req(protocol, item=f"dev-{k}", prompt=f"Synthetic: compute {k} + 1.") for k in range(2)
     ]
-    with pytest.raises((pw.WorkerProtocolError, pw.WorkerDied)):
+    with pytest.raises((pw.WorkerProtocolError, pw.WorkerDied, pw.WorkerTimeout)):
         e.generate_batch(reqs)
     with pytest.raises(pw.WorkerDied, match="not usable"):
         e.generate_batch(reqs)  # every later batch of the arm fails at once
@@ -371,3 +396,347 @@ def test_the_command_line_always_uses_process_isolation(tmp_path, protocol, ckpt
     argv = [*t._argv(tmp_path, ckpts, protocol_raw=protocol.raw), "--isolation", "in-process"]
     with pytest.raises(SystemExit):  # no command-line option selects the in-process seam
         t.runtime_cli.run(argv)
+
+
+# --- R30 fix round: whole-message deadlines, strict JSON, timeouts ------------------------
+
+
+def test_a_partial_reply_that_stalls_times_out_and_kills_the_worker(protocol, ckpts) -> None:
+    reports: list = []
+    loader = pw.process_arm_loader(
+        protocol, "base", ckpts[0], engine_factory=STUB,
+        options={"misbehave": "batch_partial_frame"},
+        timeouts=pw.Timeouts(load=10, batch=1, close=2, kill_grace=1),
+        worker=stubs.misbehaving_worker, reports=reports,
+    )  # fmt: skip
+    e = loader()
+    started = time.monotonic()
+    with pytest.raises(pw.WorkerTimeout, match="incomplete message"):
+        e.generate_batch([t._req(protocol)])
+    assert time.monotonic() - started < 5
+    assert e._proc.exitcode is not None and e._proc.exitcode < 0  # killed, and reaped
+    with pytest.raises(pw.WorkerCloseError):
+        e.close()
+    assert any("WorkerTimeout" in x for x in reports[-1]["errors"])
+
+
+def test_a_partial_reply_that_stalls_aborts_the_run_with_its_records(
+    tmp_path, protocol, ckpts
+) -> None:
+    with pytest.raises(t.runtime_cli._Aborted):
+        _run(tmp_path, protocol.raw, ckpts, options={"misbehave": "batch_partial_frame"},
+             worker=stubs.misbehaving_worker, extra=["--batch-timeout", "1"])  # fmt: skip
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["run_status"] == "aborted"
+    assert [x["status"] for x in manifest["execution"]["loads"]] == ["close_failed"]
+    records = [json.loads(x) for x in (tmp_path / "run" / "records.jsonl").read_text().splitlines()]
+    assert len(records) == 5 * 4 and {r["status"] for r in records} == {"error"}
+    assert {r["error_class"].split(":")[-1] for r in records} == {"WorkerTimeout", "WorkerDied"}
+
+
+def test_a_frame_read_has_one_deadline_for_the_whole_message() -> None:
+    a, b = socket.socketpair()
+    with a, b:
+        a.setblocking(False)
+        b.sendall(b"\x00\x00\x00\x00\x00\x00\x00\x10" + b"0123")  # 16 announced, 4 sent
+        started = time.monotonic()
+        with pytest.raises(pw.WorkerTimeout, match="12 bytes of an incomplete message"):
+            pw._read_frame(a.fileno(), pw._Clock(0.5))
+        assert time.monotonic() - started < 2
+
+
+def test_a_frame_write_to_a_worker_that_does_not_read_times_out() -> None:
+    a, b = socket.socketpair()
+    with a, b:
+        a.setblocking(False)  # as the parent's end is
+        started = time.monotonic()
+        with pytest.raises(pw.WorkerTimeout, match="did not take the whole message"):
+            pw._write_frame(a.fileno(), b"x" * (64 * 1024 * 1024), pw._Clock(0.5))
+        assert time.monotonic() - started < 3
+
+
+def test_an_oversized_frame_is_refused_before_it_is_read() -> None:
+    a, b = socket.socketpair()
+    with a, b:
+        a.setblocking(False)
+        b.sendall((pw.MAX_MESSAGE_BYTES + 1).to_bytes(8, "big"))
+        with pytest.raises(pw.WorkerProtocolError, match="limit"):
+            pw._read_frame(a.fileno(), pw._Clock(1))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [b'{"kind": "x", "payload": NaN}', b'{"kind": "x", "payload": -Infinity}',
+     b'{"kind": "x", "payload": 1e400}', b"[" * 100_000 + b"]" * 100_000,
+     b'{"kind": "x", "payload": 1' + b"0" * 5000 + b"}"],
+)  # fmt: skip
+def test_only_strict_finite_json_is_accepted(text) -> None:
+    with pytest.raises(pw.WorkerProtocolError, match="not valid JSON"):
+        pw._decode(text, ("x",))
+    assert pw._decode(b'{"kind": "x", "payload": [1.5, -2, 1e300]}', ("x",)) == (
+        "x", [1.5, -2, 1e300],
+    )  # fmt: skip
+
+
+def test_an_unexpected_error_after_sending_a_batch_marks_the_worker_dead(
+    protocol, ckpts, monkeypatch
+) -> None:
+    e = _engine(protocol, ckpts)
+
+    def boom(*args):
+        raise MemoryError("synthetic")
+
+    monkeypatch.setattr(pw, "decode_items", boom)
+    with pytest.raises(pw.WorkerDied, match="MemoryError"):
+        e.generate_batch([t._req(protocol)])
+    assert e._dead and not e._in_flight and e._proc.exitcode is not None
+    with pytest.raises(pw.WorkerDied, match="not usable"):
+        e.generate_batch([t._req(protocol)])
+    with pytest.raises(pw.WorkerCloseError):
+        e.close()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"load": math.nan}, {"batch": math.inf}, {"close": 0}, {"close": -1.0},
+     {"load": True}, {"load": "5"}, {"batch": pw.MAX_TIMEOUT * 2}, {"kill_grace": 0.0},
+     {"kill_grace": pw.MIN_KILL_GRACE / 2}],
+)  # fmt: skip
+def test_invalid_timeouts_are_refused(kwargs) -> None:
+    with pytest.raises(ValueError):
+        pw.Timeouts(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--kill-grace", "nan"], ["--kill-grace", "0"], ["--kill-grace", "-1"],
+     ["--load-timeout", "inf"], ["--batch-timeout", "0"], ["--close-timeout", "abc"]],
+)  # fmt: skip
+def test_the_command_line_refuses_invalid_timeouts_before_any_work(
+    tmp_path, protocol, ckpts, extra, capsys
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _run(tmp_path, protocol.raw, ckpts, extra=extra)
+    assert exc.value.code == 2
+    assert not (tmp_path / "run").exists()
+
+
+# --- R30 fix round: probe read-backs ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("probe", "error", "message"),
+    [
+        ("wsp_process_stubs:probe_without_sampling", pw.WorkerProtocolError, "read back"),
+        ("wsp_process_stubs:probe_missing_a_shape", pw.WorkerProtocolError, "read back"),
+        ("wsp_process_stubs:probe_changed_value", t.SettingsError, "did not keep"),
+    ],
+)
+def test_the_probe_sampling_read_back_is_checked_in_the_parent(
+    tmp_path, protocol, ckpts, probe, error, message
+) -> None:
+    with pytest.raises(error, match=message):
+        _run(tmp_path, protocol.raw, ckpts, probe=probe)
+    assert not (tmp_path / "run").exists()
+
+
+def test_the_preflight_records_the_probe_read_back(tmp_path, protocol, ckpts) -> None:
+    _run(tmp_path, protocol.raw, ckpts)
+    report = json.loads((tmp_path / "run" / "runtime_report.json").read_text())
+    for entry in report["preflight"]:
+        assert entry["sampling_built_in"] == "probe_worker"
+        assert entry["sampling_shapes_checked"]  # not [] as before
+
+
+# --- R30 fix round: interrupts during cleanup ---------------------------------------------
+
+
+def test_a_second_interrupt_during_cleanup_still_stops_the_worker(
+    protocol, ckpts, monkeypatch
+) -> None:
+    reports: list = []
+    loader = pw.process_arm_loader(
+        protocol, "base", ckpts[0], engine_factory=STUB, options={"hang_at_batch": 0},
+        timeouts=pw.Timeouts(load=30, batch=30, close=5, kill_grace=2), reports=reports,
+    )  # fmt: skip
+    e = loader()
+    original_recv = pw._recv
+
+    def first_interrupt(conn, proc, clock, expected):
+        if "batch" in expected:
+            time.sleep(0.3)  # the worker is now busy in its batch
+            raise KeyboardInterrupt  # the first Ctrl-C
+        return original_recv(conn, proc, clock, expected)
+
+    monkeypatch.setattr(pw, "_recv", first_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        e.generate_batch([t._req(protocol)])
+    assert e._in_flight
+
+    original_signal = pw._signal
+    sent: list = []
+
+    def second_interrupt(proc, pgid, sig):
+        if not sent:
+            sent.append(sig)
+            os.kill(os.getpid(), signal.SIGINT)  # the second Ctrl-C, in the middle of stopping
+            time.sleep(0.05)
+        return original_signal(proc, pgid, sig)
+
+    monkeypatch.setattr(pw, "_signal", second_interrupt)
+    with pytest.raises(KeyboardInterrupt):  # delivered once the cleanup has finished
+        e.close()
+    assert sent == [signal.SIGTERM]
+    assert e._proc.exitcode is not None and _gone(e.pid)  # stopped and reaped
+    assert e._conn.closed
+    (report,) = reports
+    assert report["phase"] == "close" and any("in flight" in x for x in report["errors"])
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # handler restored
+
+
+def test_an_interrupt_during_the_probe_stops_it_without_waiting_the_grace(
+    tmp_path, protocol, monkeypatch
+) -> None:
+    original_recv = pw._recv
+    seen: list = []
+
+    def interrupt(conn, proc, clock, expected):
+        if "probe" in expected:
+            seen.append(proc)
+            raise KeyboardInterrupt
+        return original_recv(conn, proc, clock, expected)
+
+    monkeypatch.setattr(pw, "_recv", interrupt)
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        pw.run_probe({"protocol": protocol.raw, "sample_shapes": [[1, 0]]}, timeout=30,
+                     probe="wsp_process_stubs:hanging_probe", grace=20)  # fmt: skip
+    assert time.monotonic() - started < 10  # not the 20 s grace
+    (proc,) = seen
+    assert proc.exitcode is not None and proc.exitcode < 0
+
+
+# --- R30 fix round: process groups --------------------------------------------------------
+
+
+def test_each_worker_leads_its_own_process_group(protocol, ckpts) -> None:
+    e = _engine(protocol, ckpts)
+    assert os.getpgid(e.pid) == e.pid == e.pgid != os.getpgrp()
+    assert e.describe()["isolation"]["pgid"] == e.pid
+    e.close()
+    assert e.close_report["worker"]["process_group"] == ["none"]
+
+
+def test_only_worker_groups_are_ever_signalled(tmp_path, protocol, ckpts, monkeypatch) -> None:
+    calls: list = []
+    original = os.killpg
+
+    def record(pgid, sig):
+        calls.append(pgid)
+        return original(pgid, sig)
+
+    monkeypatch.setattr(pw.os, "killpg", record)
+    with pytest.raises(t.runtime_cli._Aborted) as exc:
+        _run(tmp_path, protocol.raw, ckpts, options={"hang_at_batch": 0},
+             extra=["--batch-timeout", "1"])  # fmt: skip
+    (report,) = exc.value.summary["close_reports"]
+    # The probe's group (checked after it exited) and the arm worker's group, nothing else.
+    assert report["worker"]["pgid"] in calls and len(set(calls)) == 2
+    assert os.getpgrp() not in calls and os.getpid() not in calls
+
+
+def test_the_parent_group_is_never_signalled() -> None:
+    with pytest.raises(RuntimeError, match="refusing"):
+        pw._killpg(os.getpgrp(), 0)
+    assert pw._group_of(os.getpid()) is None  # this process's own group
+    ctx = multiprocessing.get_context("spawn")
+    plain = ctx.Process(target=time.sleep, args=(30,))  # no _bootstrap: stays in our group
+    plain.start()
+    try:
+        assert pw._group_of(plain.pid) is None
+        ended, group = pw._stop(plain, 2, pgid=pw._group_of(plain.pid))
+        assert ended == "terminated" and group == "not_checked"
+    finally:
+        plain.kill()
+        plain.join(5)
+
+
+def test_a_worker_whose_group_cannot_be_verified_is_refused(protocol, ckpts, monkeypatch) -> None:
+    monkeypatch.setattr(pw, "_group_of", lambda pid: None)
+    killpg: list = []
+    monkeypatch.setattr(pw.os, "killpg", lambda *a: killpg.append(a))
+    reports: list = []
+    loader = pw.process_arm_loader(
+        protocol, "base", ckpts[0], engine_factory=STUB,
+        timeouts=pw.Timeouts(load=30, batch=3, close=5, kill_grace=2), reports=reports,
+    )  # fmt: skip
+    with pytest.raises(pw.WorkerProtocolError, match="own process group"):
+        loader()
+    assert killpg == []  # stopped as a single process, no group signalled
+    assert reports[-1]["phase"] == "load_failed"
+    assert reports[-1]["worker"]["exitcode"] is not None
+
+
+def test_a_process_left_in_the_worker_group_fails_the_close(protocol, ckpts) -> None:
+    e = _engine(protocol, ckpts, descendant="in_group")
+    child = e.describe()["descendant_pid"]
+    assert os.getpgid(child) == e.pgid
+    with pytest.raises(pw.WorkerCloseError, match="outlived it and had to be killed"):
+        e.close()
+    assert e._proc.exitcode == 0  # the worker itself closed cleanly
+    assert e.close_report["worker"]["process_group"] == ["killed"]
+    _wait_gone(child)
+
+
+def test_a_timeout_stops_the_whole_worker_group(protocol, ckpts, tmp_path) -> None:
+    marker = tmp_path / "descendant"
+    e = _engine(protocol, ckpts, descendant="in_group", descendant_marker=str(marker),
+                hang_at_batch=0)  # fmt: skip
+    child = e.describe()["descendant_pid"]
+    with pytest.raises(pw.WorkerTimeout):
+        e.generate_batch([t._req(protocol)])
+    _wait_gone(child)
+    # The group was terminated while the worker was alive, so the engine's own process got
+    # SIGTERM (a chance to clean up), not only the SIGKILL of the sweep after the worker exited.
+    assert marker.read_text() == "SIGTERM"
+    with pytest.raises(pw.WorkerCloseError):
+        e.close()
+
+
+def test_a_descendant_that_leaves_the_group_escapes_it(protocol, ckpts) -> None:
+    # The documented limit: a descendant in a new session is neither seen nor stopped.
+    e = _engine(protocol, ckpts, descendant="detached")
+    child = e.describe()["descendant_pid"]
+    try:
+        _wait_until(lambda: os.getpgid(child) == child)
+        e.close()  # nothing is left in the group, so the close succeeds
+        assert e.close_report["worker"]["process_group"] == ["none"]
+        assert not _gone(child)  # ...yet the escaped process is still running
+    finally:
+        with __import__("contextlib").suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+    _wait_gone(child)
+
+
+def test_the_worker_releases_its_engine_when_the_parent_goes_away(protocol, ckpts, tmp_path):
+    marker = tmp_path / "closed"
+    e = _engine(protocol, ckpts, close_marker=str(marker))
+    e._conn.close()  # the parent end goes away without a close message
+    e._proc.join(10)
+    assert e._proc.exitcode == 4 and marker.read_text() == "closed"
+    with pytest.raises(pw.WorkerCloseError, match="already exited"):
+        e.close()
+
+
+def _wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with __import__("contextlib").suppress(OSError):
+            if predicate():
+                return
+        time.sleep(0.02)
+    raise AssertionError("condition not reached")
+
+
+def _wait_gone(pid, timeout=5.0):
+    _wait_until(lambda: _gone(pid), timeout)

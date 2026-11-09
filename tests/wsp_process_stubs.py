@@ -10,13 +10,17 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import signal
+import struct
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from wsp_eval.generation import BatchItem, Generation
+from wsp_eval.protocol import parse_protocol
 from wsp_runtime import process_worker as pw
+from wsp_runtime.vllm_adapter import check_inference
 
 STUB_VERSION = "0.0.0-stub"
 STUB_TF_VERSION = "0.0.0-stub-transformers"
@@ -34,8 +38,13 @@ class StubEngine:
         self.batches: list[list[str]] = []
         self.load_id = f"{arm.id}-stub-{os.getpid()}"
         self.close_report: dict[str, Any] | None = None
+        self.descendant: int | None = None
         if options.get("import_sentinel"):
             import wsp_sentinel_ml  # noqa: F401 - must only ever be imported in a worker
+        if options.get("descendant"):
+            self.descendant = _fork_sleeper(
+                detach=options["descendant"] == "detached", marker=options.get("descendant_marker")
+            )
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -48,6 +57,7 @@ class StubEngine:
             "load_id": self.load_id,
             "synthetic": False,
             "worker_pid": os.getpid(),
+            "descendant_pid": self.descendant,
         }
 
     def generate_batch(self, requests: list[Any]) -> list[BatchItem]:
@@ -74,6 +84,8 @@ class StubEngine:
 
     def close(self) -> None:
         o = self.options
+        if o.get("close_marker"):
+            Path(o["close_marker"]).write_text("closed")
         if o.get("hang_on_close"):
             time.sleep(3600)
         self.close_report = {"phase": "close", "batches": self.batches, "pid": os.getpid()}
@@ -83,6 +95,28 @@ class StubEngine:
             atexit.register(os._exit, o["exit_code_after_close"])
         if o.get("linger_after_close"):
             atexit.register(time.sleep, 3600)
+
+
+def _fork_sleeper(*, detach: bool, marker: str | None = None) -> int:
+    """A process the engine starts (as vLLM starts its own): in the worker's process group, or
+    ``detach``-ed into a new session, which escapes the group. With ``marker``, a SIGTERM it
+    receives is written there before it exits."""
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - the forked child
+        try:
+            if detach:
+                os.setsid()
+            if marker:
+
+                def on_term(signum: int, frame: Any) -> None:
+                    Path(marker).write_text("SIGTERM")
+                    os._exit(0)
+
+                signal.signal(signal.SIGTERM, on_term)
+            time.sleep(3600)
+        finally:
+            os._exit(0)
+    return pid
 
 
 def stub_engine(arm: Any, checkpoint_dir: Path, options: dict[str, Any]) -> StubEngine:
@@ -104,16 +138,48 @@ def vllm_stub_engine(arm: Any, checkpoint_dir: Path, options: dict[str, Any]) ->
     )
 
 
+def _readbacks(spec: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    # What a SamplingParams object that kept every requested value would read back.
+    out = {}
+    for arm in parse_protocol(spec["protocol"]).arms:
+        settings = check_inference(arm)
+        out[arm.id] = [{"n": n, "seed": s, **settings} for n, s in spec["sample_shapes"]]
+    return out
+
+
 def stub_probe(spec: dict[str, Any]) -> dict[str, Any]:
     return {
         "modules": {"vllm": STUB_VERSION, "transformers": STUB_TF_VERSION},
-        "sampling": {},
+        "sampling": _readbacks(spec),
         "probe_pid": os.getpid(),
     }
 
 
 def probe_with_other_version(spec: dict[str, Any]) -> dict[str, Any]:
-    return {"modules": {"vllm": "9.9.9", "transformers": STUB_TF_VERSION}, "sampling": {}}
+    return {**stub_probe(spec), "modules": {"vllm": "9.9.9", "transformers": STUB_TF_VERSION}}
+
+
+def probe_without_sampling(spec: dict[str, Any]) -> dict[str, Any]:
+    return {**stub_probe(spec), "sampling": {}}
+
+
+def probe_missing_a_shape(spec: dict[str, Any]) -> dict[str, Any]:
+    out = stub_probe(spec)
+    first = next(iter(out["sampling"]))
+    out["sampling"][first] = out["sampling"][first][:-1]
+    return out
+
+
+def probe_changed_value(spec: dict[str, Any]) -> dict[str, Any]:
+    out = stub_probe(spec)
+    last = list(out["sampling"])[-1]
+    out["sampling"][last][0]["seed"] = out["sampling"][last][0]["seed"] + 1
+    return out
+
+
+def hanging_probe(spec: dict[str, Any]) -> dict[str, Any]:
+    time.sleep(3600)
+    return stub_probe(spec)
 
 
 def probe_importing_sentinel(spec: dict[str, Any]) -> dict[str, Any]:
@@ -126,19 +192,41 @@ def failing_probe(spec: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError("synthetic probe failure")
 
 
+def _partial_frame(conn: Any, announced: int, sent: bytes) -> None:
+    # A frame header announcing ``announced`` bytes, then only ``sent`` of them.
+    os.write(conn.fileno(), struct.pack("!Q", announced) + sent)
+
+
+def _raw(conn: Any, kind: str, payload: Any, *, replace: tuple[str, str] | None = None) -> None:
+    # A message that pw.send would refuse to write (NaN, overflowing numbers).
+    text = json.dumps({"kind": kind, "payload": payload}, allow_nan=True)
+    if replace:
+        text = text.replace(*replace)
+    pw.write_frame(conn, text.encode())
+
+
 def misbehaving_worker(conn: Any, spec: dict[str, Any]) -> None:
     """A worker that breaks the wire protocol in one specific way (``options.misbehave``)."""
     mode = spec["options"]["misbehave"]
     if mode == "exit_before_ready":
         sys.exit(0)
     if mode == "ready_not_json":
-        conn.send_bytes(b"\x00 not json")
+        pw.write_frame(conn, b"\x00 not json")
         time.sleep(3600)
     if mode == "ready_without_load_id":
         pw.send(conn, "ready", {"describe": {"provider": "x"}})
         time.sleep(3600)
+    if mode == "ready_partial_frame":
+        _partial_frame(conn, 1000, b'{"kind": "re')
+        time.sleep(3600)
+    if mode == "ready_partial_header":
+        os.write(conn.fileno(), b"\x00\x00\x00")
+        time.sleep(3600)
+    if mode == "ready_nan":
+        _raw(conn, "ready", {"describe": {"load_id": "x", "score": float("nan")}})
+        time.sleep(3600)
     pw.send(conn, "ready", {"describe": {"load_id": f"bad-{os.getpid()}"}})
-    data = conn.recv_bytes()
+    data = pw._read_frame(conn.fileno())
     requests = json.loads(data)["payload"]["requests"]
 
     def item(req: dict[str, Any], **gen: Any) -> dict[str, Any]:
@@ -154,7 +242,29 @@ def misbehaving_worker(conn: Any, spec: dict[str, Any]) -> None:
         return {"request": req, "result": {"generations": [g] * req["n"], "single": False}}
 
     if mode == "batch_not_json":
-        conn.send_bytes(b"{not json")
+        pw.write_frame(conn, b"{not json")
+    elif mode == "batch_partial_frame":
+        _partial_frame(conn, 1000, b'{"kind": "batch"')
+    elif mode == "batch_oversized":
+        _partial_frame(conn, pw.MAX_MESSAGE_BYTES + 1, b"{")
+    elif mode == "batch_deep_nesting":
+        pw.write_frame(conn, b"[" * 200_000 + b"]" * 200_000)
+    elif mode == "batch_nan":
+        _raw(conn, "batch", {"items": [item(r, usage={"x": float("nan")}) for r in requests]})
+    elif mode == "batch_infinity":
+        _raw(conn, "batch", {"items": [item(r, usage={"x": float("inf")}) for r in requests]})
+    elif mode == "batch_overflowing_float":
+        _raw(conn, "batch", {"items": [item(r, usage={"x": 1.5}) for r in requests]},
+             replace=("1.5", "1e400"))  # fmt: skip
+    elif mode == "batch_echo_bool_seed":
+        items = [item(r) for r in requests]
+        items[0]["request"] = {**items[0]["request"], "seed": bool(items[0]["request"]["seed"])}
+        assert items[0]["request"]["seed"] in (0, 1)
+        pw.send(conn, "batch", {"items": items})
+    elif mode == "batch_echo_float_n":
+        items = [item(r) for r in requests]
+        items[0]["request"] = {**items[0]["request"], "n": float(items[0]["request"]["n"])}
+        pw.send(conn, "batch", {"items": items})
     elif mode == "batch_wrong_kind":
         pw.send(conn, "closed", {"close_report": None})
     elif mode == "batch_wrong_count":

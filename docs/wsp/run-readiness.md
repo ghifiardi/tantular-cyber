@@ -68,8 +68,9 @@ artifact.
    stays an explicit operator verification. Running with effective uid 0 is refused, and both
    version sources (package metadata and module `__version__`) are reconciled in preflight.
    *Per-arm processes:* each arm now runs in its own `spawn` worker process, as the readiness
-   proposal specifies (`wsp_runtime/process_worker.py`), tested with stub workers only. A
-   worker that exited does not by itself show that every GPU resource was released;
+   proposal specifies (`wsp_runtime/process_worker.py`), in its own verified process group,
+   tested with stub workers only. A worker that exited, with an empty process group, does not
+   by itself show that every GPU resource was released (a descendant can leave the group);
    device-level checks remain required on the GPU host.
 2. **Grader adapter** for math-verify, following `mathqa.py`: last `\boxed{}`/`\fbox{}`, no
    box means incorrect, 5 s timeouts. Its `id` and `revision` must match the protocol. Test it

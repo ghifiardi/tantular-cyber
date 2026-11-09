@@ -8,9 +8,10 @@
         --operator op1 --purpose smoke --output /research/runs/RUN [--keep-outputs]
 
 Each arm runs in its own worker process (``wsp_runtime.process_worker``, ``spawn`` start
-method); this process never imports vLLM, transformers or torch, and the next arm starts only
-after the previous worker has exited and been reaped. A worker that exited does not by itself
-show that every GPU resource was released.
+method, its own process group); this process never imports vLLM, transformers or torch (it does
+load math-verify, the grader's backend), and the next arm starts only after the previous worker
+has exited, been reaped and left nothing in its process group. A worker that exited does not by
+itself show that every GPU resource was released: a descendant that left the group is not seen.
 
 Before any arm runs or any output is written, this command:
 
@@ -116,6 +117,21 @@ def _checkpoints(values: Sequence[str], arm_ids: Sequence[str]) -> dict[str, Pat
     return out
 
 
+def _seconds(flag: str, minimum: float | None = None) -> Callable[[str], float]:
+    """argparse type: a finite, positive number of seconds (``process_worker.check_seconds``)."""
+
+    def parse(text: str) -> float:
+        try:
+            value = process_worker.check_seconds(float(text), flag)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from None
+        if minimum is not None and value < minimum:
+            raise argparse.ArgumentTypeError(f"{flag} must be at least {minimum:g} s")
+        return value
+
+    return parse
+
+
 def _installed(lookup: Callable[[str], str]) -> dict[str, str | None]:
     out: dict[str, str | None] = {}
     for package in ("vllm", "transformers"):
@@ -193,19 +209,25 @@ def run(
         type=int,
         default=None,
         help=(
-            "bytes; fail the close if this process's PyTorch allocator still has more "
-            "allocated or reserved. This does not measure vLLM worker processes and never "
-            "shows the GPU was released"
+            "bytes; fail an arm's close if the PyTorch allocator of the process that holds "
+            "the engine (the arm's worker process; this process only with the in-process "
+            "test seam) still has more allocated or reserved. This does not measure vLLM's "
+            "own engine processes and never shows the GPU was released"
         ),
     )
     for flag, default in (("load", 3600.0), ("batch", 14400.0), ("close", 600.0)):
         p.add_argument(
             f"--{flag}-timeout",
-            type=float,
+            type=_seconds(f"--{flag}-timeout"),
             default=default,
             help=f"seconds; worker {flag} timeout (provisional default {default:g})",
         )
-    p.add_argument("--kill-grace", type=float, default=30.0, help="seconds after terminate/kill")
+    p.add_argument(
+        "--kill-grace",
+        type=_seconds("--kill-grace", minimum=process_worker.MIN_KILL_GRACE),
+        default=30.0,
+        help=f"seconds after terminate/kill (at least {process_worker.MIN_KILL_GRACE:g})",
+    )
     args = p.parse_args(list(argv))
 
     # Environment first: a conflicting offline or telemetry variable is refused before
@@ -260,7 +282,9 @@ def run(
     probe: dict[str, Any] | None = None
     if isolation == "process":
         # vLLM and transformers are imported only in a short-lived probe worker: it reports
-        # their __version__ and reads back SamplingParams for every (n, seed) of every arm.
+        # their __version__ and reads back SamplingParams for every (n, seed) of every arm;
+        # preflight checks those read-backs here. math-verify (the grader's backend) is still
+        # loaded in this process, below.
         probe = process_worker.run_probe(
             {"protocol": protocol.raw, "sample_shapes": [list(x) for x in shapes]},
             timeout=timeouts.load,
@@ -282,6 +306,7 @@ def run(
             modules=modules,
             sampling_params=make_params,
             sample_shapes=shapes,
+            sampling_observed=probe["sampling"][a.id] if probe is not None else None,
         )
         for a in protocol.arms
     ]
