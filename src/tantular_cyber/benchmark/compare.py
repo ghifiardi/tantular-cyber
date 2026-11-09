@@ -8,7 +8,9 @@ wins/losses against a reference arm with an exact McNemar test, and latency/toke
 
 Model provenance (digest, weight blob, quantization, Modelfile SYSTEM/PARAMETER presence,
 shared weights) is recorded so a "model" difference can be attributed to weights or to a
-prompt/parameter profile. Never used in CI.
+prompt/parameter profile. Each response is also bracketed by /api/tags + /api/ps snapshots
+and written to an evaluation-run record (evalrun.py): only eligible responses enter the
+summaries, and only a complete *controlled* run is comparable. Never used in CI.
 """
 
 from __future__ import annotations
@@ -27,13 +29,33 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, Field
 
-from ..analysis import PROMPT_PROFILES, FindingAnalyzer
-from ..config import OllamaSettings, ScanSettings
+from ..analysis import (
+    EXPLANATION_JSON_SCHEMA,
+    PROMPT_PROFILES,
+    SYSTEM_PROMPT,
+    FindingAnalyzer,
+    build_messages,
+)
+from ..config import OllamaSettings, ScanSettings, default_corpus
 from ..models import Finding, FindingAnalysis
 from ..ollama_client import OllamaClient, OllamaError, is_remote_model, validate_base_url
 from ..pipeline import run_scan
+from .evalrun import (
+    CodeState,
+    EvaluationRun,
+    ModelSnapshot,
+    ResponseRecord,
+    RunInputs,
+    SnapshotSource,
+    check_prompt_storage,
+    load_split,
+    make_record,
+    run_status,
+    sha256_json,
+    sha256_text,
+)
 from .llm_eval import RUBRIC, ExplanationEval, evaluate_finding, wilson
-from .manifest import Manifest, load_manifest
+from .manifest import Manifest, corpus_digest, load_manifest
 from .matching import match_findings
 from .perf import latency_stats
 from .provenance import code_state, machine, now
@@ -102,6 +124,9 @@ class ArmSummary(BaseModel):
     output_tokens_mean: float | None
     output_tokens_per_s_mean: float | None
     errors: int
+    excluded: int = Field(
+        default=0, description="Responses excluded by per-response provenance (evalrun.py)."
+    )
     provenance_changed: bool = Field(
         default=False,
         description="The model's provenance differed before vs after the run: samples may "
@@ -127,12 +152,18 @@ class Adoption(BaseModel):
 
 class ComparisonResult(BaseModel):
     result_type: str = "tantular-cyber.model-comparison"
-    schema_version: str = "1.2.0"
+    schema_version: str = "1.3.0"
     started_at: str
     finished_at: str | None = None
     sample_based: bool = True
     machine: dict[str, object]
-    code_commit: str | None
+    code_commit: str | None = Field(description="Commit at the start of the run.")
+    code_dirty: bool | None = None
+    mode: str = "exploratory"
+    evaluation_status: str | None = Field(
+        default=None, description="complete / incomplete / invalid (evaluation-run.json)."
+    )
+    comparable: bool = False
     corpus_id: str
     findings: int
     runs: int
@@ -149,6 +180,7 @@ class ComparisonResult(BaseModel):
         "(e.g. Ollama migrated or re-pulled a model mid-run).",
     )
     notes: list[str]
+    evaluation_run: EvaluationRun | None = Field(default=None, exclude=True)
     caveats: list[str] = [
         "Sample-based: rates come from deterministic proxy checks on a small synthetic corpus "
         "and carry wide intervals; they are not a quality guarantee.",
@@ -249,6 +281,7 @@ class _Sample:
     evaluation: ExplanationEval | None
     error: str | None = None
     metrics: dict[str, float | int | None] = field(default_factory=dict)
+    eligible: bool = True
 
 
 def select_findings(
@@ -265,9 +298,10 @@ def select_findings(
 class Checkpoint:
     """Append-only JSONL of completed calls so long comparisons can resume.
 
-    Each line holds the arm label, seed, finding id and the validated analysis (no prompts).
-    A header line records the run parameters; a checkpoint written with different
-    parameters is refused rather than silently mixed.
+    Each line holds the arm label, seed, finding id, the validated analysis and the
+    response's provenance record (prompt text only where evalrun allows it). A header line
+    records the run parameters, the code commit and dirty state, and the hash of every
+    input; a checkpoint written with any difference is refused rather than silently mixed.
     """
 
     def __init__(self, path: Path | None, header: dict[str, object], fresh: bool = False):
@@ -294,7 +328,9 @@ class Checkpoint:
     def get(self, arm: Arm, run: int, finding_id: str) -> dict[str, object] | None:
         return self.done.get((arm.label, run, finding_id))
 
-    def add(self, arm: Arm, run: int, finding: Finding, error: str | None) -> None:
+    def add(
+        self, arm: Arm, run: int, finding: Finding, error: str | None, record: ResponseRecord
+    ) -> None:
         if self.path is None:
             return
         row = {
@@ -303,6 +339,7 @@ class Checkpoint:
             "finding_id": finding.id,
             "error": error,
             "analysis": None if error else finding.analysis.model_dump(mode="json"),
+            "provenance": record.model_dump(mode="json"),
         }
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -316,11 +353,19 @@ def run_arm(
     base: OllamaSettings,
     on_progress: Callable[[str], None] | None = None,
     checkpoint: Checkpoint | None = None,
+    snap: Callable[[str], ModelSnapshot] | None = None,
+    responses: list[ResponseRecord] | None = None,
+    store_prompts: bool = False,
 ) -> list[_Sample]:
     samples: list[_Sample] = []
     records = lookup["records"]
     cases = lookup["cases"]
     checkpoint = checkpoint or Checkpoint(None, {})
+    responses = responses if responses is not None else []
+
+    def take(model: str) -> ModelSnapshot:
+        return snap(model) if snap else ModelSnapshot(model=model, error="no snapshot source")
+
     for run in range(1, runs + 1):
         pending = []
         for f in findings:
@@ -329,13 +374,16 @@ def run_arm(
                 pending.append(f)
                 continue
             copy = f.model_copy(deep=True)
+            record = ResponseRecord.model_validate(saved["provenance"])
+            responses.append(record)
+            ok = record.eligibility == "eligible"
             if saved["error"]:
-                samples.append(_Sample(run, copy, None, error=str(saved["error"])))
+                samples.append(_Sample(run, copy, None, error=str(saved["error"]), eligible=ok))
                 continue
             copy.analysis = FindingAnalysis.model_validate(saved["analysis"])
             m = copy.analysis.metrics
             ev = evaluate_finding(copy, cases[copy.path], records.get(copy.id), run)
-            samples.append(_Sample(run, copy, ev, metrics=m.model_dump() if m else {}))
+            samples.append(_Sample(run, copy, ev, metrics=m.model_dump() if m else {}, eligible=ok))
         if not pending:
             continue
         settings = (
@@ -363,16 +411,38 @@ def run_arm(
             )
             for f in pending:
                 copy = f.model_copy(deep=True)
+                messages = build_messages(copy, arm.profile, arm.mode != "profile")
+                before, started, error = take(arm.model), now(), None
                 try:
                     copy.analysis = analyzer.analyze(copy)
                 except OllamaError as exc:
-                    samples.append(_Sample(run, copy, None, error=type(exc).__name__))
-                    checkpoint.add(arm, run, copy, type(exc).__name__)
+                    error = type(exc).__name__
+                record = make_record(
+                    arm=arm.label,
+                    run=run,
+                    finding_id=copy.id,
+                    requested_at=started,
+                    completed_at=now(),
+                    before=before,
+                    after=take(arm.model),
+                    request_sha256=getattr(client, "last_request_sha256", None),
+                    response_sha256=None
+                    if error
+                    else getattr(client, "last_response_sha256", None),
+                    error=error,
+                    prompt_messages=messages if store_prompts else None,
+                )
+                responses.append(record)
+                ok = record.eligibility == "eligible"
+                checkpoint.add(arm, run, copy, error, record)
+                if error:
+                    samples.append(_Sample(run, copy, None, error=error, eligible=ok))
                     continue
-                checkpoint.add(arm, run, copy, None)
                 m = copy.analysis.metrics
                 ev = evaluate_finding(copy, cases[copy.path], records.get(copy.id), run)
-                samples.append(_Sample(run, copy, ev, metrics=m.model_dump() if m else {}))
+                samples.append(
+                    _Sample(run, copy, ev, metrics=m.model_dump() if m else {}, eligible=ok)
+                )
                 if on_progress:
                     on_progress(f"{arm.label} run {run}: {len(samples)} done")
     return samples
@@ -390,7 +460,10 @@ def _settings(arm: Arm, base: OllamaSettings, run: int) -> OllamaSettings:
     )
 
 
-def summarize_arm(arm: Arm, samples: Sequence[_Sample]) -> ArmSummary:
+def summarize_arm(arm: Arm, all_samples: Sequence[_Sample]) -> ArmSummary:
+    """Rates and latency from eligible responses only; request errors and exclusions are
+    counted over every response."""
+    samples = [s for s in all_samples if s.eligible]
     evals = [s.evaluation for s in samples if s.evaluation]
     tallies: dict[str, list[bool]] = defaultdict(list)
     for ev in evals:
@@ -433,7 +506,8 @@ def summarize_arm(arm: Arm, samples: Sequence[_Sample]) -> ArmSummary:
         prompt_cached_tokens_mean=mean("prompt_cached_tokens"),
         output_tokens_mean=mean("output_tokens"),
         output_tokens_per_s_mean=mean("output_tokens_per_s"),
-        errors=sum(1 for s in samples if s.error),
+        errors=sum(1 for s in all_samples if s.error),
+        excluded=sum(1 for s in all_samples if not s.eligible),
     )
 
 
@@ -444,7 +518,7 @@ def paired(
         return {
             (s.run, s.finding.id): {c.id: c.passed for c in s.evaluation.checks}
             for s in samples
-            if s.evaluation
+            if s.evaluation and s.eligible
         }
 
     a, b = index(ref), index(other)
@@ -539,11 +613,31 @@ def run_comparison(
     on_progress: Callable[[str], None] | None = None,
     checkpoint_path: Path | None = None,
     fresh: bool = False,
+    mode: str = "exploratory",
+    store_prompts: bool = False,
+    split: tuple[Path, str] | None = None,
 ) -> ComparisonResult:
+    """``mode="controlled"`` refuses a dirty or unknown checkout before any model call and is
+    the only mode whose results can be *comparable* (evalrun.EvaluationRun.comparable)."""
+    if mode not in ("controlled", "exploratory"):
+        raise ValueError("mode must be 'controlled' or 'exploratory'")
     ollama = ollama or OllamaSettings()
     validate_base_url(ollama.base_url, allow_remote=ollama.allow_remote)
+    commit, dirty = code_state()
+    code_start = CodeState(commit=commit, dirty=dirty)
+    if mode == "controlled" and (code_start.commit is None or code_start.dirty is not False):
+        raise ValueError(
+            "a controlled run needs a clean checkout of a known commit "
+            f"(commit={code_start.commit}, dirty={code_start.dirty})"
+        )
+    check_prompt_storage(store_prompts, corpus, default_corpus())
     started = now()
     manifest, cases_root = load_manifest(corpus)
+    split_ref, side_cases = None, None
+    if split is not None:
+        split_ref, side_cases = load_split(
+            split[0], split[1], manifest.corpus_id, [c.id for c in manifest.cases]
+        )
     names = sorted({a.model for a in arms} | set(identity_pair))
     provenance = model_provenance(ollama.base_url, names)
     installed = {p.name for p in provenance if p.installed}
@@ -558,33 +652,87 @@ def run_comparison(
     if not arms:
         raise ValueError("none of the requested models is installed")
     with tempfile.TemporaryDirectory(prefix="tantular-cmp-") as tmp:
-        findings, lookup = select_findings(manifest, cases_root, max_findings, Path(tmp))
+        findings, lookup = select_findings(
+            manifest, cases_root, max_findings if side_cases is None else 10**6, Path(tmp)
+        )
+    if side_cases is not None:
+        cases = lookup["cases"]
+        findings = [f for f in findings if cases[f.path].id in side_cases][:max_findings]
+        if not findings:
+            raise ValueError(f"no evaluable findings on split side {split[1]}")  # type: ignore[index]
+    inputs = RunInputs(
+        corpus_id=manifest.corpus_id,
+        manifest_version=manifest.manifest_version,
+        corpus_sha256=corpus_digest(corpus),
+        finding_ids=sorted(f.id for f in findings),
+        evidence_sha256={
+            f.id: sha256_text(f"{f.evidence.snippet}\n{f.evidence.context}") for f in findings
+        },
+        prompt_sha256=sha256_json(
+            {
+                "system": SYSTEM_PROMPT,
+                "profiles": PROMPT_PROFILES,
+                "schema": EXPLANATION_JSON_SCHEMA,
+            }
+        ),
+        arms=[
+            {
+                "label": a.label,
+                "model": a.model,
+                "profile": a.profile,
+                "num_ctx": a.num_ctx,
+                "mode": a.mode,
+            }
+            for a in arms
+        ],
+        runs=runs,
+        pinned_options=PINNED_OPTIONS,
+        split=split_ref,
+    )
+    inputs_sha256 = sha256_json(inputs.model_dump(mode="json"))
     header = {
         "corpus": manifest.corpus_id,
         "manifest_version": manifest.manifest_version,
         "findings": sorted(f.id for f in findings),
         "runs": runs,
         "pinned_options": PINNED_OPTIONS,
+        "mode": mode,
+        "store_prompts": store_prompts,
+        "code_commit": code_start.commit,
+        "code_dirty": code_start.dirty,
+        "inputs_sha256": inputs_sha256,
     }
     checkpoint = Checkpoint(checkpoint_path, header, fresh=fresh)
     if checkpoint.done:
         notes.append(f"resumed from checkpoint: {len(checkpoint.done)} completed call(s) reused")
     samples: dict[str, list[_Sample]] = {}
-    for arm in arms:
-        t0 = time.monotonic()
-        samples[arm.label] = run_arm(arm, findings, lookup, runs, ollama, on_progress, checkpoint)
-        notes.append(f"{arm.label}: {time.monotonic() - t0:.0f} s wall")
+    responses: list[ResponseRecord] = []
+    snaps = SnapshotSource(ollama.base_url)
+    try:
+        ollama_version = snaps.version()
+        for arm in arms:
+            t0 = time.monotonic()
+            samples[arm.label] = run_arm(
+                arm,
+                findings,
+                lookup,
+                runs,
+                ollama,
+                on_progress,
+                checkpoint,
+                snap=snaps,
+                responses=responses,
+                store_prompts=store_prompts,
+            )
+            notes.append(f"{arm.label}: {time.monotonic() - t0:.0f} s wall")
+    finally:
+        snaps.close()
     summaries = [summarize_arm(a, samples[a.label]) for a in arms]
     reference = arms[0]
     pairs = [
         p
         for a in arms[1:]
         for p in paired(reference, samples[reference.label], a, samples[a.label])
-    ]
-    adoption = [
-        adoption_decision(s, summaries[0], [p for p in pairs if p.arm == s.arm])
-        for s in summaries[1:]
-        if s.model == reference.model
     ]
     identity = None
     if len(identity_pair) == 2 and all(m in installed for m in identity_pair):
@@ -594,12 +742,52 @@ def run_comparison(
     drift = provenance_drift(provenance, model_provenance(ollama.base_url, names))
     for s in summaries:
         s.provenance_changed = s.model in drift
-    commit, _ = code_state()
+    commit, dirty = code_state()
+    code_end = CodeState(commit=commit, dirty=dirty)
+    expected = len(arms) * runs * len(findings)
+    status, reasons = run_status(mode, code_start, code_end, responses, expected)
+    comparable = mode == "controlled" and status == "complete"
+    adoption = [
+        adoption_decision(s, summaries[0], [p for p in pairs if p.arm == s.arm])
+        for s in summaries[1:]
+        if s.model == reference.model
+    ]
+    if not comparable:
+        why = "exploratory run" if mode == "exploratory" else f"{status} run"
+        adoption = [
+            Adoption(arm=a.arm, adopt=False, reasons=[f"not comparable: {why}", *a.reasons])
+            for a in adoption
+        ]
+    finished = now()
+    evaluation = EvaluationRun(
+        mode=mode,  # type: ignore[arg-type]
+        status=status,
+        status_reasons=reasons,
+        comparable=comparable,
+        started_at=started,
+        finished_at=finished,
+        code_at_start=code_start,
+        code_at_end=code_end,
+        environment={**machine(), "ollama_version": ollama_version},
+        inputs=inputs,
+        inputs_sha256=inputs_sha256,
+        expected_responses=expected,
+        counts={
+            "eligible": sum(1 for r in responses if r.eligibility == "eligible"),
+            "excluded": sum(1 for r in responses if r.eligibility == "excluded"),
+        },
+        prompts_stored=store_prompts,
+        responses=responses,
+    )
     return ComparisonResult(
         started_at=started,
-        finished_at=now(),
+        finished_at=finished,
         machine=machine(),
-        code_commit=commit,
+        code_commit=code_start.commit,
+        code_dirty=code_start.dirty,
+        mode=mode,
+        evaluation_status=status,
+        comparable=comparable,
         corpus_id=manifest.corpus_id,
         findings=len(findings),
         runs=runs,
@@ -612,12 +800,18 @@ def run_comparison(
         profile_identity=identity,
         provenance_changes=[c for diffs in drift.values() for c in diffs],
         notes=notes,
+        evaluation_run=evaluation,
     )
 
 
 def render_comparison(r: ComparisonResult) -> str:
     out = [
         "# Local model / prompt-profile comparison (sample-based)",
+        "",
+        f"**Mode:** {r.mode}. **Evaluation run:** {r.evaluation_status}. **Comparable:** "
+        f"{'yes' if r.comparable else 'no — aggregates are exploratory and adoption is off'}. "
+        "Rates use eligible responses only (per-response provenance; see evaluation-run.json "
+        "and its limitations).",
         "",
         f"Findings {r.findings} × runs {r.runs} per arm; reference arm `{r.reference}`; "
         f"pinned options `{r.pinned_options}`; started {r.started_at}.",
