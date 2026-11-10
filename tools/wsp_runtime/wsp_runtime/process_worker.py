@@ -30,8 +30,10 @@ sends nothing.
 Interrupts: the workers run in their own process groups, so a terminal Ctrl-C reaches only the
 parent, and they ignore SIGINT as well; the parent decides when they stop, and a parent-side
 interrupt terminates a worker that is busy. The parent's cleanup (stopping a worker, closing
-its pipe, writing its close report) defers a further Ctrl-C until it has finished, then
-re-raises it.
+its pipe, writing its close report) defers a further Ctrl-C until it has finished (at most
+about ``5 * kill_grace``), then re-raises it; so does starting a worker, until the parent can
+stop it. A group or worker this process may not signal (``PermissionError``) is recorded as
+``unknown`` and fails the close; it is never reported as stopped.
 
 Messages are length-prefixed JSON bytes over a ``multiprocessing`` pipe, read and written by
 this module under a deadline; the parent never unpickles anything the worker sends.
@@ -100,7 +102,10 @@ _PROCESS_NOTE = (
 _GROUP_ERRORS = {
     "killed": "processes in the worker's process group outlived it and had to be killed",
     "still_running": "processes in the worker's process group could not be stopped",
-    "unknown": "the worker's process group could not be checked (permission denied)",
+    "unknown": (
+        "the worker's process group could not be checked or signalled (permission denied); "
+        "processes in it may still be running"
+    ),
     "not_checked": "the worker's process group was not verified, so it was not checked",
 }
 
@@ -181,7 +186,8 @@ class _DeferInterrupts:
     Used around every step that stops a worker, closes its pipe or records its close report,
     so a second Ctrl-C cannot leave a worker running or a report unwritten. Only the main
     thread receives SIGINT; elsewhere this does nothing. An interrupt arriving before the
-    handler is installed (a few bytecodes) is not deferred."""
+    handler is installed (a few bytecodes) is not deferred. The delay is bounded by the cleanup
+    it covers: at most about ``5 * kill_grace`` (150 s at the default), see :func:`_stop`."""
 
     def __enter__(self) -> _DeferInterrupts:
         self._previous: Any = None
@@ -601,22 +607,33 @@ def _group_state(pgid: int) -> str:
 
 
 def _signal(proc: Any, pgid: int | None, sig: int) -> None:
+    """Signal the worker's verified group, or the worker alone. A signal that cannot be sent
+    (``PermissionError``) is not an error here: the caller sees the worker still running."""
     if proc.exitcode is not None:
         return
     # Re-verified now, while the worker is unreaped: its group is still its own.
     if pgid is not None and _group_of(proc.pid) == pgid:
-        with contextlib.suppress(ProcessLookupError):
+        try:
             _killpg(pgid, sig)
-    elif sig == signal.SIGTERM:
-        proc.terminate()
-    else:
-        proc.kill()
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass  # no member could be signalled; still try the worker itself
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
 
 
 def _stop_group(pgid: int, grace: float) -> str:
     """After the worker has exited: wait up to ``grace`` for the rest of its process group to
     exit by itself, then kill what is left. Uses the group verified while the worker was alive
-    (a process group ID is not reused while the group has members)."""
+    (a process group ID is not reused while the group has members).
+
+    ``unknown`` means the group could not be checked or signalled (permission denied): its
+    remaining processes may still be running and are **not** reported as stopped."""
     state = _group_state(pgid)
     if state != "alive":
         return "none" if state == "gone" else state
@@ -626,12 +643,19 @@ def _stop_group(pgid: int, grace: float) -> str:
         state = _group_state(pgid)
         if state != "alive":
             return "exited" if state == "gone" else state
-    with contextlib.suppress(ProcessLookupError):
+    try:
         _killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return "exited"
+    except PermissionError:
+        return "unknown"  # what is left cannot be signalled by this process
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        if _group_state(pgid) == "gone":
+        state = _group_state(pgid)
+        if state == "gone":
             return "killed"
+        if state == "unknown":
+            return "unknown"
         time.sleep(0.05)
     return "still_running"
 
@@ -649,7 +673,8 @@ def _stop(proc: Any, grace: float, wait: float = 0.0, pgid: int | None = None) -
     Returns how the worker ended (``exited``, ``terminated``, ``killed``, ``still_running``) and
     what was left in its group (``none``, ``exited``, ``killed``, ``still_running``, ``unknown``,
     or ``not_checked`` without a verified group). ``wait`` is how long to let it exit on its own
-    first. A Ctrl-C during this is held back until it has finished."""
+    first. A Ctrl-C during this is held back until it has finished: at most ``wait + 4 * grace``
+    (plus polling), i.e. ``5 * kill_grace`` where ``wait`` is ``kill_grace``."""
     with _DeferInterrupts():
         _join(proc, wait)
         if proc.exitcode is not None:
@@ -663,7 +688,13 @@ def _stop(proc: Any, grace: float, wait: float = 0.0, pgid: int | None = None) -
                 _signal(proc, pgid, signal.SIGKILL)
                 _join(proc, grace)
                 ended = "killed" if proc.exitcode is not None else "still_running"
-        group = _stop_group(pgid, grace) if pgid is not None else "not_checked"
+        if pgid is None:
+            group = "not_checked"
+        else:
+            try:
+                group = _stop_group(pgid, grace)
+            except (OSError, RuntimeError):  # never claim a group was emptied when unchecked
+                group = "unknown"
     return ended, group
 
 
@@ -685,18 +716,29 @@ def _describe_error(payload: Any) -> str:
     return "malformed error payload"
 
 
-def _spawn(target: Callable[..., None], spec: dict[str, Any], name: str) -> tuple[Any, Any]:
+def _spawn(
+    target: Callable[..., None], spec: dict[str, Any], name: str, grace: float
+) -> tuple[Any, Any]:
+    """Start a worker and return it with the parent's end of its pipe. Call it inside the
+    caller's ``try`` and under :class:`_DeferInterrupts`, so that an interrupt arriving while
+    the worker starts is delivered only once the caller can stop it. If anything here fails,
+    the worker (which is still waiting for the go-ahead) is stopped and both pipe ends are
+    closed."""
     ctx = _context()
     parent, child = ctx.Pipe(duplex=True)
+    proc = None
     try:
         proc = ctx.Process(target=_bootstrap, args=(target, child, spec), name=name)
         proc.start()
-    except BaseException:
-        parent.close()
         child.close()
+        os.set_blocking(parent.fileno(), False)  # every parent-side read and write has a deadline
+    except BaseException:
+        with _DeferInterrupts():
+            if proc is not None and proc.pid is not None:
+                _stop(proc, grace)  # not yet past the handshake: its group is not verified
+            parent.close()
+            child.close()
         raise
-    child.close()
-    os.set_blocking(parent.fileno(), False)  # every parent-side read and write has a deadline
     return proc, parent
 
 
@@ -720,21 +762,30 @@ def run_probe(
     timeout = check_seconds(timeout, "timeout")
     grace = check_seconds(grace, "grace")
     arm_ids = {a.id for a in parse_protocol(spec["protocol"]).arms}
-    proc, parent = _spawn(probe_main, {**spec, "probe": probe}, "wsp-probe")
+    proc = parent = None
     pgid: int | None = None
     try:
+        # An interrupt while the probe starts is held until proc/parent are bound, then
+        # raised here, inside the try, so the probe is always stopped.
+        with _DeferInterrupts():
+            proc, parent = _spawn(probe_main, {**spec, "probe": probe}, "wsp-probe", grace)
         clock = _Clock(timeout)
         pgid = _handshake(parent, proc, clock)
         kind, payload = _recv(parent, proc, clock, ("probe", "probe_failed"))
     except BaseException:
         # Failing or interrupted: stop the probe now rather than waiting for it.
-        with _DeferInterrupts():
-            _stop(proc, grace, pgid=pgid)
-            parent.close()
+        if proc is not None:
+            with _DeferInterrupts():
+                try:
+                    _stop(proc, grace, pgid=pgid)
+                finally:
+                    parent.close()
         raise
     with _DeferInterrupts():
-        ended, group = _stop(proc, grace, wait=grace, pgid=pgid)
-        parent.close()
+        try:
+            ended, group = _stop(proc, grace, wait=grace, pgid=pgid)
+        finally:
+            parent.close()
     if kind == "probe_failed":
         raise WorkerError(f"runtime probe failed: {_describe_error(payload)}")
     if proc.exitcode != 0:
@@ -778,6 +829,7 @@ class WorkerEngine:
         self._close_state: str | None = None
         self._close_error: str | None = None
         self._group_checks: list[str] = []
+        self._stopped: str | None = None  # how an earlier stop (after a failure) ended it
         self.close_report: dict[str, Any] | None = None
         self._describe: dict[str, Any] = {}
         self.pid: int | None = proc.pid
@@ -804,9 +856,13 @@ class WorkerEngine:
             "engine_factory": engine_factory,
             "options": dict(options),
         }
-        proc, parent = _spawn(worker, spec, f"wsp-arm-{arm_id}")
-        self = cls(arm_id, proc, parent, timeouts, reports)
+        proc = parent = self = None
         try:
+            # An interrupt while the worker starts is held until it is bound to ``self``,
+            # then raised here, inside the try, so the worker is always stopped.
+            with _DeferInterrupts():
+                proc, parent = _spawn(worker, spec, f"wsp-arm-{arm_id}", timeouts.kill_grace)
+                self = cls(arm_id, proc, parent, timeouts, reports)
             clock = _Clock(timeouts.load)  # the handshake and the load share the load timeout
             self.pgid = _handshake(parent, proc, clock)
             kind, payload = _recv(parent, proc, clock, ("ready", "load_failed"))
@@ -817,19 +873,27 @@ class WorkerEngine:
             if not isinstance(describe, dict) or not isinstance(describe.get("load_id"), str):
                 raise WorkerProtocolError("ready reply must carry describe() with a load_id")
         except BaseException as exc:
+            if proc is None:  # _spawn failed and cleaned up after itself
+                raise
             # A worker that reported a failed load exits by itself; anything else is stopped.
             with _DeferInterrupts():
                 wait = timeouts.kill_grace if isinstance(exc, WorkerLoadError) else 0.0
-                ended, group = _stop(proc, timeouts.kill_grace, wait=wait, pgid=self.pgid)
-                self._group_checks.append(group)
-                parent.close()
-                self._record(
-                    {
-                        "phase": "load_failed",
-                        "error": f"{type(exc).__name__}: {exc}"[:500],
-                        "worker": self._worker_info(ended),
-                    }
-                )
+                pgid = self.pgid if self is not None else None
+                ended, group = "unknown", "unknown"
+                try:
+                    ended, group = _stop(proc, timeouts.kill_grace, wait=wait, pgid=pgid)
+                finally:
+                    with contextlib.suppress(OSError):
+                        parent.close()
+                    if self is not None:
+                        self._group_checks.append(group)
+                        self._record(
+                            {
+                                "phase": "load_failed",
+                                "error": f"{type(exc).__name__}: {exc}"[:500],
+                                "worker": self._worker_info(ended),
+                            }
+                        )
             raise
         self._describe = {
             **describe,
@@ -863,7 +927,8 @@ class WorkerEngine:
 
     def _kill(self, reason: str) -> None:
         self._dead = self._dead or reason
-        _, group = _stop(self._proc, self._timeouts.kill_grace, pgid=self.pgid)
+        ended, group = _stop(self._proc, self._timeouts.kill_grace, pgid=self.pgid)
+        self._stopped = self._stopped or ended  # how it ended, for the close report
         self._group_checks.append(group)
 
     def generate_batch(self, requests: Sequence[GenerationRequest]) -> list[BatchItem]:
@@ -932,29 +997,38 @@ class WorkerEngine:
             # Whatever happened above (including an interrupt), the worker must be gone; a
             # further Ctrl-C is held back until it is and the report is recorded.
             with _DeferInterrupts():
-                ended, group = _stop(self._proc, self._timeouts.kill_grace, pgid=self.pgid)
-                self._group_checks.append(group)
-                with contextlib.suppress(OSError):
-                    self._conn.close()
-                exitcode = self._proc.exitcode
-                if ended == "still_running":
-                    errors.append("the worker could not be stopped")
-                elif ended != "exited":
-                    errors.append(f"the worker had to be {ended}")
-                elif exitcode != 0:
-                    errors.append(f"the worker exited with code {exitcode}")
-                for check in dict.fromkeys(self._group_checks):
-                    if check in _GROUP_ERRORS:
-                        errors.append(_GROUP_ERRORS[check])
-                self._record(
-                    {
-                        "phase": "close",
-                        "isolation": "process",
-                        "engine_close_report": engine_report,
-                        "worker": self._worker_info(ended),
-                        "errors": errors,
-                    }
-                )
+                ended, group = "unknown", "unknown"
+                try:
+                    ended, group = _stop(self._proc, self._timeouts.kill_grace, pgid=self.pgid)
+                except Exception as exc:  # the report and the pipe are still handled below
+                    errors.append(f"stopping the worker failed: {type(exc).__name__}: {exc}")
+                finally:
+                    if ended == "exited" and self._stopped is not None:
+                        ended = self._stopped  # stopped earlier by this process, not on its own
+                    self._group_checks.append(group)
+                    with contextlib.suppress(OSError):
+                        self._conn.close()
+                    exitcode = self._proc.exitcode
+                    if ended == "still_running":
+                        errors.append("the worker could not be stopped")
+                    elif ended == "unknown":
+                        errors.append("whether the worker was stopped is unknown")
+                    elif ended != "exited":
+                        errors.append(f"the worker had to be {ended}")
+                    elif exitcode != 0:
+                        errors.append(f"the worker exited with code {exitcode}")
+                    for check in dict.fromkeys(self._group_checks):
+                        if check in _GROUP_ERRORS:
+                            errors.append(_GROUP_ERRORS[check])
+                    self._record(
+                        {
+                            "phase": "close",
+                            "isolation": "process",
+                            "engine_close_report": engine_report,
+                            "worker": self._worker_info(ended),
+                            "errors": errors,
+                        }
+                    )
         if errors:
             self._close_error = "; ".join(errors)[:500]
             raise WorkerCloseError(

@@ -123,13 +123,23 @@ it exists for the adapter tests only, and no command-line option selects it.)
   therefore never started while the previous worker, or anything left in its group, is alive.
   The close report records the worker's pid, process group, exit code, how it ended, what was
   found in its group (`none`, `exited`, `killed`, `still_running`, `unknown`), and the
-  engine's own close report. If the parent goes away, the worker releases its engine and exits.
+  engine's own close report. A worker the parent stopped earlier (after a timeout or a
+  malformed reply) is recorded as `terminated` or `killed`, not as `exited`. If the parent goes
+  away, the worker releases its engine and exits.
+- **Signals the parent may not send.** If the group (or the worker) cannot be signalled
+  (`PermissionError`, for example a setuid program left in the group), the group is recorded as
+  `unknown` and the close fails; its processes are **not** reported as stopped, and may still
+  be running. The close report is still recorded and the pipe still closed.
 - **Interrupts.** Workers run in their own process groups, so a terminal Ctrl-C reaches only
   the parent; they also ignore SIGINT. The parent decides: an interrupt while a batch is in
   flight terminates the worker during the runner's close, and the close report records that.
   While the parent stops a worker, closes its pipe and records its close report, a **further
-  Ctrl-C is held back until that has finished**, then raised. (It is not held back in the few
-  bytecodes before the cleanup starts, and only the main thread receives SIGINT.)
+  Ctrl-C is held back until that has finished**, then raised. The hold is bounded by the
+  cleanup: at most about **5 × `--kill-grace`** (150 s at the default 30 s) when a failed load
+  or a probe is given `--kill-grace` to exit first, and about 4 × `--kill-grace` for a close.
+  Starting a worker is covered as well: an interrupt while the worker process starts is held
+  until the parent can stop it. Only the main thread receives SIGINT. A Ctrl-C arriving before
+  the runner reaches a worker's close (see the follow-ups) is not covered here.
 - **What process groups do not cover.** A descendant that leaves the worker's process group
   (`setsid`, `setpgid`, a daemonising double fork) is neither seen nor stopped, and neither is
   anything another service starts on the engine's behalf. A worker that is unkillable (for
@@ -495,6 +505,16 @@ recorded, and reviewed before the confirmatory run.
   refuse a new batch after an interrupted one. The runner never does this (an interrupt ends
   the run), and a stale reply would fail the echo check unless the requests were identical;
   refusing it in `generate_batch` is a small hardening for direct callers.
+- **Runner-side interrupt window (re-check note 2).** In `tools/wsp` (`runner.py`,
+  `_close_quietly`), a second Ctrl-C that lands after a batch was interrupted but before
+  `WorkerEngine.close()` enters its cleanup is swallowed, and the busy worker can be left
+  running (and the interpreter then waits for it at exit). The window is a few bytecodes; the
+  fix belongs in the harness runner (outside this runtime) or in a last-resort stop of live
+  workers at exit.
+- **Close wait restarts its timeout (re-check note 5).** After a successful `closed` reply,
+  `close()` waits up to a fresh `--close-timeout` for the worker to exit instead of the time
+  left. A close is still bounded (about 2 × `--close-timeout` + 4 × `--kill-grace`); sharing
+  one deadline is a tidy-up.
 - **Check `--checkpoint` before the probe (R30-14).** The probe (which imports vLLM) runs
   before `--checkpoint` is parsed and before storage preflight, so a mistyped arm path is
   reported only after the probe. Parsing the checkpoints first would report it sooner.

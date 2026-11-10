@@ -165,6 +165,9 @@ def test_a_batch_timeout_kills_the_worker_and_aborts(tmp_path, protocol, ckpts) 
     (report,) = exc.value.summary["close_reports"]
     assert report["worker"]["exitcode"] is not None and report["worker"]["exitcode"] < 0  # signal
     assert any("WorkerTimeout" in e for e in report["errors"])
+    # The parent stopped it after the timeout: recorded as such, not as a worker that exited.
+    assert report["worker"]["ended"] == "terminated"
+    assert "the worker had to be terminated" in report["errors"]
     records = [json.loads(x) for x in (tmp_path / "run" / "records.jsonl").read_text().splitlines()]
     classes = {r["error_class"].split(":")[-1] for r in records}
     assert classes == {"WorkerTimeout", "WorkerDied"}  # the timed-out shard, then the rest
@@ -726,6 +729,198 @@ def test_the_worker_releases_its_engine_when_the_parent_goes_away(protocol, ckpt
     assert e._proc.exitcode == 4 and marker.read_text() == "closed"
     with pytest.raises(pw.WorkerCloseError, match="already exited"):
         e.close()
+
+
+# --- re-check fix round: permission errors, start-up interrupts, stop labels ---------------
+
+
+def _deny_killpg(monkeypatch, denied):
+    """os.killpg raising PermissionError for the signals in ``denied`` (as for a process this
+    process may not signal, e.g. a setuid program left in the group)."""
+    original = os.killpg
+    calls: list = []
+
+    def killpg(pgid, sig):
+        calls.append(sig)
+        if sig in denied:
+            raise PermissionError(1, "Operation not permitted")
+        return original(pgid, sig)
+
+    monkeypatch.setattr(pw.os, "killpg", killpg)
+    return calls
+
+
+@pytest.mark.parametrize("denied", [{signal.SIGKILL}, {0, signal.SIGKILL}], ids=["kill", "check"])
+def test_a_group_that_cannot_be_signalled_is_unknown_and_fails_the_close(
+    protocol, ckpts, monkeypatch, denied
+) -> None:
+    reports: list = []
+    loader = pw.process_arm_loader(
+        protocol, "base", ckpts[0], engine_factory=STUB, options={"descendant": "in_group"},
+        timeouts=pw.Timeouts(load=30, batch=3, close=5, kill_grace=1), reports=reports,
+    )  # fmt: skip
+    e = loader()
+    child = e.describe()["descendant_pid"]
+    try:
+        _deny_killpg(monkeypatch, denied)
+        with pytest.raises(pw.WorkerCloseError, match="may still be running"):
+            e.close()
+        (report,) = reports  # the close report is still recorded
+        assert report["phase"] == "close" and report["worker"]["process_group"] == ["unknown"]
+        assert not any("killed" in x for x in report["errors"])  # not reported as stopped
+        assert e._conn.closed and e._proc.exitcode == 0
+        assert not _gone(child)  # indeed: the process it could not signal is still there
+        with pytest.raises(pw.WorkerCloseError, match="earlier close failed"):
+            e.close()  # a failed close keeps failing
+    finally:
+        monkeypatch.undo()
+        with __import__("contextlib").suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+    _wait_gone(child)
+
+
+def test_a_group_signal_that_is_refused_falls_back_to_the_worker(protocol, ckpts, monkeypatch):
+    e = _engine(protocol, ckpts, hang_at_batch=0)
+    calls = _deny_killpg(monkeypatch, {signal.SIGTERM, signal.SIGKILL})
+    with pytest.raises(pw.WorkerTimeout):
+        e.generate_batch([t._req(protocol)])
+    assert signal.SIGTERM in calls  # the group was tried first...
+    assert e._proc.exitcode == -signal.SIGTERM  # ...then the worker itself was terminated
+    with pytest.raises(pw.WorkerCloseError):
+        e.close()
+    assert e.close_report["worker"]["ended"] == "terminated" and e._conn.closed
+
+
+def test_a_worker_that_cannot_be_signalled_is_never_reported_stopped(
+    protocol, ckpts, monkeypatch
+) -> None:
+    e = _engine(protocol, ckpts, hang_at_batch=0)
+    proc = e._proc
+    _deny_killpg(monkeypatch, {signal.SIGTERM, signal.SIGKILL})
+
+    def denied(*a):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(proc, "terminate", denied)
+    monkeypatch.setattr(proc, "kill", denied)
+    try:
+        with pytest.raises(pw.WorkerTimeout):
+            e.generate_batch([t._req(protocol)])
+        with pytest.raises(pw.WorkerCloseError, match="could not be stopped"):
+            e.close()
+        assert e.close_report["worker"]["ended"] == "still_running"
+        assert e._conn.closed and proc.exitcode is None  # honestly: it is still running
+    finally:
+        monkeypatch.undo()
+        proc.kill()
+        pw._join(proc, 5)
+
+
+def test_an_error_while_stopping_still_records_the_report_and_closes_the_pipe(
+    protocol, ckpts, monkeypatch
+) -> None:
+    e = _engine(protocol, ckpts)
+    proc = e._proc
+
+    def broken(*a, **k):
+        raise RuntimeError("synthetic cleanup failure")
+
+    monkeypatch.setattr(pw, "_stop", broken)
+    try:
+        with pytest.raises(pw.WorkerCloseError, match="synthetic cleanup failure"):
+            e.close()
+        report = e.close_report
+        assert report["phase"] == "close" and report["worker"]["ended"] == "unknown"
+        assert report["worker"]["process_group"] == ["unknown"] and e._conn.closed
+    finally:
+        monkeypatch.undo()
+        proc.kill()
+        pw._join(proc, 5)
+
+
+@pytest.mark.parametrize("where", ["set_blocking", "engine"])
+def test_an_interrupt_while_a_worker_starts_still_stops_it(
+    protocol, ckpts, monkeypatch, where
+) -> None:
+    # A Ctrl-C landing just after the worker process started (inside _spawn, or while the
+    # parent-side engine object is created) is held, then raised where the worker is stopped.
+    def interrupt_once():
+        if not fired:
+            fired.append(True)
+            os.kill(os.getpid(), signal.SIGINT)
+            time.sleep(0.05)
+
+    fired: list = []
+    if where == "set_blocking":
+        original = os.set_blocking
+
+        def set_blocking(fd, flag):
+            interrupt_once()
+            return original(fd, flag)
+
+        monkeypatch.setattr(pw.os, "set_blocking", set_blocking)
+    else:
+        original_init = pw.WorkerEngine.__init__
+
+        def init(self, *a, **k):
+            original_init(self, *a, **k)
+            interrupt_once()
+
+        monkeypatch.setattr(pw.WorkerEngine, "__init__", init)
+    reports: list = []
+    loader = pw.process_arm_loader(
+        protocol, "base", ckpts[0], engine_factory=STUB,
+        timeouts=pw.Timeouts(load=30, batch=3, close=5, kill_grace=2), reports=reports,
+    )  # fmt: skip
+    with pytest.raises(KeyboardInterrupt):
+        loader()
+    assert fired
+    (report,) = reports
+    assert report["phase"] == "load_failed" and "KeyboardInterrupt" in report["error"]
+    assert report["worker"]["exitcode"] is not None and _gone(report["worker"]["pid"])
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_an_interrupt_while_the_probe_starts_still_stops_it(protocol, monkeypatch) -> None:
+    original = os.set_blocking
+    started: list = []
+    original_start = multiprocessing.get_context("spawn").Process.start
+
+    def start(self):
+        original_start(self)
+        started.append(self)
+
+    def set_blocking(fd, flag):
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.05)
+        return original(fd, flag)
+
+    monkeypatch.setattr(multiprocessing.get_context("spawn").Process, "start", start)
+    monkeypatch.setattr(pw.os, "set_blocking", set_blocking)
+    with pytest.raises(KeyboardInterrupt):
+        pw.run_probe({"protocol": protocol.raw, "sample_shapes": [[1, 0]]}, timeout=30,
+                     probe="wsp_process_stubs:hanging_probe", grace=2)  # fmt: skip
+    (proc,) = started
+    assert proc.exitcode is not None and proc.exitcode < 0
+
+
+def test_a_failure_after_the_worker_process_started_stops_it(protocol, ckpts, monkeypatch):
+    started: list = []
+    original_start = multiprocessing.get_context("spawn").Process.start
+
+    def start(self):
+        original_start(self)
+        started.append(self)
+
+    def set_blocking(fd, flag):
+        raise OSError("synthetic set_blocking failure")
+
+    monkeypatch.setattr(multiprocessing.get_context("spawn").Process, "start", start)
+    monkeypatch.setattr(pw.os, "set_blocking", set_blocking)
+    with pytest.raises(OSError, match="synthetic"):
+        _engine(protocol, ckpts)
+    (proc,) = started
+    assert proc.exitcode is not None and _gone(proc.pid)
 
 
 def _wait_until(predicate, timeout=5.0):
