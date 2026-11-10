@@ -119,6 +119,12 @@ def _fork_sleeper(*, detach: bool, marker: str | None = None) -> int:
     return pid
 
 
+def short_group_leader(seconds: float) -> None:
+    """Leads a new process group, then exits (and stays unreaped until its parent joins it)."""
+    os.setpgid(0, 0)
+    time.sleep(seconds)
+
+
 def stub_engine(arm: Any, checkpoint_dir: Path, options: dict[str, Any]) -> StubEngine:
     if options.get("load_error"):
         raise RuntimeError("synthetic load failure")

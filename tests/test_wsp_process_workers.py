@@ -923,6 +923,75 @@ def test_a_failure_after_the_worker_process_started_stops_it(protocol, ckpts, mo
     assert proc.exitcode is not None and _gone(proc.pid)
 
 
+def test_a_group_of_unreaped_exited_processes_is_not_reported_unknown() -> None:
+    # On macOS, a group whose only member has exited but is not yet reaped (a zombie, as an
+    # orphan awaiting reaping by launchd) answers PermissionError. That is transient: once it is
+    # reaped the group is gone, so it is reported as exited, not as "could not be checked".
+    import threading
+
+    ctx = multiprocessing.get_context("spawn")
+    leader = ctx.Process(target=stubs.short_group_leader, args=(0.2,))
+    leader.start()
+    try:
+        _wait_until(lambda: os.getpgid(leader.pid) == leader.pid)
+        time.sleep(0.6)  # it has exited; nobody has reaped it yet
+        reaper = threading.Timer(0.5, leader.join)
+        reaper.start()
+        assert pw._stop_group(leader.pid, 3) == "exited"
+        reaper.join()
+    finally:
+        leader.kill()
+        leader.join(5)
+
+
+def test_a_transient_permission_error_after_the_kill_still_reports_killed(
+    protocol, ckpts, monkeypatch
+) -> None:
+    e = _engine(protocol, ckpts, descendant="in_group")
+    child = e.describe()["descendant_pid"]
+    original = os.killpg
+    after_kill: list = []
+
+    def killpg(pgid, sig):
+        if sig == signal.SIGKILL:
+            after_kill.append(0)
+        elif after_kill and len(after_kill) < 4:  # the killed process is briefly a zombie
+            after_kill.append(0)
+            raise PermissionError(1, "Operation not permitted")
+        return original(pgid, sig)
+
+    monkeypatch.setattr(pw.os, "killpg", killpg)
+    with pytest.raises(pw.WorkerCloseError, match="outlived it and had to be killed"):
+        e.close()
+    assert e.close_report["worker"]["process_group"] == ["killed"] and len(after_kill) == 4
+    _wait_gone(child)
+
+
+def test_an_interrupt_while_a_failed_worker_is_stopped_keeps_how_it_ended(
+    protocol, ckpts, monkeypatch
+) -> None:
+    e = _engine(protocol, ckpts, hang_at_batch=0)
+    original_signal = pw._signal
+    sent: list = []
+
+    def interrupt(proc, pgid, sig):
+        if not sent:
+            sent.append(sig)
+            os.kill(os.getpid(), signal.SIGINT)  # a Ctrl-C while _kill stops the worker
+            time.sleep(0.05)
+        return original_signal(proc, pgid, sig)
+
+    monkeypatch.setattr(pw, "_signal", interrupt)
+    with pytest.raises(KeyboardInterrupt):  # held until the stop was recorded
+        e.generate_batch([t._req(protocol)])
+    assert sent == [signal.SIGTERM] and e._stopped == "terminated"
+    assert e._group_checks == ["none"]
+    with pytest.raises(pw.WorkerCloseError):
+        e.close()
+    assert e.close_report["worker"]["ended"] == "terminated"
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
 def _wait_until(predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

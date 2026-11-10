@@ -632,32 +632,34 @@ def _stop_group(pgid: int, grace: float) -> str:
     exit by itself, then kill what is left. Uses the group verified while the worker was alive
     (a process group ID is not reused while the group has members).
 
-    ``unknown`` means the group could not be checked or signalled (permission denied): its
-    remaining processes may still be running and are **not** reported as stopped."""
+    ``unknown`` means the group could not be checked or signalled (permission denied) for the
+    whole grace period: its remaining processes may still be running and are **not** reported
+    as stopped. A denial is not final at once: on macOS a group whose only members have exited
+    but are not yet reaped (zombies, e.g. orphans awaiting reaping by launchd) also reports
+    ``PermissionError``, so it is polled until the group is gone or the grace period ends."""
     state = _group_state(pgid)
-    if state != "alive":
-        return "none" if state == "gone" else state
+    if state == "gone":
+        return "none"
     deadline = time.monotonic() + grace
-    while time.monotonic() < deadline:
+    while state != "gone" and time.monotonic() < deadline:
         time.sleep(0.05)
         state = _group_state(pgid)
-        if state != "alive":
-            return "exited" if state == "gone" else state
+    if state == "gone":
+        return "exited"
     try:
         _killpg(pgid, signal.SIGKILL)
+        killed = True
     except ProcessLookupError:
         return "exited"
     except PermissionError:
-        return "unknown"  # what is left cannot be signalled by this process
+        killed = False  # no member could be signalled (or only unreaped zombies remain)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         state = _group_state(pgid)
         if state == "gone":
-            return "killed"
-        if state == "unknown":
-            return "unknown"
+            return "killed" if killed else "exited"
         time.sleep(0.05)
-    return "still_running"
+    return "still_running" if killed and state == "alive" else "unknown"
 
 
 def _join(proc: Any, timeout: float) -> None:
@@ -927,9 +929,11 @@ class WorkerEngine:
 
     def _kill(self, reason: str) -> None:
         self._dead = self._dead or reason
-        ended, group = _stop(self._proc, self._timeouts.kill_grace, pgid=self.pgid)
-        self._stopped = self._stopped or ended  # how it ended, for the close report
-        self._group_checks.append(group)
+        # Held like every other stop, so a Ctrl-C here cannot lose how the worker ended.
+        with _DeferInterrupts():
+            ended, group = _stop(self._proc, self._timeouts.kill_grace, pgid=self.pgid)
+            self._stopped = self._stopped or ended  # how it ended, for the close report
+            self._group_checks.append(group)
 
     def generate_batch(self, requests: Sequence[GenerationRequest]) -> list[BatchItem]:
         if self._close_state is not None:
