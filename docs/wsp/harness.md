@@ -193,6 +193,12 @@ depends on the backend and on references held elsewhere (the adapter must releas
 reporting load identity, loaded files and request echoes truthfully. No inference adapter
 exists yet (C1); nothing here touches a model or a GPU.
 
+2026-11-12: identifier validation is strict. In Python, a regex `$` also matches just before
+a trailing newline, so `^[0-9a-f]{64}$` accepted `"<64 hex>\n"`; the same applied to git
+revisions, pseudonyms and timestamps in the ledger and protocol (freeze and tolerance-approval
+fields). The patterns now use `\A...\Z`, and every call site uses `fullmatch`. Found while
+reviewing the research workflow (first written 2026-11-05; rebuilt on current `main`).
+
 ## Readiness (unchanged from the package)
 
 None of the Week 1 readiness items is complete. Roles, budgets, isolation, source and model
