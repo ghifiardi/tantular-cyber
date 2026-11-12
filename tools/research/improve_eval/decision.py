@@ -26,8 +26,9 @@ from __future__ import annotations
 from typing import Any
 
 from wsp_eval.hashing import sha256_json
+from wsp_eval.timestamps import is_utc_timestamp
 
-from .study import PSEUDONYM_RE, TIMESTAMP_RE, Study
+from .study import PSEUDONYM_RE, Study
 
 DECISIONS = ("pending", "reject", "request_more_evidence", "approve_further_evaluation")
 FIELDS = {
@@ -91,7 +92,7 @@ def validate_decision(rec: Any, study: Study, report: Any) -> list[str]:
         problems.append("decided_by must be a pseudonym")
     elif who in (study.raw["owner"], study.raw["operator"]):
         problems.append("decided_by must differ from the study owner and operator")
-    if not (isinstance(rec["decided_at"], str) and TIMESTAMP_RE.fullmatch(rec["decided_at"])):
+    if not is_utc_timestamp(rec["decided_at"]):
         problems.append("decided_at must be a UTC timestamp")
     if not (isinstance(rec["rationale"], str) and rec["rationale"].strip()):
         problems.append("a decision needs a rationale")

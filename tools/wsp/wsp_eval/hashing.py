@@ -8,8 +8,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# \A...\Z (not ^...$): in Python, `$` also matches just before a trailing newline, so
+# "<64 hex>\n" passed `^[0-9a-f]{64}$`. Callers also use fullmatch.
+SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+GIT_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 PLACEHOLDER = "REPLACE"
 
 

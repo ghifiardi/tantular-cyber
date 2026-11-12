@@ -26,11 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from wsp_eval.hashing import SHA256_RE, contains_placeholder, sha256_json
+from wsp_eval.timestamps import is_utc_timestamp
 
 from .interventions import EDIT_VERIFICATION_STATUSES, TYPES
 
 PSEUDONYM_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
-TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z$")
 TASK_KINDS = ("accuracy", "alert_triage")
 # metric -> (task kind, better direction: +1 higher is better, -1 lower is better, pairable)
 # A metric is "pairable" when its per-item denominator does not depend on the arm, so per-item
@@ -232,7 +232,7 @@ def parse_study(raw: dict[str, Any]) -> Study:
             raise StudyError(f"frozen study still has placeholders at: {holes}")
         if not (isinstance(raw.get("frozen_by"), str) and PSEUDONYM_RE.fullmatch(raw["frozen_by"])):
             raise StudyError("a frozen study needs frozen_by (pseudonym)")
-        if not (isinstance(raw.get("frozen_at"), str) and TIMESTAMP_RE.fullmatch(raw["frozen_at"])):
+        if not is_utc_timestamp(raw.get("frozen_at")):
             raise StudyError("a frozen study needs frozen_at (UTC, e.g. 2026-11-13T10:00Z)")
     elif raw.get("frozen_by") or raw.get("frozen_at"):
         raise StudyError("an unfrozen study must not carry frozen_by / frozen_at")

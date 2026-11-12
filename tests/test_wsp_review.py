@@ -485,3 +485,78 @@ def test_analysis_and_drift_reject_bad_policies_the_same_way(tmp_path, raw, item
         reproducibility_report(altered, res.records, "reference", "reload")
     with pytest.raises(ProtocolError, match="missing_policy"):
         drift_report(altered, res.manifest, res.records)
+
+
+# --- identifiers with trailing newlines ------------------------------------------------------
+# In Python, `$` matches just before a trailing newline, so `^[0-9a-f]{64}$` accepted
+# "<64 hex>\n". Patterns now use \A...\Z and callers use fullmatch.
+
+from wsp_eval.hashing import GIT_SHA_RE, SHA256_RE  # noqa: E402
+from wsp_eval.ledger import validate_record  # noqa: E402
+
+NL = "\n"
+
+
+def test_digest_and_revision_patterns_reject_trailing_newlines() -> None:
+    for pattern, good in ((SHA256_RE, "a" * 64), (GIT_SHA_RE, "b" * 40)):
+        assert pattern.fullmatch(good) and pattern.match(good)
+        assert not pattern.match(good + NL)  # anchored with \Z, so even .match refuses it
+        assert not pattern.fullmatch(good + NL)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("frozen_by", "lead1" + NL), ("frozen_at", "2026-11-01T00:00Z" + NL)],
+)
+def test_protocol_freeze_fields_reject_trailing_newlines(raw, field, value) -> None:
+    with pytest.raises(ProtocolError, match=field):
+        parse_protocol({**raw, **FROZEN, field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("approved_by", "evaluator1" + NL), ("approved_at", "2026-11-01T00:00Z" + NL)],
+)
+def test_tolerance_approval_fields_reject_trailing_newlines(raw, field, value) -> None:
+    tol = {
+        "status": "approved",
+        "max_abs_accuracy_diff": 0.05,
+        "max_abs_token_limit_rate_diff": 0.05,
+        "max_abs_error_rate_diff": 0.05,
+        "approved_by": "evaluator1",
+        "approved_at": "2026-11-01T00:00Z",
+        field: value,
+    }
+    bad = copy.deepcopy({**raw, **FROZEN})
+    bad["drift"]["tolerance"] = tol
+    with pytest.raises(ProtocolError, match=field):
+        parse_protocol(bad)
+
+
+def _ledger_record() -> dict:
+    return json.loads((ROOT / "docs" / "wsp" / "ledger-template.json").read_text())
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expect"),
+    [
+        (lambda r: r.update(base_model_revision="b" * 40 + NL), "base_model_revision"),
+        (lambda r: r.update(artifact_sha256={"hf:x": "a" * 64 + NL}), "artifact_sha256"),
+        (
+            lambda r: r.update(artifact_git_blob_sha1={"hf:y": "c" * 40 + NL}),
+            "artifact_git_blob_sha1",
+        ),
+        (lambda r: r.update(research_lead="lead1" + NL), "research_lead"),
+        (
+            lambda r: r.update(
+                human_decision="reject", decided_by="reviewer1", decided_at="2026-11-05T09:00Z" + NL
+            ),
+            "decided_at",
+        ),
+    ],
+)
+def test_ledger_fields_reject_trailing_newlines(mutate, expect) -> None:
+    rec = _ledger_record()
+    assert validate_record(rec) == []
+    mutate(rec)
+    assert any(expect in p for p in validate_record(rec))
