@@ -11,12 +11,14 @@ import pytest
 from conftest import requires_semgrep
 
 from tantular_cyber.benchmark.realworld import (
+    DevelopmentRepository,
     RealWorldManifest,
     cache_path,
     clean_cache,
     evaluate_pointers,
     fetch_pointers,
     git_blob_sha1,
+    is_held_out,
     load_realworld,
     validate_realworld,
 )
@@ -78,6 +80,50 @@ def test_committed_manifest_is_valid_and_pointer_only() -> None:
 )
 def test_manifest_validation(override: dict, problem: str) -> None:
     assert any(problem in p for p in validate_realworld(synthetic_manifest(**override)))
+
+
+def test_development_repository_is_never_held_out() -> None:
+    committed = load_realworld(MANIFEST)
+    assert "https://github.com/ghifiardi/ai-driven-soc" in {
+        d.repository for d in committed.development_repositories
+    }
+    manifest = synthetic_manifest()
+    assert is_held_out(manifest, manifest.entries[0])
+    # Repository-level classification covers current and future pointers into that repo,
+    # whatever the URL spelling, even when the pointer itself has no development_use note.
+    dev = DevelopmentRepository(
+        repository="https://github.com/Example/Project", since="2026-11-12", reason="test"
+    )
+    for spelling in (
+        "https://github.com/example/project",
+        "https://github.com/example/project.git",
+        "https://github.com/EXAMPLE/Project.GIT",
+    ):
+        tagged = manifest.model_copy(
+            update={
+                "development_repositories": [dev],
+                "entries": [manifest.entries[0].model_copy(update={"repository": spelling})],
+            }
+        )
+        assert not is_held_out(tagged, tagged.entries[0])
+        assert evaluate_pointers(tagged, Path("/nonexistent")).results[0].held_out is False
+
+
+@pytest.mark.parametrize(
+    ("dev", "problem"),
+    [
+        ({"repository": "https://gitlab.com/a/b", "since": "2026-11-12", "reason": "x"}, "github"),
+        ({"repository": "https://github.com/a/b", "since": "Nov 12", "reason": "x"}, "YYYY-MM-DD"),
+        ({"repository": "https://github.com/a/b", "since": "2026-02-30", "reason": "x"}, "real"),
+        ({"repository": "https://github.com/a/b", "since": "20261112", "reason": "x"}, "real"),
+        ({"repository": "https://github.com/a/b", "since": "2026-11-12", "reason": " "}, "reason"),
+    ],
+)
+def test_development_repository_validation(dev: dict, problem: str) -> None:
+    manifest = synthetic_manifest().model_copy(
+        update={"development_repositories": [DevelopmentRepository(**dev)]}
+    )
+    assert any(problem in p for p in validate_realworld(manifest))
 
 
 def test_fetch_verifies_blob_hash_and_never_stores_mismatches(tmp_path: Path) -> None:

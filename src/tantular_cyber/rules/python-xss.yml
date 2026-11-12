@@ -2,10 +2,13 @@
 #
 # Supported: flask.render_template_string() with a dynamically built template,
 # markupsafe.Markup()/django mark_safe() over dynamic strings, Django HttpResponse() over
-# dynamic strings, jinja2.Environment() without autoescaping, and in HTML templates the
-# |safe filter and {% autoescape off/false %} blocks (cf. CVE-2017-12794).
+# dynamic strings, jinja2.Environment() without autoescaping, jinja2.Template() constructed
+# directly without autoescape=True, and in HTML templates the |safe filter and
+# {% autoescape off/false %} blocks (cf. CVE-2017-12794).
 # Not covered: Flask views returning formatted HTML strings directly, JavaScript sinks,
-# attribute/URL contexts, custom template tags. Templates are matched textually.
+# attribute/URL contexts, custom template tags, select_autoescape() whose enabled extensions
+# do not match the loaded template names (e.g. "*.html.j2"), Streamlit
+# unsafe_allow_html. Templates are matched textually.
 rules:
   - id: tantular.python.xss.unescaped-dynamic-html
     languages: [python]
@@ -65,6 +68,29 @@ rules:
       - pattern: jinja2.Environment(...)
       - pattern-not: jinja2.Environment(..., autoescape=True, ...)
       - pattern-not: jinja2.Environment(..., autoescape=jinja2.select_autoescape(...), ...)
+  - id: tantular.python.xss.jinja2-template-autoescape-disabled
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A jinja2.Template is constructed directly without autoescape=True. Such a template does
+      not inherit any Environment's autoescape setting, and Jinja2's default is off, so
+      rendered variables are not HTML-escaped. If the template produces HTML and a variable
+      can contain user input this may allow cross-site scripting. Pass autoescape=True, or
+      load the template from an Environment with autoescaping. Templates that render plain
+      text (not HTML) are not affected.
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      category: security
+      confidence: LOW
+      frameworks: [jinja2]
+      references:
+        - https://jinja.palletsprojects.com/en/stable/api/#jinja2.Template
+        - https://jinja.palletsprojects.com/en/stable/api/#autoescaping
+    patterns:
+      - pattern: jinja2.Template(...)
+      - pattern-not: jinja2.Template(..., autoescape=True, ...)
+      - pattern-not: jinja2.Template(..., autoescape=jinja2.select_autoescape(...), ...)
   - id: tantular.template.xss.autoescape-bypass
     languages: [generic]
     severity: WARNING

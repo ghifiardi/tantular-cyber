@@ -1,7 +1,14 @@
 {
-  "manifest_version": "1.0.0",
+  "manifest_version": "1.1.0",
   "kind": "pointer_only",
   "policy": "Pointers only: no upstream source text is stored in this repository. Files are fetched only by 'tantular-cyber realworld fetch' into a local cache (default ~/.cache/tantular-cyber/realworld), verified by git blob SHA-1 at the pinned commit, and never executed or uploaded. Upstream licenses are recorded for transparency; copyleft or unknown-license sources are pointer-only. Upstream labels are hypotheses until independently verified.",
+  "development_repositories": [
+    {
+      "repository": "https://github.com/ghifiardi/ai-driven-soc",
+      "since": "2026-11-12",
+      "reason": "Real-repository evaluation of 2026-11-12 (Tantular vs Antares vs combined, commit 747245a5fd28e4d28ca3c608ce1a7bb9ec47393a) was reviewed and used to choose and validate rule changes (first: jinja2.Template without autoescape). Results on this repository are development results, never held-out measurements."
+    }
+  ],
   "entries": [
     {
       "id": "rw-wsgidav-mysql-select",

@@ -8,7 +8,10 @@ runs in CI, none uploads code, and none of their results gate a build.
 The manifest stores **pointers, not code**: repository, full commit SHA, path, line range,
 a SHA-256 of the target line, the git blob SHA-1 of the file, the upstream license (from the
 GitHub API), the advisory, a verification status and `development_use` (set if the pointer
-influenced our rules — it is then *not* a held-out measurement).
+influenced our rules — it is then *not* a held-out measurement). Whole repositories that
+informed development are listed under `development_repositories` (repository, `since`,
+reason); every pointer into them, current or future, is reported as not held out.
+`ghifiardi/ai-driven-soc` is development-used from 2026-11-12.
 
 ```bash
 tantular-cyber realworld audit                 # license classes, no network

@@ -223,7 +223,8 @@ without Ollama.
   cross-function taint), Python plus HTML templates. Each rule's sinks, boundaries and known
   false positives/negatives are listed in docs/rules.md. Benchmark precision/recall come
   from a small synthetic corpus and are regression floors, **not real-world rates**. Zero
-  findings ≠ secure.
+  findings ≠ secure. Known real-world detection gaps (e.g. BigQuery `client.query`, Streamlit
+  `unsafe_allow_html`, secrets in non-Python config) are tracked in docs/rules.md.
 * AST context and its dataflow hints are explanatory and syntactic; they do not prove that
   untrusted data reaches a sink.
 * All findings are `unverified` pattern matches; reachability and attacker control are

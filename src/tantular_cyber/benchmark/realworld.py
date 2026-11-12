@@ -24,6 +24,7 @@ import re
 import shutil
 import tempfile
 from collections import Counter
+from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -87,11 +88,44 @@ class Pointer(BaseModel):
         return match.group(1), match.group(2)
 
 
+class DevelopmentRepository(BaseModel):
+    """A repository used to develop rules or code: never a held-out measurement again."""
+
+    repository: str
+    since: str = Field(description="Date (YYYY-MM-DD) from which it is development-used.")
+    reason: str
+
+
 class RealWorldManifest(BaseModel):
     manifest_version: str
     kind: Literal["pointer_only"]
     policy: str
+    development_repositories: list[DevelopmentRepository] = Field(
+        default_factory=list,
+        description="Repository-level development use: every pointer into these repositories, "
+        "current or future, is reported as not held out.",
+    )
     entries: list[Pointer]
+
+
+def _repo_key(url: str) -> str:
+    return url.strip().rstrip("/").lower().removesuffix(".git")
+
+
+def _is_calendar_date(value: str) -> bool:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def is_held_out(manifest: RealWorldManifest, pointer: Pointer) -> bool:
+    """A pointer is held out only if neither it nor its repository informed development."""
+    development = {_repo_key(d.repository) for d in manifest.development_repositories}
+    return pointer.development_use is None and _repo_key(pointer.repository) not in development
 
 
 class PointerResult(BaseModel):
@@ -132,6 +166,20 @@ def validate_realworld(manifest: RealWorldManifest) -> list[str]:
     ids = [e.id for e in manifest.entries]
     if len(ids) != len(set(ids)):
         problems.append("duplicate pointer ids")
+    dev_keys = [_repo_key(d.repository) for d in manifest.development_repositories]
+    if len(dev_keys) != len(set(dev_keys)):
+        problems.append("duplicate development repositories")
+    for d in manifest.development_repositories:
+        if not _GITHUB.match(d.repository):
+            problems.append(
+                f"development repository must be https://github.com/<owner>/<repo>: {d.repository}"
+            )
+        if not _is_calendar_date(d.since):
+            problems.append(
+                f"development repository {d.repository}: since must be a real YYYY-MM-DD date"
+            )
+        if not d.reason.strip():
+            problems.append(f"development repository {d.repository}: reason is required")
     for e in manifest.entries:
         if not _GITHUB.match(e.repository):
             problems.append(f"{e.id}: repository must be https://github.com/<owner>/<repo>")
@@ -211,7 +259,7 @@ def evaluate_pointers(
             advisory_id=p.advisory.id,
             verification_status=p.verification.status,
             state="not_fetched",
-            held_out=p.development_use is None,
+            held_out=is_held_out(manifest, p),
         )
         target = cache_path(cache, p)
         if not target.is_file():
