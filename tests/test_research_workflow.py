@@ -52,10 +52,13 @@ from improve_eval.soc import (  # noqa: E402
 )
 from improve_eval.study import StudyError, parse_study  # noqa: E402
 from improve_eval.synthetic import synthetic_evaluators  # noqa: E402
+from test_wsp_timestamps import HOUR_24  # noqa: E402
 from wsp_eval.dataset import load_items  # noqa: E402
 from wsp_eval.generation import SyntheticGenerator  # noqa: E402
 from wsp_eval.grading import FinalAnswerGrader  # noqa: E402
 from wsp_eval.hashing import sha256_json  # noqa: E402
+from wsp_eval.ledger import validate_record  # noqa: E402
+from wsp_eval.protocol import ProtocolError as WspProtocolError  # noqa: E402
 from wsp_eval.protocol import parse_protocol  # noqa: E402
 from wsp_eval.runner import RunError, run_paired  # noqa: E402
 from wsp_eval.synthetic import synthetic_generators  # noqa: E402
@@ -2655,3 +2658,32 @@ def test_a_decision_refuses_an_invalid_decided_at(tmp_path, raw, alerts, value) 
         make_decision(study, report, decided_at=value, **kw)
     rec = make_decision(study, report, decided_at="2028-02-29T09:00Z", **kw)
     assert validate_decision(rec, study, report) == []
+
+
+@pytest.mark.parametrize("value", HOUR_24)
+def test_hour_24_is_refused_by_every_timestamp_field(tmp_path, raw, alerts, value) -> None:
+    # All five fields that use wsp_eval.timestamps, so the result cannot depend on the Python
+    # version's fromisoformat (which accepts "24:00" from 3.14 on).
+    protocol = json.loads((WSP / "fixtures" / "synthetic_protocol.json").read_text())
+    with pytest.raises(WspProtocolError, match="frozen_at"):  # 1. WSP protocol frozen_at
+        parse_protocol({**protocol, **FROZEN, "frozen_at": value})
+    tolerant = copy.deepcopy({**protocol, **FROZEN})
+    tolerant["drift"]["tolerance"] = {
+        "status": "approved",
+        "max_abs_accuracy_diff": 0.05,
+        "max_abs_token_limit_rate_diff": 0.05,
+        "max_abs_error_rate_diff": 0.05,
+        "approved_by": "evaluator1",
+        "approved_at": value,
+    }
+    with pytest.raises(WspProtocolError, match="approved_at"):  # 2. tolerance approved_at
+        parse_protocol(tolerant)
+    record = json.loads((ROOT / "docs" / "wsp" / "ledger-template.json").read_text())
+    record.update(human_decision="reject", decided_by="reviewer1", decided_at=value)
+    assert any("decided_at" in p for p in validate_record(record))  # 3. WSP ledger decided_at
+    with pytest.raises(StudyError, match="frozen_at"):  # 4. research study frozen_at
+        parse_study({**raw, **FROZEN, "frozen_at": value})
+    study, report = _report(tmp_path, {**raw, **FROZEN}, alerts)
+    kw = {"candidate": THRESH, "decision": "reject", "decided_by": "reviewer1", "rationale": "r"}
+    with pytest.raises(ValueError, match="decided_at"):  # 5. research decision decided_at
+        make_decision(study, report, decided_at=value, **kw)

@@ -188,8 +188,5 @@ def test_hour_23_still_reaches_the_date_parser(monkeypatch) -> None:
     assert _ParserMustNotRun.calls == ["2026-11-01T23:59:59+00:00"]
 
 
-@pytest.mark.parametrize("value", HOUR_24)
-def test_hour_24_is_refused_by_every_field(raw, value) -> None:
-    with pytest.raises(ProtocolError, match="frozen_at"):
-        parse_protocol({**raw, **FROZEN, "frozen_at": value})
-    assert any("decided_at" in p for p in validate_record(_decided(value)))
+# All five fields refuse every HOUR_24 value: see test_research_workflow.py
+# (test_hour_24_is_refused_by_every_timestamp_field), which loads both WSP and research code.
