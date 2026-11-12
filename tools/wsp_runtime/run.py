@@ -7,6 +7,12 @@
         --checkpoint base_reload=/research/ckpt/base --split development \\
         --operator op1 --purpose smoke --output /research/runs/RUN [--keep-outputs]
 
+Each arm runs in its own worker process (``wsp_runtime.process_worker``, ``spawn`` start
+method, its own process group); this process never imports vLLM, transformers or torch (it does
+load math-verify, the grader's backend), and the next arm starts only after the previous worker
+has exited, been reaped and left nothing in its process group. A worker that exited does not by
+itself show that every GPU resource was released: a descendant that left the group is not seen.
+
 Before any arm runs or any output is written, this command:
 
 * forces the offline and no-telemetry variables (a conflicting value is refused);
@@ -19,7 +25,8 @@ Before any arm runs or any output is written, this command:
   transformers with the protocol: the package metadata must equal the pins, and the modules'
   ``__version__`` must equal the pins or an explicitly registered module version (nothing is
   stripped or normalised);
-* builds and reads back a ``SamplingParams`` object for every (n, seed) the run requests;
+* builds and reads back a ``SamplingParams`` object for every (n, seed) the run requests (in
+  a short-lived probe worker, which also reports the modules' ``__version__``);
 * checks every arm's settings, storage (read-only mount below root-owned, non-writable parents)
   and loaded-file inventory.
 
@@ -57,7 +64,7 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Callable, MutableMapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -70,7 +77,11 @@ from wsp_eval.dataset import DatasetError  # noqa: E402
 from wsp_eval.hashing import sha256_bytes, sha256_file  # noqa: E402
 from wsp_eval.protocol import ProtocolError, load_protocol  # noqa: E402
 from wsp_eval.runner import RunError, run_paired  # noqa: E402
-from wsp_runtime import RUNTIME_VERSION, datasets  # noqa: E402
+from wsp_runtime import (  # noqa: E402
+    RUNTIME_VERSION,
+    datasets,
+    process_worker,
+)
 from wsp_runtime.grader import MathQAGrader, MathVerifyBackend, check_dependencies  # noqa: E402
 from wsp_runtime.provenance import runtime_code_sha256  # noqa: E402
 from wsp_runtime.vllm_adapter import (  # noqa: E402
@@ -104,6 +115,21 @@ def _checkpoints(values: Sequence[str], arm_ids: Sequence[str]) -> dict[str, Pat
     if set(out) != set(arm_ids):
         raise ValueError(f"--checkpoint must name exactly the protocol arms {sorted(arm_ids)}")
     return out
+
+
+def _seconds(flag: str, minimum: float | None = None) -> Callable[[str], float]:
+    """argparse type: a finite, positive number of seconds (``process_worker.check_seconds``)."""
+
+    def parse(text: str) -> float:
+        try:
+            value = process_worker.check_seconds(float(text), flag)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from None
+        if minimum is not None and value < minimum:
+            raise argparse.ArgumentTypeError(f"{flag} must be at least {minimum:g} s")
+        return value
+
+    return parse
 
 
 def _installed(lookup: Callable[[str], str]) -> dict[str, str | None]:
@@ -144,7 +170,19 @@ def run(
     sampling_params_factory: Callable[[], Callable[..., Any]] = _vllm_sampling_params,
     module_versions: Callable[[], dict[str, str | None]] = _module_versions,
     environ: MutableMapping[str, str] | None = None,
+    isolation: str = "process",
+    worker_engine_factory: str = process_worker.REAL_ENGINE_FACTORY,
+    worker_probe: str = process_worker.REAL_PROBE,
+    worker_options: Mapping[str, Any] | None = None,
+    worker_main: Callable[..., None] = process_worker.worker_main,
 ) -> dict[str, Any]:
+    """Run the CLI. ``isolation="process"`` (the default, and the only mode the command line
+    can select) runs each arm in its own worker process and keeps vLLM, transformers and torch
+    out of this process; ``backend_factory``, ``sampling_params_factory`` and
+    ``module_versions`` are then unused. ``isolation="in-process"`` is a **test seam only**: it
+    builds every arm's engine in this process with ``backend_factory``."""
+    if isolation not in ("process", "in-process"):
+        raise ValueError(f"isolation must be 'process' or 'in-process', not {isolation!r}")
     p = argparse.ArgumentParser(prog="wsp-runtime-run", description=__doc__.split("\n\n")[0])
     p.add_argument("--protocol", type=Path, required=True)
     p.add_argument(
@@ -171,10 +209,24 @@ def run(
         type=int,
         default=None,
         help=(
-            "bytes; fail the close if this process's PyTorch allocator still has more "
-            "allocated or reserved. This does not measure vLLM worker processes and never "
-            "shows the GPU was released"
+            "bytes; fail an arm's close if the PyTorch allocator of the process that holds "
+            "the engine (the arm's worker process; this process only with the in-process "
+            "test seam) still has more allocated or reserved. This does not measure vLLM's "
+            "own engine processes and never shows the GPU was released"
         ),
+    )
+    for flag, default in (("load", 3600.0), ("batch", 14400.0), ("close", 600.0)):
+        p.add_argument(
+            f"--{flag}-timeout",
+            type=_seconds(f"--{flag}-timeout"),
+            default=default,
+            help=f"seconds; worker {flag} timeout (provisional default {default:g})",
+        )
+    p.add_argument(
+        "--kill-grace",
+        type=_seconds("--kill-grace", minimum=process_worker.MIN_KILL_GRACE),
+        default=30.0,
+        help=f"seconds after terminate/kill (at least {process_worker.MIN_KILL_GRACE:g})",
     )
     args = p.parse_args(list(argv))
 
@@ -221,8 +273,29 @@ def run(
     else:
         shapes = [(1, seed) for seed in protocol.seeds]
     installed = _installed(dependency_lookup)
-    modules = module_versions()
-    make_params = sampling_params_factory()
+    timeouts = process_worker.Timeouts(
+        load=args.load_timeout,
+        batch=args.batch_timeout,
+        close=args.close_timeout,
+        kill_grace=args.kill_grace,
+    )
+    probe: dict[str, Any] | None = None
+    if isolation == "process":
+        # vLLM and transformers are imported only in a short-lived probe worker: it reports
+        # their __version__ and reads back SamplingParams for every (n, seed) of every arm;
+        # preflight checks those read-backs here. math-verify (the grader's backend) is still
+        # loaded in this process, below.
+        probe = process_worker.run_probe(
+            {"protocol": protocol.raw, "sample_shapes": [list(x) for x in shapes]},
+            timeout=timeouts.load,
+            probe=worker_probe,
+            grace=timeouts.kill_grace,
+        )
+        modules = probe["modules"]
+        make_params = None
+    else:
+        modules = module_versions()
+        make_params = sampling_params_factory()
     dirs = _checkpoints(args.checkpoint, [a.id for a in protocol.arms])
     preflights = [
         preflight(
@@ -233,22 +306,42 @@ def run(
             modules=modules,
             sampling_params=make_params,
             sample_shapes=shapes,
+            sampling_observed=probe["sampling"][a.id] if probe is not None else None,
         )
         for a in protocol.arms
     ]
 
     reports: list[dict[str, Any]] = []
-    loaders = {
-        a.id: arm_loader(
-            a,
-            dirs[a.id],
-            backend_factory,
-            max_parent_memory_after_close=args.max_parent_torch_memory_after_close,
-            reports=reports,
-            storage_check=storage_check,
-        )
-        for a in protocol.arms
-    }
+    if isolation == "process":
+        options = {
+            "max_torch_memory_after_close": args.max_parent_torch_memory_after_close,
+            **(worker_options or {}),
+        }
+        loaders = {
+            a.id: process_worker.process_arm_loader(
+                protocol,
+                a.id,
+                dirs[a.id],
+                engine_factory=worker_engine_factory,
+                options=options,
+                timeouts=timeouts,
+                reports=reports,
+                worker=worker_main,
+            )
+            for a in protocol.arms
+        }
+    else:
+        loaders = {
+            a.id: arm_loader(
+                a,
+                dirs[a.id],
+                backend_factory,
+                max_parent_memory_after_close=args.max_parent_torch_memory_after_close,
+                reports=reports,
+                storage_check=storage_check,
+            )
+            for a in protocol.arms
+        }
     grader = MathQAGrader(verify_backend_factory())
     run_id = f"wsp-{uuid.uuid4().hex[:12]}"
     runtime_report: dict[str, Any] = {
@@ -262,6 +355,12 @@ def run(
         "forced_environment": offline,
         "installed_versions": installed,
         "module_versions": modules,
+        "isolation": {
+            "mode": isolation,
+            "start_method": process_worker.START_METHOD if isolation == "process" else None,
+            "timeouts": vars(timeouts) if isolation == "process" else None,
+        },
+        "runtime_probe": probe,
         "leakage_reference_selection": ref_selected.as_dict(),
         "grader": {
             "id": grader.id,
@@ -387,7 +486,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except _Aborted as exc:
         print(json.dumps(exc.summary, indent=2, sort_keys=True))
         return 1
-    except (ProtocolError, DatasetError, RunError, ProvenanceError, ValueError, OSError) as exc:
+    except (
+        ProtocolError,
+        DatasetError,
+        RunError,
+        ProvenanceError,
+        process_worker.WorkerError,
+        ValueError,
+        OSError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(summary, indent=2, sort_keys=True))

@@ -529,6 +529,28 @@ def check_sampling(
     return params, observed
 
 
+def check_sampling_readback(
+    arm_id: str,
+    settings: Mapping[str, Any],
+    shapes: Sequence[tuple[int, int]],
+    observed: Sequence[Mapping[str, Any]],
+) -> None:
+    """Check read-backs made elsewhere (the probe worker): one per (n, seed), each holding the
+    requested values."""
+    if not isinstance(observed, Sequence) or len(observed) != len(shapes):
+        raise SettingsError(f"arm {arm_id}: expected one SamplingParams read-back per (n, seed)")
+    for (n, seed), got in zip(shapes, observed, strict=True):
+        if not isinstance(got, Mapping):
+            raise SettingsError(f"arm {arm_id}: a SamplingParams read-back is not an object")
+        wanted = {"n": n, "seed": seed, **settings}
+        changed = sorted(k for k, v in wanted.items() if got.get(k) != v)
+        if changed:
+            raise SettingsError(
+                f"arm {arm_id}: SamplingParams (n={n}, seed={seed}) did not keep the requested "
+                f"values for {changed}"
+            )
+
+
 def pinned_versions(arm: ArmSpec) -> dict[str, Any]:
     """The package-metadata versions the protocol pins."""
     return {
@@ -581,17 +603,24 @@ def preflight(
     modules: Mapping[str, str | None] | None = None,
     sampling_params: Callable[..., Any] | None = None,
     sample_shapes: Sequence[tuple[int, int]] = (),
+    sampling_observed: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Every check that needs no GPU and no loaded engine: settings, storage, the loaded-file
     inventory and, when given, the installed versions and the read-back of a ``SamplingParams``
-    object for every (n, seed) the run will request. Observed engine settings need a loaded
-    engine and stay a check on the GPU host."""
+    object for every (n, seed) the run will request: built here with ``sampling_params``, or
+    built in the probe worker and passed as ``sampling_observed`` (one read-back per shape,
+    checked here against the requested values). Observed engine settings need a loaded engine
+    and stay a check on the GPU host."""
+    if sampling_params is not None and sampling_observed is not None:
+        raise ValueError("give sampling_params or sampling_observed, not both")
     sampling = check_inference(arm)
     check_engine(arm)
     if installed is not None:
         check_installed(arm, installed, modules)
     for n, seed in sample_shapes if sampling_params is not None else ():
         check_sampling(sampling_params, {"n": n, "seed": seed, **sampling}, arm.id)
+    if sampling_observed is not None:
+        check_sampling_readback(arm.id, sampling, sample_shapes, sampling_observed)
     snap = inspect_checkpoint(arm, checkpoint_dir, storage_check=storage_check)
     return {
         "arm": arm.id,
@@ -599,7 +628,18 @@ def preflight(
         "loadable_files": len(snap.loaded),
         "installed_checked": installed is not None,
         "module_versions_checked": modules is not None,
-        "sampling_shapes_checked": [list(x) for x in sample_shapes] if sampling_params else [],
+        "sampling_shapes_checked": (
+            [list(x) for x in sample_shapes]
+            if sampling_params is not None or sampling_observed is not None
+            else []
+        ),
+        "sampling_built_in": (
+            "probe_worker"
+            if sampling_observed is not None
+            else "this_process"
+            if sampling_params is not None
+            else None
+        ),
         "storage_devices": snap.storage.get("devices"),
     }
 

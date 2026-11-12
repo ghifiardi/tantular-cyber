@@ -1348,6 +1348,7 @@ def _cli(
         sampling_params_factory=lambda: params,
         module_versions=lambda: modules or {"vllm": VERSION, "transformers": TF_VERSION},
         environ={} if environ is None else environ,
+        isolation="in-process",  # these tests drive the adapter in this process
     )
     return summary, backend
 
@@ -2112,10 +2113,27 @@ _NEVER = {
 _LAZY_ONLY = {"vllm", "torch", "math_verify", "transformers"}
 
 
+def _calls_in(tree: ast.AST, attr: str) -> list[ast.Call]:
+    return [
+        n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == attr
+    ]
+
+
 def test_runtime_is_isolated_and_imports_heavy_libraries_lazily() -> None:
     files = [*sorted((RUNTIME / "wsp_runtime").glob("*.py")), RUNTIME / "run.py"]
     for path in files:
         tree = ast.parse(path.read_text())
+        if path.name == "process_worker.py":
+            # The one dynamic import with a non-constant name is process_worker.resolve(),
+            # which imports the worker's engine factory and probe from a validated
+            # "module:name" reference (in the worker process). Nowhere else in the file.
+            (resolve,) = [
+                f for f in tree.body if isinstance(f, ast.FunctionDef) and f.name == "resolve"
+            ]
+            inside = _calls_in(resolve, "import_module")
+            assert len(inside) == 1 and len(_calls_in(tree, "import_module")) == 1
+            (arg,) = inside[0].args
+            assert isinstance(arg, ast.Name) and arg.id == "module"
         for node in ast.walk(tree):
             if isinstance(node, ast.Import | ast.ImportFrom):
                 names = (
@@ -2126,7 +2144,10 @@ def test_runtime_is_isolated_and_imports_heavy_libraries_lazily() -> None:
                 for n in names:
                     assert n.split(".")[0] not in _NEVER, f"{path.name} imports {n}"
             if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "import_module":
-                # importlib.import_module must stay inside functions and name only vLLM modules.
+                # importlib.import_module must stay inside functions and name only vLLM modules
+                # (process_worker.resolve is checked above).
+                if path.name == "process_worker.py":
+                    continue
                 (arg,) = node.args
                 assert isinstance(arg, ast.Constant) and arg.value.startswith("vllm.")
         for node in tree.body:  # module level: no heavy imports, so tests run without them

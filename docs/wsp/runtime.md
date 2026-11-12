@@ -25,6 +25,7 @@ on the isolated host.
 | C1 inference adapter | `wsp_runtime/vllm_adapter.py` | `VllmEngine` implements the harness's `BatchGenerator` for one arm; `arm_loader()` is its `ArmLoader`; `preflight()` runs every check that needs no GPU or loaded engine |
 | C2 grader adapter | `wsp_runtime/grader.py` | `MathQAGrader`: the pinned grading rule on a `math-verify` backend (**unreviewed**) |
 | C3 dataset loader | `wsp_runtime/datasets.py` | Local MATH-500 / MATH-train JSONL to harness `Item` rows, bound to the protocol's `dataset.runtime_sources` registration, with split and leakage checks |
+| Worker processes | `wsp_runtime/process_worker.py` | One `spawn` worker process per arm, each in its own verified process group (`WorkerEngine`, a `BatchGenerator` proxy), and a short-lived probe worker; the parent never imports vLLM, transformers or torch (it does load math-verify for grading) |
 | CLI | `run.py` | Checks the environment, dataset, leakage reference, versions, sampling read-back and every arm before anything runs, then runs a `per_arm_sequential` protocol with one `--checkpoint ARM=DIR` per arm |
 
 ## Real-run blockers
@@ -32,12 +33,13 @@ on the isolated host.
 None of these can be resolved in this repository. Each must be done, recorded and reviewed
 before a real run:
 
-0. **Execution design: no process boundary between arms.** The readiness proposal (PR #27,
-   §"Sequential loading") specifies each arm as a **separate process** and engine load, with the
-   GPU released between arms. This adapter runs every arm in **one process** and relies on
-   in-process cleanup plus the engine-object observation (C1, close). That is not the specified
-   isolation. Before real execution, either implement the per-arm process boundary, or
-   explicitly revise the execution design and have the revision reviewed.
+0. **Per-arm worker processes: implemented with stub workers only.** As the readiness proposal
+   (PR #27, §"Sequential loading") specifies, each arm now runs in its own worker process (see
+   "One worker process per arm" below). It has been exercised only with stub engines and stub
+   workers. Still open for a real run: the real engine in a worker on the GPU host, and the
+   fact that **a worker that exited, with an empty process group, does not by itself show that
+   every GPU resource was released**: a descendant that leaves the group is not seen, and GPU
+   release stays unverified (items 4 and the GPU-host table).
 1. **No runtime lock.** `requirements.in` has no lock file; vLLM and transformers are
    `REPLACE` (R6) and sympy is `REPLACE` (R9). Resolving a lock needs network access and those
    decisions.
@@ -63,6 +65,95 @@ before a real run:
    pinned `engine.transformers_version`; it is refused until they are recorded (after the
    approved fetch and R6), and is intentionally unchanged until then.
 8. The roles, budget, isolated compute account and licence review ([run-readiness.md](run-readiness.md)).
+
+## One worker process per arm (`process_worker.py`, tested with stub workers)
+
+The command line always runs each arm in its own **worker process**, started with the `spawn`
+start method (a fresh interpreter), in protocol order. The parent (the CLI and the harness
+runner) never imports vLLM, transformers or torch; it talks to the worker through
+`WorkerEngine`, which implements the harness's `BatchGenerator`. The parent **does** still load
+math-verify (the grader's backend, `MathVerifyBackend.load()`), because grading runs in the
+parent. (`run()` also has an `isolation="in-process"` seam that builds the engines in the parent;
+it exists for the adapter tests only, and no command-line option selects it.)
+
+- **Start and process group.** Every worker (and the probe) first makes itself the leader of a
+  new process group and reports that it has started. The parent checks, while the worker is
+  alive and waiting, that the worker's process group is the worker's own and is **not the
+  parent's**, and only then lets it continue; a worker it cannot verify is refused and stopped
+  as a single process. No signal is ever sent to the parent's own group (`_killpg` refuses it).
+- **Load.** The worker re-parses the protocol (its SHA-256 must equal the parent's), creates the
+  arm's engine (the real factory builds `VllmEngine` with `VllmBackend`, inside the worker) and
+  replies with the engine's `describe()`, which must carry a `load_id`. The parent adds
+  `isolation` (mode, start method, worker pid and process group). A failed load is reported,
+  the worker exits, and the run aborts as before. `--load-timeout` covers the start, the
+  process-group check and the load.
+- **Before the run**, a short-lived **probe worker** imports vLLM and transformers, reports their
+  `__version__` (reconciled with the pins as before) and builds and reads back a
+  `SamplingParams` object for every (n, seed) of every arm; it must exit with code 0. The parent
+  checks that there is one read-back for every (n, seed) of every protocol arm and that each
+  holds the requested values (`preflight(..., sampling_observed=...)`, recorded as
+  `sampling_built_in: probe_worker`). This is how preflight keeps those imports out of the
+  parent. A failing, interrupted or malformed probe stops the run before any output is written;
+  an interrupted probe is stopped at once, without waiting `--kill-grace` first.
+- **Messages.** Each message is an 8-byte length followed by UTF-8 JSON, read and written by
+  `process_worker` itself over a `multiprocessing` pipe; the parent never unpickles worker
+  output. The parent's end is non-blocking and **every timeout covers the whole message**: a
+  worker that sends part of a message (even part of the length) and stalls times out exactly
+  like one that sends nothing, and a request the worker does not read times out too. A message
+  announcing more than 256 MiB is refused before it is read. JSON is strict: `NaN`, `Infinity`
+  and numbers that overflow to infinity are refused, and so is JSON too deeply nested to parse.
+- **Batches.** One message per shard, in the runner's order; the worker answers in order.
+  Every reply is validated strictly: exact keys and types (no booleans for integers), one entry
+  per request, each echoing its request with the same JSON values and types (`true` is not `1`,
+  `1.0` is not `1`). The parent returns `BatchItem`s carrying its own request objects. A
+  request the engine failed comes back as that request's error (`WorkerRequestError`); a batch
+  the engine failed as a whole fails that batch (`WorkerBatchError`) and the worker stays usable.
+- **Crashes, timeouts, malformed replies.** A worker that exits, does not send its whole reply
+  within `--batch-timeout`, or sends anything malformed is marked dead (and its process group
+  terminated, then killed, if still running). So is a worker after any other unexpected error
+  once the request was sent (for example `MemoryError` while decoding). That batch fails, every
+  later batch of the arm fails at once (`WorkerDied`), and the close fails, so the runner stops
+  before the next arm and writes its aborted manifest with every record kept.
+- **Close.** The worker closes its engine, replies with the engine's close report, and exits.
+  `close()` returns only once the worker has **exited with code 0 and been reaped** and **no
+  process is left in its process group**; a worker that fails to close, exits with another
+  code, or does not exit within `--close-timeout` is terminated (after `--kill-grace`, killed)
+  and the close fails. Processes left in the group after the worker exits get `--kill-grace` to
+  exit by themselves; whatever is still there is killed and the close fails. The next arm is
+  therefore never started while the previous worker, or anything left in its group, is alive.
+  The close report records the worker's pid, process group, exit code, how it ended, what was
+  found in its group (`none`, `exited`, `killed`, `still_running`, `unknown`), and the
+  engine's own close report. A worker the parent stopped earlier (after a timeout or a
+  malformed reply) is recorded as `terminated` or `killed`, not as `exited`. If the parent goes
+  away, the worker releases its engine and exits.
+- **Signals the parent may not send.** If the group (or the worker) cannot be signalled
+  (`PermissionError`, for example a setuid program left in the group), the group is recorded as
+  `unknown` and the close fails; its processes are **not** reported as stopped, and may still
+  be running. The close report is still recorded and the pipe still closed.
+- **Interrupts.** Workers run in their own process groups, so a terminal Ctrl-C reaches only
+  the parent; they also ignore SIGINT. The parent decides: an interrupt while a batch is in
+  flight terminates the worker during the runner's close, and the close report records that.
+  While the parent stops a worker, closes its pipe and records its close report, a **further
+  Ctrl-C is held back until that has finished**, then raised. The hold is bounded by the
+  cleanup: at most about **5 × `--kill-grace`** (150 s at the default 30 s) when a failed load
+  or a probe is given `--kill-grace` to exit first, and about 4 × `--kill-grace` for a close.
+  Starting a worker is covered as well: an interrupt while the worker process starts is held
+  until the parent can stop it. Only the main thread receives SIGINT. A Ctrl-C arriving before
+  the runner reaches a worker's close (see the follow-ups) is not covered here.
+- **What process groups do not cover.** A descendant that leaves the worker's process group
+  (`setsid`, `setpgid`, a daemonising double fork) is neither seen nor stopped, and neither is
+  anything another service starts on the engine's behalf. A worker that is unkillable (for
+  example stuck in the driver) is reported `still_running`, and the interpreter then waits for
+  it at exit.
+- **What process exit does not show.** A worker that exited, with an empty process group, does
+  **not** by itself show that every GPU resource was released: an escaped descendant may still
+  hold the device, and the driver releases device memory asynchronously. GPU release is
+  **unverified**; device-level checks (NVML / `nvidia-smi` and the process list after each arm)
+  remain required on the GPU host.
+- **Timeouts** (`--load-timeout` 3600 s, `--batch-timeout` 14400 s, `--close-timeout` 600 s,
+  `--kill-grace` 30 s) are provisional defaults to set for the host and the run. Each must be a
+  finite number of seconds in (0, 7 days]; `--kill-grace` at least 1 s. Anything else is a usage
+  error before any work starts.
 
 ## C1: what the engine guarantees (control flow, tested with stand-in modules)
 
@@ -246,10 +337,11 @@ manifest, so the report is skipped. After an ordinary failure the report and the
 summary both carry the close reports.
 
 **What the close does not show.** `torch.cuda.memory_allocated` and `memory_reserved` count only
-this process's PyTorch allocator. vLLM's engine runs in worker processes, and CUDA contexts and
-NCCL buffers are not counted, so zeros here do not show that vLLM released the GPU.
-`--max-parent-torch-memory-after-close` (compared with both figures) can only catch memory held
-in this process. The `multiprocessing` children list misses processes started any other way, and
+the PyTorch allocator of the process that holds the adapter: the arm's worker process (in the
+default process isolation) or the parent (with the in-process test seam). vLLM's own engine
+processes, CUDA contexts and NCCL buffers are not counted, so zeros here do not show that vLLM
+released the GPU. `--max-parent-torch-memory-after-close` (compared with both figures; the name
+predates the worker processes) can only catch memory held in that process. The `multiprocessing` children list misses processes started any other way, and
 right after shutdown it may still list an engine process that is exiting, or no longer list one
 whose memory is not yet released. Worker exit and device-level memory (NVML / `nvidia-smi` after
 each close) are real-run blockers.
@@ -383,6 +475,7 @@ recorded, and reviewed before the confirmatory run.
 | Check | Why it is open |
 |---|---|
 | **Runtime lock** | No lock exists; the versions the checks below run against are unknown until it is resolved (R6, R9) |
+| **The real engine in a worker process** | `vllm_engine` and `runtime_probe` (in the worker) have not run with the real libraries; confirm that vLLM starts, serves and shuts down inside a `spawn` worker that is not a daemon, and how long a load and a close take, to set the timeouts |
 | **Engine shutdown, worker exit and GPU-memory release** | `close()` calls the shutdown hooks it finds (names version-dependent). Whether vLLM's worker processes exit and the device memory is freed before the next arm loads must be measured at device level (NVML / `nvidia-smi` and the process list after each close, allowing for the engine process's exit time). This process's PyTorch figures do not show it |
 | **Effective engine settings** | Read back and record the effective values of the engine arguments left at vLLM's defaults (batch limits, prefix caching, eager/compilation, KV-cache dtype, attention backend, scheduler) and the effective model configuration |
 | Storage | The operator checks listed under C1, storage |
@@ -404,6 +497,27 @@ recorded, and reviewed before the confirmatory run.
   `base_reload` share a directory. That is correct but slow on large weights; reusing a snapshot
   between the checks that run back to back is a possible optimisation, kept out of this change.
 - The repository's invisible-character test does not flag U+2028.
+- **Message size cap (R30-9).** The 256 MiB per-message cap is a fixed bound, not one derived
+  from the protocol. Sizing it from `max_tokens`, `n` and the shard size, and recording the
+  largest reply seen, remain to do. (An oversized message is now refused as such, as a protocol
+  error, rather than reported as a worker that died.)
+- **A batch while one is in flight (R30-13).** `WorkerEngine.generate_batch` does not itself
+  refuse a new batch after an interrupted one. The runner never does this (an interrupt ends
+  the run), and a stale reply would fail the echo check unless the requests were identical;
+  refusing it in `generate_batch` is a small hardening for direct callers.
+- **Runner-side interrupt window (re-check note 2).** In `tools/wsp` (`runner.py`,
+  `_close_quietly`), a second Ctrl-C that lands after a batch was interrupted but before
+  `WorkerEngine.close()` enters its cleanup is swallowed, and the busy worker can be left
+  running (and the interpreter then waits for it at exit). The window is a few bytecodes; the
+  fix belongs in the harness runner (outside this runtime) or in a last-resort stop of live
+  workers at exit.
+- **Close wait restarts its timeout (re-check note 5).** After a successful `closed` reply,
+  `close()` waits up to a fresh `--close-timeout` for the worker to exit instead of the time
+  left. A close is still bounded (about 2 × `--close-timeout` + 4 × `--kill-grace`); sharing
+  one deadline is a tidy-up.
+- **Check `--checkpoint` before the probe (R30-14).** The probe (which imports vLLM) runs
+  before `--checkpoint` is parsed and before storage preflight, so a mistyped arm path is
+  reported only after the probe. Parsing the checkpoints first would report it sooner.
 
 ## Running (isolated host only; not authorized yet)
 
