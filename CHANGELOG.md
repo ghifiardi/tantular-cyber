@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Rule `tantular.python.xss.jinja2-template-autoescape-disabled` (CWE-79, WARNING / LOW):
+  `jinja2.Template(source)` constructed directly without `autoescape=True` (it ignores any
+  Environment's setting and does not escape). Found as a missed, reviewed likely-real stored
+  XSS in a real-repository evaluation; corpus case `xss-jinja-template` (2 TP, 2 TN incl. a
+  near miss, 1 known FP for plain-text templates, 1 known FN for `select_autoescape` vs
+  `*.html.j2`). Benchmark: TP/FP/FN/TN 43/8/4/23 → 45/9/5/25; the corpus grew, so the
+  aggregate change is neither a regression on the unchanged cases nor an overall quality
+  claim. Report schema unchanged.
+* Real-world manifest 1.1.0: `development_repositories` marks whole repositories as
+  development-used (never held out). `ghifiardi/ai-driven-soc` is listed from 2026-11-12.
+* docs/rules.md: real-world evaluation backlog separating detection gaps from
+  false-positive reductions, with coverage limits.
+
 ## 0.3.0 — POC-006: downloadable local-first CLI (unreleased)
 
 ### Changed (compatibility)

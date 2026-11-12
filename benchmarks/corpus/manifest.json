@@ -1,5 +1,5 @@
 {
-  "manifest_version": "1.2.0",
+  "manifest_version": "1.3.0",
   "corpus_id": "tantular-python-security",
   "description": "Synthetic Python/HTML-template corpus (CWE-89, 78, 22, 79, 798) for regression benchmarking of the bundled Semgrep rules and of LLM explanations. Independently written; not representative of real-world prevalence.",
   "language": "python",
@@ -1041,6 +1041,109 @@
           "expect_detected": false,
           "preconditions": [],
           "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-template",
+      "path": "xss/jinja_template.py",
+      "tags": [
+        "true_positive",
+        "true_negative",
+        "near_miss",
+        "known_false_positive",
+        "known_false_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "jinja2.Template constructed directly (autoescape off by default, including a fallback built from a dict of embedded HTML strings), with autoescape=True, with select_autoescape(), for plain text, and an Environment whose select_autoescape extensions miss '*.html.j2'. Failure mode observed in a real-repository evaluation (2026-11-12); independently written.",
+      "annotations": [
+        {
+          "id": "xss-jinja-template-direct",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 12,
+          "end_line": 12,
+          "anchor": "return jinja2.Template(BADGE_HTML).render(label=label)",
+          "rule_id": "tantular.python.xss.jinja2-template-autoescape-disabled",
+          "expect_detected": true,
+          "preconditions": [
+            "label is user-controlled and the output is served as HTML"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-jinja-template-fallback",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 17,
+          "end_line": 17,
+          "anchor": "page = Template(builtin[kind])",
+          "rule_id": "tantular.python.xss.jinja2-template-autoescape-disabled",
+          "expect_detected": true,
+          "preconditions": [
+            "message is user-controlled and the output is served as HTML"
+          ],
+          "note": "template source looked up from embedded HTML strings",
+          "near_miss": false
+        },
+        {
+          "id": "xss-jinja-template-escaped",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 22,
+          "end_line": 22,
+          "anchor": "return Template(BADGE_HTML, autoescape=True).render(label=label)",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "xss-jinja-template-select-autoescape",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 26,
+          "end_line": 26,
+          "anchor": "autoescape=select_autoescape()).render(message=message)",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "select_autoescape() escapes string templates (default_for_string=True)",
+          "near_miss": true
+        },
+        {
+          "id": "xss-jinja-template-known-fp-text",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 30,
+          "end_line": 30,
+          "anchor": "return Template(RECEIPT_TEXT).render(order_id=order_id, amount=amount)",
+          "rule_id": "tantular.python.xss.jinja2-template-autoescape-disabled",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: plain-text template, not HTML",
+          "near_miss": false
+        },
+        {
+          "id": "xss-jinja-template-known-fn-extension",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 34,
+          "end_line": 38,
+          "anchor": "return env.get_template(\"summary.html.j2\").render(title=title)",
+          "rule_id": "tantular.python.xss.jinja2-autoescape-disabled",
+          "expect_detected": false,
+          "preconditions": [
+            "title is user-controlled and the output is served as HTML"
+          ],
+          "note": "known FN: select_autoescape(['html']) does not match '*.html.j2', so autoescaping is off; the rule treats any select_autoescape() as safe. Spans the Environment construction (34) to the sink (38) so a future Environment-level detection matches.",
           "near_miss": false
         }
       ]
