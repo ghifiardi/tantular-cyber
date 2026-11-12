@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+from typing import ClassVar
 
 import pytest
 from test_wsp_review import FROZEN, ROOT, raw  # noqa: F401 - fixture used by name
@@ -140,3 +141,55 @@ def test_a_ledger_decision_refuses_an_invalid_decided_at(value) -> None:
 
 def test_a_ledger_decision_accepts_a_leap_day() -> None:
     assert not any("decided_at" in p for p in validate_record(_decided("2028-02-29T09:00Z")))
+
+
+HOUR_24 = [
+    "2026-11-01T24:00Z",
+    "2026-11-01T24:00:00Z",
+    "2026-12-31T24:00Z",  # Python 3.14+ would read it as 2027-01-01T00:00Z
+    "0001-00-00T24:00Z",  # ...and these impossible dates as 0001-01-01T00:00Z
+    "0000-12-31T24:00Z",
+    "2026-11-01T25:00Z",
+    "2026-11-01T29:59Z",
+]
+
+
+class _ParserMustNotRun:
+    """Stands in for ``datetime`` in wsp_eval.timestamps and records every parse."""
+
+    calls: ClassVar[list[str]] = []
+
+    @classmethod
+    def fromisoformat(cls, value):
+        cls.calls.append(value)
+        from datetime import datetime
+
+        return datetime.fromisoformat(value)
+
+
+@pytest.mark.parametrize("value", HOUR_24)
+def test_hour_24_and_above_are_refused_before_the_date_parser_runs(monkeypatch, value) -> None:
+    # The hour is checked by the pattern itself, so the result cannot depend on the Python
+    # version's fromisoformat (which accepts "24:00" from 3.14 on).
+    import wsp_eval.timestamps as ts
+
+    monkeypatch.setattr(ts, "datetime", _ParserMustNotRun)
+    _ParserMustNotRun.calls = []
+    assert not ts.is_utc_timestamp(value)
+    assert _ParserMustNotRun.calls == []  # refused before the parser was reached
+
+
+def test_hour_23_still_reaches_the_date_parser(monkeypatch) -> None:
+    import wsp_eval.timestamps as ts
+
+    monkeypatch.setattr(ts, "datetime", _ParserMustNotRun)
+    _ParserMustNotRun.calls = []
+    assert ts.is_utc_timestamp("2026-11-01T23:59:59Z")
+    assert _ParserMustNotRun.calls == ["2026-11-01T23:59:59+00:00"]
+
+
+@pytest.mark.parametrize("value", HOUR_24)
+def test_hour_24_is_refused_by_every_field(raw, value) -> None:
+    with pytest.raises(ProtocolError, match="frozen_at"):
+        parse_protocol({**raw, **FROZEN, "frozen_at": value})
+    assert any("decided_at" in p for p in validate_record(_decided(value)))
