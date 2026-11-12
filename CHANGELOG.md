@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+* File-level Jinja2 autoescape configuration check in tantular-callgraph, rule
+  `tantular.callgraph.xss-jinja2-autoescape-extension` (CWE-79, WARNING / LOW): an
+  `Environment(autoescape=select_autoescape(...))` whose literal settings leave HTML-like
+  template names in the same file unescaped (e.g. `*.html.j2`). Mirrors Jinja's
+  case-insensitive suffix rules incl. `disabled_extensions` and `default`; recognises only
+  real `jinja2` imports/aliases; skips non-literal settings (counted). Configuration warning
+  without a call path; the cross-Environment false positive is documented. Corpus: 9 new
+  cases, 10 annotations; `xss-jinja-template-extension-mismatch` FN → TP. Benchmark
+  45/9/5/25 → 49/10/6/29 (corpus growth; not a quality claim). Report schema unchanged.
 * Rule `tantular.python.xss.jinja2-template-autoescape-disabled` (CWE-79, WARNING / LOW):
   `jinja2.Template(source)` constructed directly without `autoescape=True` (it ignores any
   Environment's setting and does not escape). Found as a missed, reviewed likely-real stored
