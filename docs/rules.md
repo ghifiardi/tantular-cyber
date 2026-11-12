@@ -80,10 +80,14 @@ produce findings) and reports a call path plus uncertainty; see architecture.md.
 - **Known gaps:** Flask views returning formatted HTML strings directly (FN);
   `select_autoescape([...])` whose enabled extensions do not match the loaded template names,
   e.g. `select_autoescape(["html"])` with `*.html.j2` templates, which leaves escaping off (FN;
-  corpus annotation `xss-jinja-template-known-fn-extension`); Streamlit
+  corpus annotation `xss-jinja-template-known-fn-extension`);
+  `select_autoescape(default_for_string=False)`, which leaves string templates unescaped but is
+  treated as safe by both Jinja2 rules (FN); Streamlit
   `unsafe_allow_html=True`, JavaScript, attribute and URL contexts, custom template tags, DOM
-  XSS (not covered); `|safe` on sanitiser output and `jinja2.Template` rendering plain text
-  (FP). **Not all XSS patterns are covered.**
+  XSS (not covered); `|safe` on sanitiser output, `jinja2.Template` rendering plain text, and
+  `autoescape=<variable>` on `Environment`/`Template` (flagged because only a literal `True` or
+  `select_autoescape(...)` is recognised, even if the variable is true at run time) (FP).
+  **Not all XSS patterns are covered.**
 
 ## CWE-798 — Hard-coded credentials
 

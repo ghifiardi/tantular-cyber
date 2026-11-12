@@ -10,7 +10,8 @@ a SHA-256 of the target line, the git blob SHA-1 of the file, the upstream licen
 GitHub API), the advisory, a verification status and `development_use` (set if the pointer
 influenced our rules — it is then *not* a held-out measurement). Whole repositories that
 informed development are listed under `development_repositories` (repository, `since`,
-reason); every pointer into them, current or future, is reported as not held out.
+reason); every pointer into them, current or future, is reported as not held out. `since`
+records when development use began; it does not filter pointers by date.
 `ghifiardi/ai-driven-soc` is development-used from 2026-11-12.
 
 ```bash

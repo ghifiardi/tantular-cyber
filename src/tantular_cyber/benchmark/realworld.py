@@ -92,7 +92,9 @@ class DevelopmentRepository(BaseModel):
     """A repository used to develop rules or code: never a held-out measurement again."""
 
     repository: str
-    since: str = Field(description="Date (YYYY-MM-DD) from which it is development-used.")
+    since: str = Field(
+        description="Date (YYYY-MM-DD) development use began; a record only, not a filter."
+    )
     reason: str
 
 

@@ -7,8 +7,10 @@
 # {% autoescape off/false %} blocks (cf. CVE-2017-12794).
 # Not covered: Flask views returning formatted HTML strings directly, JavaScript sinks,
 # attribute/URL contexts, custom template tags, select_autoescape() whose enabled extensions
-# do not match the loaded template names (e.g. "*.html.j2"), Streamlit
-# unsafe_allow_html. Templates are matched textually.
+# do not match the loaded template names (e.g. "*.html.j2"),
+# select_autoescape(default_for_string=False) (treated as safe), Streamlit unsafe_allow_html.
+# autoescape=<variable> is flagged (only literal True / select_autoescape() are recognised).
+# Templates are matched textually.
 rules:
   - id: tantular.python.xss.unescaped-dynamic-html
     languages: [python]

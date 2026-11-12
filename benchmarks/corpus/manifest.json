@@ -1135,7 +1135,7 @@
           "id": "xss-jinja-template-known-fn-extension",
           "truth": "vulnerable",
           "cwe": "CWE-79",
-          "line": 38,
+          "line": 34,
           "end_line": 38,
           "anchor": "return env.get_template(\"summary.html.j2\").render(title=title)",
           "rule_id": "tantular.python.xss.jinja2-autoescape-disabled",
@@ -1143,7 +1143,7 @@
           "preconditions": [
             "title is user-controlled and the output is served as HTML"
           ],
-          "note": "known FN: select_autoescape(['html']) does not match '*.html.j2', so autoescaping is off; the rule treats any select_autoescape() as safe",
+          "note": "known FN: select_autoescape(['html']) does not match '*.html.j2', so autoescaping is off; the rule treats any select_autoescape() as safe. Spans the Environment construction (34) to the sink (38) so a future Environment-level detection matches.",
           "near_miss": false
         }
       ]
