@@ -20,11 +20,11 @@ import re
 from typing import Any
 
 from .hashing import GIT_SHA_RE, SHA256_RE, contains_placeholder
+from .timestamps import is_utc_timestamp
 
 STATUSES = ("planned", "complete", "failed", "invalid")
 DECISIONS = ("pending", "accept", "reject", "request_more_evidence")
 PSEUDONYM_RE = re.compile(r"\A[A-Za-z0-9_-]{1,32}\Z")
-_TIMESTAMP_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z\Z")
 
 REQUIRED = (
     "run_id",
@@ -138,9 +138,7 @@ def validate_record(rec: dict[str, Any]) -> list[str]:
             problems.append("a recorded decision needs decided_by")
         elif decider in (rec.get("operator"), rec.get("research_lead")):
             problems.append("decided_by must differ from operator and research_lead")
-        if not (
-            isinstance(rec.get("decided_at"), str) and _TIMESTAMP_RE.fullmatch(rec["decided_at"])
-        ):
+        if not is_utc_timestamp(rec.get("decided_at")):
             problems.append("a recorded decision needs decided_at (UTC, e.g. 2026-11-13T10:00Z)")
         if decision == "accept" and status != "complete":
             problems.append("accept is only valid for a complete record")

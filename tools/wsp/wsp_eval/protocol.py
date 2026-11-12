@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .hashing import contains_placeholder, sha256_json
+from .timestamps import is_utc_timestamp
 
 ARM_ROLES = ("reference", "candidate", "no_edit_reload", "alternative")
 REPLICATION_ROLES = ("reference", "candidate", "no_edit_reload")
@@ -48,7 +49,6 @@ TOLERANCE_METRICS = (
 )
 TOLERANCE_KEYS = ("status", *TOLERANCE_METRICS, "approved_by", "approved_at", "note")
 _PSEUDONYM = re.compile(r"\A[A-Za-z0-9_-]{1,32}\Z")
-_TIMESTAMP = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z\Z")
 
 
 class ProtocolError(ValueError):
@@ -231,7 +231,7 @@ def parse_protocol(raw: dict[str, Any]) -> Protocol:
             raise ProtocolError(f"frozen protocol still has placeholders at: {holes}")
         if not (isinstance(raw.get("frozen_by"), str) and _PSEUDONYM.fullmatch(raw["frozen_by"])):
             raise ProtocolError("a frozen protocol needs frozen_by (pseudonym)")
-        if not (isinstance(raw.get("frozen_at"), str) and _TIMESTAMP.fullmatch(raw["frozen_at"])):
+        if not is_utc_timestamp(raw.get("frozen_at")):
             raise ProtocolError("a frozen protocol needs frozen_at (UTC, e.g. 2026-11-13T10:00Z)")
     elif raw.get("frozen_by") or raw.get("frozen_at"):
         raise ProtocolError("an unfrozen protocol must not carry frozen_by / frozen_at")
@@ -284,7 +284,7 @@ def _validate_drift(drift: Any, frozen: bool, reload_arms: list[str]) -> None:
             raise ProtocolError(f"approved tolerance needs {m} in [0, 1]")
     if not (isinstance(tol.get("approved_by"), str) and _PSEUDONYM.fullmatch(tol["approved_by"])):
         raise ProtocolError("approved tolerance needs approved_by (pseudonym)")
-    if not (isinstance(tol.get("approved_at"), str) and _TIMESTAMP.fullmatch(tol["approved_at"])):
+    if not is_utc_timestamp(tol.get("approved_at")):
         raise ProtocolError("approved tolerance needs approved_at (UTC timestamp)")
 
 

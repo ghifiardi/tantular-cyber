@@ -2628,3 +2628,30 @@ def test_wsp_arm_settings_must_match_the_protocol(tmp_path, field) -> None:
         evidence_from_wsp(
             res.out_dir, proto, parse_study(study_raw), ARM_MAP, tags, edit_report=EDIT_REPORT
         )
+
+
+# --- UTC timestamps: ASCII digits and real calendar values ----------------------------------
+# Non-ASCII digits are built with chr() so this file stays ASCII.
+
+_ARABIC_INDIC_TS = "".join(chr(0x0660 + int(c)) if c.isdigit() else c for c in "2026-11-01T00:00Z")
+_BAD_TIMESTAMPS = [_ARABIC_INDIC_TS, "2026-13-45T99:99Z", "2026-02-29T00:00Z", "2026-11-01T24:00Z"]
+
+
+@pytest.mark.parametrize("value", _BAD_TIMESTAMPS)
+def test_a_frozen_study_refuses_an_invalid_frozen_at(raw, value) -> None:
+    with pytest.raises(StudyError, match="frozen_at"):
+        parse_study({**raw, **FROZEN, "frozen_at": value})
+
+
+def test_a_frozen_study_accepts_a_leap_day(raw) -> None:
+    assert parse_study({**raw, **FROZEN, "frozen_at": "2028-02-29T00:00Z"}).raw["frozen"] is True
+
+
+@pytest.mark.parametrize("value", _BAD_TIMESTAMPS)
+def test_a_decision_refuses_an_invalid_decided_at(tmp_path, raw, alerts, value) -> None:
+    study, report = _report(tmp_path, {**raw, **FROZEN}, alerts)
+    kw = {"candidate": THRESH, "decision": "reject", "decided_by": "reviewer1", "rationale": "r"}
+    with pytest.raises(ValueError, match="decided_at"):
+        make_decision(study, report, decided_at=value, **kw)
+    rec = make_decision(study, report, decided_at="2028-02-29T09:00Z", **kw)
+    assert validate_decision(rec, study, report) == []
