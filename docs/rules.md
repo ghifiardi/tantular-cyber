@@ -16,6 +16,7 @@ synthetic corpus says nothing about real-world recall.
 | 79 XSS | `tantular.python.xss.jinja2-autoescape-disabled` | WARNING / MEDIUM |
 | 79 XSS | `tantular.python.xss.jinja2-template-autoescape-disabled` | WARNING / LOW |
 | 79 XSS | `tantular.template.xss.autoescape-bypass` (HTML templates) | WARNING / LOW |
+| 79 XSS | `tantular.callgraph.xss-jinja2-autoescape-extension` (tantular-callgraph, file-level) | WARNING / LOW |
 | 798 Hard-coded credentials | `tantular.python.secrets.hardcoded-credential` | WARNING / MEDIUM |
 
 "Dynamic string" below means an f-string, `+` concatenation, `%`-formatting or `.format()` —
@@ -71,20 +72,46 @@ produce findings) and reports a call path plus uncertainty; see architecture.md.
   `select_autoescape()`, and `jinja2.Template(source)` constructed directly without
   `autoescape=True` (a Template built this way ignores any Environment's setting and does not
   escape; confidence LOW because many such templates render plain text).
+- **Jinja2 autoescape configuration (tantular-callgraph, file-level):** a
+  `jinja2.Environment(..., autoescape=select_autoescape(...))` whose literal
+  `enabled_extensions`, `disabled_extensions` and `default` leave an HTML-like template-name
+  literal in the **same file** unescaped (e.g. the default `select_autoescape()` with
+  `*.html.j2` names). Suffixes are matched case-insensitively as Jinja does (enabled first,
+  then disabled, then `default`; `default=True` does not help a name whose suffix is
+  disabled). Reported at the Environment construction, listing each name once with its
+  lines; **no call path**: it is a configuration warning, not proven dataflow.
+  Report safety: names are repository text, so a name that `security.redact()` would
+  change is never listed; the finding states only how many were withheld (a finding whose
+  names are all withheld keeps a generic warning). The message lists at most 5 names with
+  5 lines each.
+  Budgets: per file, at most 200 distinct names (by first occurrence) are compared against
+  at most 50 Environment constructions (by position), and each distinct setting is
+  evaluated once. Anything beyond a limit is not examined and is counted in the scanner
+  statistics (`jinja_autoescape_names_not_compared`,
+  `jinja_autoescape_environments_not_evaluated`, `jinja_autoescape_limited_files`;
+  withheld names in `jinja_autoescape_names_redacted`). Like the callgraph's depth limit,
+  these counts do not change the report status.
 - **Django:** `mark_safe(dynamic)`, `HttpResponse(dynamic)`.
 - **Templates** (`*.html`, `*.jinja*`, `*.j2`, matched as text): `{{ x|safe }}`,
   `{% autoescape off %}` / `{% autoescape false %}` (informed by CVE-2017-12794).
 - **Boundaries:** template context variables, `Markup(...) % value` (escapes the value),
   `format_html()`, literal `mark_safe("...")`, `select_autoescape()`, and
   `jinja2.Template(..., autoescape=True | select_autoescape(...))` are not flagged.
-- **Known gaps:** Flask views returning formatted HTML strings directly (FN);
-  `select_autoescape([...])` whose enabled extensions do not match the loaded template names,
-  e.g. `select_autoescape(["html"])` with `*.html.j2` templates, which leaves escaping off (FN;
-  corpus annotation `xss-jinja-template-known-fn-extension`);
+- **Known gaps:** Flask views returning formatted HTML strings directly (FN); extension
+  mismatches the file-level check cannot see — template names built at run time or defined
+  in another file/config, non-literal `select_autoescape(...)` arguments (skipped and counted
+  as `jinja_autoescape_unresolved_settings`), a pre-built `select_autoescape` object passed
+  through a variable, Jinja2 subclasses such as `SandboxedEnvironment`, names or
+  Environments beyond the per-file budgets, files where a Jinja name is rebound anywhere
+  (the binding check is not scope-aware, so a same-named local in an unrelated function,
+  or `try: import jinja2 / except ImportError: jinja2 = None`, suppresses the file), and a
+  warning dropped as a duplicate of an overlapping Semgrep CWE-79 finding (FN);
   `select_autoescape(default_for_string=False)`, which leaves string templates unescaped but is
   treated as safe by both Jinja2 rules (FN); Streamlit
   `unsafe_allow_html=True`, JavaScript, attribute and URL contexts, custom template tags, DOM
-  XSS (not covered); `|safe` on sanitiser output, `jinja2.Template` rendering plain text, and
+  XSS (not covered); `|safe` on sanitiser output, `jinja2.Template` rendering plain text, an
+  extension-mismatch warning for names that belong to a different Environment in the same
+  file or are not template names at all (FP; corpus `xss-jinja-ext-two-envs-text`), and
   `autoescape=<variable>` on `Environment`/`Template` (flagged because only a literal `True` or
   `select_autoescape(...)` is recognised, even if the variable is true at run time) (FP).
   **Not all XSS patterns are covered.**
@@ -116,7 +143,7 @@ credentials from the evaluated repository are copied.
 | # | Gap | Evidence in the evaluation | Status |
 |---|---|---|---|
 | D1 | `jinja2.Template(source)` without `autoescape=True` | missed a reviewed likely-real stored XSS (HTML report fallback template) | **covered** by `tantular.python.xss.jinja2-template-autoescape-disabled` |
-| D2 | `select_autoescape([...])` vs `*.html.j2` template names | same issue's primary path; escaping silently off | open; corpus FN recorded |
+| D2 | `select_autoescape([...])` vs `*.html.j2` template names | same issue's primary path; escaping silently off | **covered (file-level)** by `tantular.callgraph.xss-jinja2-autoescape-extension`; names outside the file remain FN |
 | D3 | BigQuery-style `client.query(sql)` with f-string SQL | 49 files / 242 sites; 2 reviewed as plausible (alert data interpolated) | open |
 | D4 | Streamlit `st.markdown(..., unsafe_allow_html=True)` with dynamic content | 41 files / 464 calls; 4 dashboards reviewed, none exploitable | open |
 | D5 | Credentials in non-Python config (`.json`) | the most significant reviewed issue: a guessable tenant key committed in config (found only via test files) | open |

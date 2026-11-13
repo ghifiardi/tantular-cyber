@@ -23,6 +23,9 @@ Design (conservative by construction):
 
 Every finding carries the source-to-sink call path and explicit uncertainty notes, and is
 ``unverified`` like all scanner findings.
+
+The scanner also runs a file-level Jinja2 autoescape configuration check
+(:mod:`.jinja_autoescape`). Those findings are configuration warnings without a call path.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import __version__
+from . import __version__, jinja_autoescape
 from .scanner import RawFinding, ScannerRun
 
 TOOL = "tantular-callgraph"
@@ -875,6 +878,59 @@ def hit_to_raw(hit: Hit) -> RawFinding:
     )
 
 
+JINJA_STATS = (
+    "jinja_autoescape_unresolved_settings",
+    "jinja_autoescape_names_redacted",
+    "jinja_autoescape_names_not_compared",
+    "jinja_autoescape_environments_not_evaluated",
+    "jinja_autoescape_limited_files",
+)
+
+
+def config_hit_to_raw(hit: jinja_autoescape.ConfigHit) -> RawFinding:
+    """A file-level configuration warning: no trace (no call path is claimed)."""
+    return RawFinding(
+        tool=TOOL,
+        rule_id=jinja_autoescape.RULE_ID,
+        path=hit.path,
+        start_line=hit.line,
+        end_line=hit.end_line,
+        message=hit.message,
+        severity=jinja_autoescape.SEVERITY,
+        cwe=("CWE-79",),
+        confidence=jinja_autoescape.CONFIDENCE,
+        trace=(),
+        uncertainty=jinja_autoescape.UNCERTAINTY,
+    )
+
+
+def jinja_config_findings(
+    sources: dict[str, str], skipped: dict[str, str]
+) -> tuple[list[RawFinding], dict[str, int]]:
+    """Run the Jinja2 autoescape configuration check on every parsed, in-budget file.
+
+    Returns the findings and the check's statistics (unresolved settings, redacted names and
+    per-file limits reached), which the scanner records in ``stats``.
+    """
+    findings: list[RawFinding] = []
+    stats = dict.fromkeys(JINJA_STATS, 0)
+    for rel in sorted(sources):
+        if rel in skipped:
+            continue
+        try:
+            tree = ast.parse(sources[rel])
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            continue
+        result = jinja_autoescape.check_module(rel, tree)
+        findings.extend(config_hit_to_raw(h) for h in result.hits)
+        stats["jinja_autoescape_unresolved_settings"] += result.unresolved
+        stats["jinja_autoescape_names_redacted"] += result.names_redacted
+        stats["jinja_autoescape_names_not_compared"] += result.names_not_compared
+        stats["jinja_autoescape_environments_not_evaluated"] += result.environments_not_evaluated
+        stats["jinja_autoescape_limited_files"] += result.limited
+    return findings, stats
+
+
 class CallgraphScanner:
     """Scanner plugin wrapping :func:`analyze` (pure Python, no subprocess)."""
 
@@ -893,7 +949,7 @@ class CallgraphScanner:
         run = ScannerRun(
             tool=self.name,
             version=self.version(),
-            rules=sorted(RULES.values()),
+            rules=sorted([*RULES.values(), jinja_autoescape.RULE_ID]),
             targets=len(targets),
             languages=["python"],
             in_scope=py,
@@ -903,7 +959,8 @@ class CallgraphScanner:
         for rel in py:
             sources[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
         hits, stats, skipped = analyze(sources, self.budget)
-        run.findings = [hit_to_raw(h) for h in hits]
+        config, jinja_stats = jinja_config_findings(sources, skipped)
+        run.findings = [hit_to_raw(h) for h in hits] + config
         run.scanned = {rel for rel in py if rel not in skipped}
         run.scanned_reported = True
         run.tool_skipped = skipped
@@ -915,6 +972,7 @@ class CallgraphScanner:
             "self_dispatch": stats.self_dispatch,
             "depth_limited": stats.depth_limited,
             "max_depth": self.budget.max_depth,
+            **jinja_stats,
         }
         run.duration_s = round(time.monotonic() - started, 3)
         return run

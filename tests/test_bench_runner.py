@@ -48,9 +48,11 @@ def test_offline_benchmark_passes_with_expected_metrics(offline) -> None:
     result, out = offline
     assert result.status == "pass", [g for g in result.gates if not g.passed]
     m = result.scanner.metrics
-    # +2 TP, +1 known FP, +1 known FN, +2 TN from case xss-jinja-template (jinja2.Template).
-    assert (m.tp, m.fp, m.fn, m.tn) == (45, 9, 5, 25)
-    assert m.precision == 0.8333 and m.recall == 0.9
+    # #31 (jinja2.Template): +2 TP, +1 known FP, +1 known FN, +2 TN.
+    # Jinja2 autoescape-extension check: 9 cases (+3 TP, +1 known FP, +2 known FN, +4 TN) and
+    # the #31 extension-mismatch annotation FN -> TP.
+    assert (m.tp, m.fp, m.fn, m.tn) == (49, 10, 6, 29)
+    assert m.precision == 0.8305 and m.recall == 0.8909
     assert "tantular.callgraph.sqli-interprocedural" in result.scanner.by_rule
     ctx = {s.strategy: s for s in result.context.strategies}
     assert ctx["ast"].construct_covered == ctx["ast"].n
@@ -239,7 +241,16 @@ def test_ablation_attributes_detections_and_pins_known_limits(offline) -> None:
         "path-known-fn-pathlib",
     }
     assert former_gaps <= set(ab.callgraph_unique)
-    assert ab.callgraph_new_fp == []  # no false positive that Semgrep did not already raise
+    # File-level Jinja2 autoescape configuration check (tantular-callgraph).
+    assert {
+        "xss-jinja-ext-config-dict-env",
+        "xss-jinja-ext-aliased-upper-env",
+        "xss-jinja-ext-disabled-suffix-env",
+        "xss-jinja-template-extension-mismatch",
+    } <= set(ab.callgraph_unique)
+    # The only false positive Semgrep did not already raise is the documented
+    # cross-Environment case of the file-level configuration check (kept visible).
+    assert ab.callgraph_new_fp == ["xss-jinja-ext-two-envs-text"]
     combined = {r.annotation_id: r for r in result.scanner.records}
     # Documented limitations stay undetected at the default depth budget (regression pin).
     for limit in ("interproc-known-fn-depth", "interproc-known-fn-dynamic-dispatch"):

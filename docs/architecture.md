@@ -122,6 +122,22 @@ and bounded by `CallgraphBudget` (call depth 3, 2000 files, 20000 functions, 8 t
   and overlapping lines as a Semgrep finding is dropped (`suppressed_duplicates`).
 * A file Semgrep scans but the callgraph cannot parse is a coverage gap for that scanner
   (`python_syntax_error`); if only one scanner fails the report is `degraded`, not `failed`.
+* **Jinja2 autoescape configuration check** (`jinja_autoescape.py`, rule
+  `tantular.callgraph.xss-jinja2-autoescape-extension`): a file-level, `ast`-only check run
+  by the same scanner on every parsed file. It mirrors `jinja2.select_autoescape` for
+  literal settings and reports an Environment that leaves HTML-like template-name literals in
+  the same file unescaped. It is a configuration warning: empty `call_path`, fixed
+  `uncertainty` notes, names matched lexically per file (not per Environment). Non-literal
+  settings are counted in `stats.jinja_autoescape_unresolved_settings`, never reported.
+  Template names are repository text: secret-shaped names (those `security.redact()` would
+  change) are withheld before a message is built, so they never reach `report.json`,
+  `report.md` or the LLM request; only their count is shown. Work and output are bounded
+  per file (200 names × 50 Environments, one evaluation per distinct setting; at most 5
+  names × 5 lines in a message) and limits reached are counted in `stats`. The check
+  re-parses each in-budget file (cheap compared with the callgraph). Bindings are checked
+  file-wide, not per scope. As callgraph findings, these warnings are dropped when they
+  overlap a Semgrep CWE-79 finding, and two Environments on one line with identical
+  evidence share a finding id.
 
 ## Evidence context (`context.py`, report schema 1.2)
 

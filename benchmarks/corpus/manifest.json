@@ -1,5 +1,5 @@
 {
-  "manifest_version": "1.3.0",
+  "manifest_version": "1.4.0",
   "corpus_id": "tantular-python-security",
   "description": "Synthetic Python/HTML-template corpus (CWE-89, 78, 22, 79, 798) for regression benchmarking of the bundled Semgrep rules and of LLM explanations. Independently written; not representative of real-world prevalence.",
   "language": "python",
@@ -1053,7 +1053,6 @@
         "true_negative",
         "near_miss",
         "known_false_positive",
-        "known_false_negative",
         "jinja2"
       ],
       "llm_eval": false,
@@ -1132,18 +1131,295 @@
           "near_miss": false
         },
         {
-          "id": "xss-jinja-template-known-fn-extension",
+          "id": "xss-jinja-template-extension-mismatch",
           "truth": "vulnerable",
           "cwe": "CWE-79",
           "line": 34,
-          "end_line": 38,
-          "anchor": "return env.get_template(\"summary.html.j2\").render(title=title)",
-          "rule_id": "tantular.python.xss.jinja2-autoescape-disabled",
-          "expect_detected": false,
+          "end_line": 34,
+          "anchor": "return Environment(loader=FileSystemLoader(\"pages\"), autoescape=select_autoescape([\"html\"]))",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": true,
           "preconditions": [
             "title is user-controlled and the output is served as HTML"
           ],
-          "note": "known FN: select_autoescape(['html']) does not match '*.html.j2', so autoescaping is off; the rule treats any select_autoescape() as safe. Spans the Environment construction (34) to the sink (38) so a future Environment-level detection matches.",
+          "note": "select_autoescape(['html']) does not match '*.html.j2' (used at line 38), so autoescaping is off; detected by the file-level configuration check at the Environment construction. Annotated at the construction because the template is loaded in another function, so no single evidence context covers both lines.",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-config-dict",
+      "path": "xss/jinja_ext/report_service.py",
+      "tags": [
+        "true_positive",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Environment built in __init__ with select_autoescape(['html','xml']); '*.html.j2' names held in a settings dict (one name appears twice).",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-config-dict-env",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 17,
+          "end_line": 19,
+          "anchor": "autoescape=jinja2.select_autoescape([\"html\", \"xml\"]),",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": true,
+          "preconditions": [
+            "the template renders user-controlled values as HTML"
+          ],
+          "note": "names end in '.j2', not an enabled extension",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-aliased-upper",
+      "path": "xss/jinja_ext/aliased_upper.py",
+      "tags": [
+        "true_positive",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Module alias (import jinja2 as jj) and an upper-case template name; Jinja matches suffixes case-insensitively.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-aliased-upper-env",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 9,
+          "end_line": 11,
+          "anchor": "autoescape=jj.select_autoescape(enabled_extensions=(\"html\",)),",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": true,
+          "preconditions": [
+            "the template renders user-controlled values as HTML"
+          ],
+          "note": "'Card.HTML.J2' lower-cases to '.html.j2', which does not end in '.html'",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-disabled-suffix",
+      "path": "xss/jinja_ext/disabled_suffix.py",
+      "tags": [
+        "true_positive",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "select_autoescape (imported under an alias) with default=True but disabled_extensions=['.j2'] (dotted).",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-disabled-suffix-env",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 10,
+          "end_line": 12,
+          "anchor": "autoescape=choose_escaping(default=True, disabled_extensions=[\".j2\"]),",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": true,
+          "preconditions": [
+            "the template renders user-controlled values as HTML"
+          ],
+          "note": "default=True is overridden: the disabled '.j2' suffix turns escaping off",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-enabled-suffix",
+      "path": "xss/jinja_ext/enabled_suffix.py",
+      "tags": [
+        "true_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Upper-case and dotted enabled extensions that include the template suffix.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-enabled-suffix-env",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "autoescape=select_autoescape([\"HTML\", \".J2\"]))",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "'.J2' normalises to '.j2', so '*.html.j2' is escaped",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-default-true",
+      "path": "xss/jinja_ext/default_true.py",
+      "tags": [
+        "true_negative",
+        "near_miss",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "select_autoescape(default=True) with a '*.html.j2' name and no disabled extensions.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-default-true-env",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "autoescape=select_autoescape(default=True))",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "unmatched suffixes fall back to default=True",
+          "near_miss": true
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-two-envs",
+      "path": "xss/jinja_ext/two_envs.py",
+      "tags": [
+        "known_false_positive",
+        "true_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Two environments in one file: a text environment with select_autoescape(['html']) and an HTML environment with autoescape=True that loads the '*.html.j2' template.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-two-envs-text",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 8,
+          "end_line": 8,
+          "anchor": "text_env = Environment(loader=FileSystemLoader(\"tpl\"), autoescape=select_autoescape([\"html\"]))",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: names are matched per file, not per Environment; the '*.html.j2' template is loaded by html_env",
+          "near_miss": false
+        },
+        {
+          "id": "xss-jinja-ext-two-envs-html",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "html_env = Environment(loader=FileSystemLoader(\"tpl\"), autoescape=True)",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-runtime-name",
+      "path": "xss/jinja_ext/runtime_name.py",
+      "tags": [
+        "known_false_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Template name built at run time (f-string), so no literal name exists in the file.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-runtime-name-env",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 7,
+          "end_line": 7,
+          "anchor": "return Environment(loader=FileSystemLoader(\"ui\"), autoescape=select_autoescape([\"html\"]))",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": false,
+          "preconditions": [
+            "the template renders user-controlled values as HTML"
+          ],
+          "note": "known FN: only literal template names are matched",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-unresolved-setting",
+      "path": "xss/jinja_ext/unresolved_setting.py",
+      "tags": [
+        "known_false_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "select_autoescape() receives a variable instead of a literal list.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-unresolved-setting-env",
+          "truth": "vulnerable",
+          "cwe": "CWE-79",
+          "line": 10,
+          "end_line": 11,
+          "anchor": "loader=FileSystemLoader(\"ui\"), autoescape=select_autoescape(ESCAPED_EXTENSIONS)",
+          "rule_id": "tantular.callgraph.xss-jinja2-autoescape-extension",
+          "expect_detected": false,
+          "preconditions": [
+            "the template renders user-controlled values as HTML"
+          ],
+          "note": "known FN: non-literal settings are skipped (counted as unresolved)",
+          "near_miss": false
+        }
+      ]
+    },
+    {
+      "id": "xss-jinja-ext-not-jinja",
+      "path": "xss/jinja_ext/not_jinja.py",
+      "tags": [
+        "true_negative",
+        "jinja2"
+      ],
+      "llm_eval": false,
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "description": "Local classes named Environment and select_autoescape that are not Jinja2.",
+      "annotations": [
+        {
+          "id": "xss-jinja-ext-not-jinja-env",
+          "truth": "safe",
+          "cwe": "CWE-79",
+          "line": 16,
+          "end_line": 16,
+          "anchor": "return Environment(autoescape=select_autoescape([\"html\"]))",
+          "rule_id": null,
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "not a Jinja2 Environment",
           "near_miss": false
         }
       ]

@@ -175,3 +175,44 @@ def test_line_numbers_ignore_non_newline_separators(tmp_path: Path) -> None:
         scanners=[FakeScanner([raw])],
     ).report
     assert report.findings[0].evidence.lines[0].text == "TARGET_LINE = 3"
+
+
+def test_secret_shaped_jinja_template_names_never_reach_reports_or_prompt(
+    tmp_path: Path,
+) -> None:
+    """Repo string literals listed by the Jinja autoescape check are redacted at the source."""
+    from tantular_cyber.callgraph import CallgraphScanner
+    from tantular_cyber.jinja_autoescape import RULE_ID
+
+    aws = "AKIA" + "TCSYNTHETIC00042"
+    names = [f"{GH_TOKEN}.html.j2", f"{aws}/page.html.j2"]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "views.py").write_text(
+        "import jinja2\n"
+        "env = jinja2.Environment(autoescape=jinja2.select_autoescape())\n"
+        + "".join(f'T{i} = "{n}"\n' for i, n in enumerate(names))
+        + 'SAFE = "card.html.j2"\n'
+    )
+    (repo / "only_secret.py").write_text(
+        "import jinja2\n"
+        "env = jinja2.Environment(autoescape=jinja2.select_autoescape())\n"
+        f'T = "{names[0]}"\n'
+    )
+    llm = FakeLLM([GOOD_EXPLANATION])
+    report = run_scan(
+        ScanSettings(repo=repo, output=tmp_path / "out"),
+        scanners=[CallgraphScanner()],
+        llm_client_factory=lambda: llm,
+    ).report
+
+    hits = {f.path: f for f in report.findings if f.rule_id == RULE_ID}
+    assert set(hits) == {"views.py", "only_secret.py"}
+    assert "'card.html.j2'" in hits["views.py"].message
+    assert "2 name(s) withheld" in hits["views.py"].message
+    assert "1 name(s) withheld" in hits["only_secret.py"].message
+    assert llm.messages, "the AI request path must have been exercised"
+    outgoing = json.dumps([m for call in llm.messages for m in call])
+    for text in (outgoing, render_json(report), render_markdown(report)):
+        for secret in (GH_TOKEN, aws):
+            assert secret not in text, secret
