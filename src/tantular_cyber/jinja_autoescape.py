@@ -14,10 +14,13 @@ escapes, otherwise a disabled suffix does not escape, otherwise ``default`` appl
 
 Conservative by construction:
 
-* Only real Jinja2 bindings are recognised: ``import jinja2 [as x]``,
-  ``from jinja2 import Environment/select_autoescape [as x]`` (also from
-  ``jinja2.environment`` / ``jinja2.utils``) and ``from jinja2 import *``. A name that is
-  also defined or imported from elsewhere in the file is ambiguous and ignored.
+* Only real Jinja2 bindings are recognised. A call must resolve to exactly
+  ``jinja2.Environment`` / ``jinja2.environment.Environment`` or
+  ``jinja2.select_autoescape`` / ``jinja2.utils.select_autoescape`` through
+  ``import jinja2[.environment|.utils] [as x]``, ``from jinja2[.environment|.utils] import
+  Environment/select_autoescape [as x]`` or ``from jinja2 import *``; any other attribute
+  chain (e.g. ``jinja2.unrelated.Environment``) is ignored. A name that is also defined,
+  assigned or imported from elsewhere in the file is ambiguous and ignored.
 * ``select_autoescape(...)`` arguments must be literal (lists/tuples/sets of strings,
   booleans). Anything else — variables, ``*args``/``**kwargs`` — is **unresolved**: skipped
   and counted, never reported. An ``autoescape=`` value that is not a direct
@@ -43,6 +46,9 @@ MAX_LISTED_NAMES = 5
 _JINJA_MODULES = {"jinja2", "jinja2.environment", "jinja2.utils"}
 _ENV_ATTR = "Environment"
 _SELECT_ATTR = "select_autoescape"
+# The only qualified names recognised (Jinja 3.1 public locations).
+_ENV_QUALNAMES = {"jinja2.Environment", "jinja2.environment.Environment"}
+_SELECT_QUALNAMES = {"jinja2.select_autoescape", "jinja2.utils.select_autoescape"}
 _DEFAULT_ENABLED = ("html", "htm", "xml")
 _NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,150}")
 _HTML_LIKE = re.compile(r"\.(?:html?|xhtml|xml)(?:\.[a-z0-9_-]+)*$")
@@ -113,7 +119,7 @@ class _Bindings:
     """Which local names refer to Jinja2's module, Environment and select_autoescape."""
 
     def __init__(self, tree: ast.Module):
-        self.modules: set[str] = set()
+        self.modules: dict[str, str] = {}  # local name -> jinja module it is bound to
         self.env: set[str] = set()
         self.select: set[str] = set()
         star = False
@@ -121,21 +127,27 @@ class _Bindings:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for a in node.names:
-                    bound = a.asname or a.name.split(".")[0]
-                    if a.name == "jinja2" or (a.asname is None and a.name.startswith("jinja2.")):
-                        self.modules.add(bound)
+                    if a.asname is None:
+                        # ``import jinja2.utils`` binds ``jinja2`` (the top-level package).
+                        bound, target = a.name.split(".")[0], "jinja2"
+                        jinja = a.name == "jinja2" or a.name.startswith("jinja2.")
+                    else:
+                        bound, target = a.asname, a.name
+                        jinja = a.name in _JINJA_MODULES
+                    if jinja and self.modules.get(bound, target) == target:
+                        self.modules[bound] = target
                     else:
                         other.add(bound)
             elif isinstance(node, ast.ImportFrom):
-                jinja = node.level == 0 and node.module in _JINJA_MODULES
+                module = node.module if node.level == 0 else None
                 for a in node.names:
                     if a.name == "*":
-                        star = star or jinja
+                        star = star or module == "jinja2"
                         continue
                     bound = a.asname or a.name
-                    if jinja and a.name == _ENV_ATTR:
+                    if f"{module}.{a.name}" in _ENV_QUALNAMES:
                         self.env.add(bound)
-                    elif jinja and a.name == _SELECT_ATTR:
+                    elif f"{module}.{a.name}" in _SELECT_QUALNAMES:
                         self.select.add(bound)
                     else:
                         other.add(bound)
@@ -149,25 +161,31 @@ class _Bindings:
             self.env.add(_ENV_ATTR)
             self.select.add(_SELECT_ATTR)
         # Ambiguous: also defined, assigned or imported from elsewhere in this file.
-        self.modules -= other
+        self.modules = {k: v for k, v in self.modules.items() if k not in other}
         self.env -= other
         self.select -= other
 
-    def _is(self, func: ast.expr, local: set[str], attr: str) -> bool:
+    def _qualname(self, func: ast.expr) -> str | None:
+        """``mod.sub.attr`` with the root resolved to its jinja module, else ``None``."""
+        parts: list[str] = []
+        node = func
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not (isinstance(node, ast.Name) and node.id in self.modules and parts):
+            return None
+        return ".".join([self.modules[node.id], *reversed(parts)])
+
+    def _is(self, func: ast.expr, local: set[str], qualnames: set[str]) -> bool:
         if isinstance(func, ast.Name):
             return func.id in local
-        if isinstance(func, ast.Attribute) and func.attr == attr:
-            base = func.value
-            while isinstance(base, ast.Attribute):  # jinja2.environment.Environment
-                base = base.value
-            return isinstance(base, ast.Name) and base.id in self.modules
-        return False
+        return self._qualname(func) in qualnames
 
     def is_environment(self, call: ast.Call) -> bool:
-        return self._is(call.func, self.env, _ENV_ATTR)
+        return self._is(call.func, self.env, _ENV_QUALNAMES)
 
     def is_select(self, node: ast.expr) -> bool:
-        return isinstance(node, ast.Call) and self._is(node.func, self.select, _SELECT_ATTR)
+        return isinstance(node, ast.Call) and self._is(node.func, self.select, _SELECT_QUALNAMES)
 
 
 def _literal_strings(node: ast.expr) -> tuple[str, ...] | None:

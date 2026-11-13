@@ -74,6 +74,8 @@ def test_unresolved_settings(expr: str) -> None:
         "from jinja2.environment import Environment\nfrom jinja2.utils import select_autoescape",
         "from jinja2 import *",
         "import jinja2.environment",
+        "import jinja2.environment as je\nimport jinja2.utils as ju",
+        "import jinja2 as jj\nimport os",
     ],
 )
 def test_jinja_imports_and_aliases_are_resolved(header: str) -> None:
@@ -89,6 +91,12 @@ def test_jinja_imports_and_aliases_are_resolved(header: str) -> None:
         "from jinja2 import *": "Environment(autoescape=select_autoescape())",
         "import jinja2.environment": (
             "jinja2.environment.Environment(autoescape=jinja2.utils.select_autoescape())"
+        ),
+        "import jinja2.environment as je\nimport jinja2.utils as ju": (
+            "je.Environment(autoescape=ju.select_autoescape())"
+        ),
+        "import jinja2 as jj\nimport os": (
+            "jj.environment.Environment(autoescape=jj.utils.select_autoescape())"
         ),
     }[header]
     result = check(f'{header}\nNAME = "page.html.j2"\nenv = {call}\n')
@@ -108,6 +116,21 @@ def test_jinja_imports_and_aliases_are_resolved(header: str) -> None:
         "Environment(autoescape=select_autoescape())\n",
         # a different module bound to the name jinja2
         "import notjinja as jinja2\njinja2.Environment(autoescape=jinja2.select_autoescape())\n",
+        # attribute chains rooted at jinja2 that are not the real public locations
+        "import jinja2\njinja2.unrelated.Environment(autoescape=jinja2.select_autoescape())\n",
+        "import jinja2\njinja2.sandbox.Environment(autoescape=jinja2.select_autoescape())\n",
+        "import jinja2\njinja2.utils.Environment(autoescape=jinja2.select_autoescape())\n",
+        "import jinja2\njinja2.Environment(autoescape=jinja2.other.select_autoescape())\n",
+        "import jinja2.utils as ju\nju.Environment(autoescape=ju.select_autoescape())\n",
+        # names imported from a module that does not define them
+        "from jinja2.utils import Environment, select_autoescape\n"
+        "Environment(autoescape=select_autoescape())\n",
+        "from jinja2 import Environment\nfrom jinja2.environment import select_autoescape\n"
+        "Environment(autoescape=select_autoescape())\n",
+        "from jinja2.environment import *\nEnvironment(autoescape=select_autoescape())\n",
+        # one name bound to both Jinja and another module
+        "import jinja2\nimport jinja2.environment as jinja2\n"
+        "jinja2.Environment(autoescape=jinja2.select_autoescape())\n",
         # not a select_autoescape() call: left to the Semgrep rules
         "import jinja2\njinja2.Environment(autoescape=True)\n",
         "import jinja2\nae = jinja2.select_autoescape()\njinja2.Environment(autoescape=ae)\n",
