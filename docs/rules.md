@@ -80,6 +80,17 @@ produce findings) and reports a call path plus uncertainty; see architecture.md.
   then disabled, then `default`; `default=True` does not help a name whose suffix is
   disabled). Reported at the Environment construction, listing each name once with its
   lines; **no call path**: it is a configuration warning, not proven dataflow.
+  Report safety: names are repository text, so a name that `security.redact()` would
+  change is never listed; the finding states only how many were withheld (a finding whose
+  names are all withheld keeps a generic warning). The message lists at most 5 names with
+  5 lines each.
+  Budgets: per file, at most 200 distinct names (by first occurrence) are compared against
+  at most 50 Environment constructions (by position), and each distinct setting is
+  evaluated once. Anything beyond a limit is not examined and is counted in the scanner
+  statistics (`jinja_autoescape_names_not_compared`,
+  `jinja_autoescape_environments_not_evaluated`, `jinja_autoescape_limited_files`;
+  withheld names in `jinja_autoescape_names_redacted`). Like the callgraph's depth limit,
+  these counts do not change the report status.
 - **Django:** `mark_safe(dynamic)`, `HttpResponse(dynamic)`.
 - **Templates** (`*.html`, `*.jinja*`, `*.j2`, matched as text): `{{ x|safe }}`,
   `{% autoescape off %}` / `{% autoescape false %}` (informed by CVE-2017-12794).
@@ -90,7 +101,11 @@ produce findings) and reports a call path plus uncertainty; see architecture.md.
   mismatches the file-level check cannot see — template names built at run time or defined
   in another file/config, non-literal `select_autoescape(...)` arguments (skipped and counted
   as `jinja_autoescape_unresolved_settings`), a pre-built `select_autoescape` object passed
-  through a variable, and Jinja2 subclasses such as `SandboxedEnvironment` (FN);
+  through a variable, Jinja2 subclasses such as `SandboxedEnvironment`, names or
+  Environments beyond the per-file budgets, files where a Jinja name is rebound anywhere
+  (the binding check is not scope-aware, so a same-named local in an unrelated function,
+  or `try: import jinja2 / except ImportError: jinja2 = None`, suppresses the file), and a
+  warning dropped as a duplicate of an overlapping Semgrep CWE-79 finding (FN);
   `select_autoescape(default_for_string=False)`, which leaves string templates unescaped but is
   treated as safe by both Jinja2 rules (FN); Streamlit
   `unsafe_allow_html=True`, JavaScript, attribute and URL contexts, custom template tags, DOM

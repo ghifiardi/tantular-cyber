@@ -232,3 +232,118 @@ def test_scanner_reports_a_configuration_warning_without_a_call_path(tmp_path: P
     assert "'home.html.j2' (line 3)" in finding.message
     assert run.stats["jinja_autoescape_unresolved_settings"] == 1
     assert run.tool_skipped == {"broken.py": "python_syntax_error"}
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "try:\n    pass\nexcept Exception as Environment:\n    pass\n",
+        "match x:\n    case Environment:\n        pass\n",
+        "match x:\n    case [*Environment]:\n        pass\n",
+        "match x:\n    case {**Environment}:\n        pass\n",
+        "del Environment\n",
+    ],
+)
+def test_other_rebinding_forms_make_the_name_ambiguous(rebinding: str) -> None:
+    result = check(
+        "from jinja2 import Environment, select_autoescape\n"
+        + rebinding
+        + 'env = Environment(autoescape=select_autoescape())\nNAME = "page.html.j2"\n'
+    )
+    assert result.hits == []
+
+
+def test_star_import_is_ignored_when_another_star_import_could_rebind() -> None:
+    src = 'env = Environment(autoescape=select_autoescape())\nNAME = "page.html.j2"\n'
+    assert check("from jinja2 import *\n" + src).hits
+    assert check("from jinja2 import *\nfrom other import *\n" + src).hits == []
+
+
+def test_lines_per_name_are_capped_in_the_message() -> None:
+    from tantular_cyber.jinja_autoescape import MAX_LISTED_LINES
+
+    uses = "\n".join('x = "a.html.j2"' for _ in range(MAX_LISTED_LINES + 3))
+    (hit,) = check(
+        f"import jinja2\nenv = jinja2.Environment(autoescape=jinja2.select_autoescape())\n{uses}\n"
+    ).hits
+    assert len(hit.names[0][1]) == MAX_LISTED_LINES + 3  # evidence kept in full
+    assert "'a.html.j2' (lines 3, 4, 5, 6, 7, and 3 more)" in hit.message
+
+
+GH_NAME = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" + ".html.j2"
+AWS_NAME = "AKIA" + "TCSYNTHETIC00042" + "/page.html.j2"
+ENV = "import jinja2\nenv = jinja2.Environment(autoescape=jinja2.select_autoescape())\n"
+
+
+def test_secret_shaped_names_are_withheld_and_counted() -> None:
+    result = check(f'{ENV}A = "{GH_NAME}"\nB = "{AWS_NAME}"\nC = "safe.html.j2"\n')
+    (hit,) = result.hits
+    assert hit.names == [("safe.html.j2", [5])] and hit.omitted == 2
+    assert result.names_redacted == 2
+    assert "ghp_" not in hit.message and "AKIA" not in hit.message
+    assert "'safe.html.j2' (line 5), 2 name(s) withheld" in hit.message
+
+
+def test_all_names_withheld_keeps_a_generic_warning() -> None:
+    (hit,) = check(f'{ENV}A = "{GH_NAME}"\n').hits
+    assert hit.names == [] and hit.omitted == 1
+    assert "ghp_" not in hit.message
+    assert "unescaped (1 name(s) withheld because they resemble secrets)" in hit.message
+
+
+def test_stress_repeated_name_keeps_the_message_bounded() -> None:
+    uses = "\n".join('x = "a.html.j2"' for _ in range(40_000))
+    result = check(f"{ENV}{uses}\n")
+    (hit,) = result.hits
+    assert len(hit.names[0][1]) == 40_000
+    assert "and 39995 more" in hit.message and len(hit.message) < 1_000
+
+
+def test_stress_names_and_environments_are_budgeted() -> None:
+    from tantular_cyber.jinja_autoescape import (
+        MAX_ENVIRONMENTS_PER_FILE,
+        MAX_LISTED_LINES,
+        MAX_NAMES_PER_FILE,
+    )
+
+    n_env, n_names = 500, 3_000
+    envs = "\n".join(
+        f"e{i} = jinja2.Environment(autoescape=jinja2.select_autoescape(['x{i}']))"
+        for i in range(n_env)
+    )
+    names = "\n".join(f'n{i} = "{"n" * 130}{i}.html.j2"' for i in range(n_names))
+    result = check(f"import jinja2\n{envs}\n{names}\n")
+    assert len(result.hits) == MAX_ENVIRONMENTS_PER_FILE
+    assert result.environments_not_evaluated == n_env - MAX_ENVIRONMENTS_PER_FILE
+    assert result.names_not_compared == n_names - MAX_NAMES_PER_FILE
+    assert result.limited
+    assert result.comparisons <= MAX_ENVIRONMENTS_PER_FILE * MAX_NAMES_PER_FILE
+    # the first Environments and names (by position) are the ones examined
+    assert result.hits[0].line == 2 and all(len(h.names) == MAX_NAMES_PER_FILE for h in result.hits)
+    longest = 4 * MAX_LISTED_LINES + 160  # one listed name with its lines
+    assert all(len(h.message) < 1_000 + MAX_LISTED_NAMES * longest for h in result.hits)
+
+
+def test_identical_settings_are_evaluated_once() -> None:
+    envs = "\n".join("jinja2.Environment(autoescape=jinja2.select_autoescape())" for _ in range(30))
+    names = "\n".join(f'n{i} = "t{i}.html.j2"' for i in range(100))
+    result = check(f"import jinja2\n{envs}\n{names}\n")
+    assert len(result.hits) == 30 and result.comparisons == 100 and not result.limited
+
+
+def test_scanner_records_limits_and_redactions_in_stats(tmp_path: Path) -> None:
+    from tantular_cyber.jinja_autoescape import MAX_ENVIRONMENTS_PER_FILE
+
+    envs = "\n".join(
+        "jinja2.Environment(autoescape=jinja2.select_autoescape())"
+        for _ in range(MAX_ENVIRONMENTS_PER_FILE + 2)
+    )
+    (tmp_path / "many.py").write_text(f'import jinja2\n{envs}\nA = "{GH_NAME}"\n')
+    (tmp_path / "ok.py").write_text(f'{ENV}B = "ok.html.j2"\n')
+    run = CallgraphScanner().scan(tmp_path, ["many.py", "ok.py"])
+    assert run.stats["jinja_autoescape_environments_not_evaluated"] == 2
+    assert run.stats["jinja_autoescape_limited_files"] == 1
+    assert run.stats["jinja_autoescape_names_not_compared"] == 0
+    assert run.stats["jinja_autoescape_names_redacted"] == 1
+    assert run.stats["jinja_autoescape_unresolved_settings"] == 0
+    assert all("ghp_" not in f.message for f in run.findings)

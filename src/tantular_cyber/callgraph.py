@@ -878,6 +878,15 @@ def hit_to_raw(hit: Hit) -> RawFinding:
     )
 
 
+JINJA_STATS = (
+    "jinja_autoescape_unresolved_settings",
+    "jinja_autoescape_names_redacted",
+    "jinja_autoescape_names_not_compared",
+    "jinja_autoescape_environments_not_evaluated",
+    "jinja_autoescape_limited_files",
+)
+
+
 def config_hit_to_raw(hit: jinja_autoescape.ConfigHit) -> RawFinding:
     """A file-level configuration warning: no trace (no call path is claimed)."""
     return RawFinding(
@@ -897,10 +906,14 @@ def config_hit_to_raw(hit: jinja_autoescape.ConfigHit) -> RawFinding:
 
 def jinja_config_findings(
     sources: dict[str, str], skipped: dict[str, str]
-) -> tuple[list[RawFinding], int]:
-    """Run the Jinja2 autoescape configuration check on every parsed, in-budget file."""
+) -> tuple[list[RawFinding], dict[str, int]]:
+    """Run the Jinja2 autoescape configuration check on every parsed, in-budget file.
+
+    Returns the findings and the check's statistics (unresolved settings, redacted names and
+    per-file limits reached), which the scanner records in ``stats``.
+    """
     findings: list[RawFinding] = []
-    unresolved = 0
+    stats = dict.fromkeys(JINJA_STATS, 0)
     for rel in sorted(sources):
         if rel in skipped:
             continue
@@ -910,8 +923,12 @@ def jinja_config_findings(
             continue
         result = jinja_autoescape.check_module(rel, tree)
         findings.extend(config_hit_to_raw(h) for h in result.hits)
-        unresolved += result.unresolved
-    return findings, unresolved
+        stats["jinja_autoescape_unresolved_settings"] += result.unresolved
+        stats["jinja_autoescape_names_redacted"] += result.names_redacted
+        stats["jinja_autoescape_names_not_compared"] += result.names_not_compared
+        stats["jinja_autoescape_environments_not_evaluated"] += result.environments_not_evaluated
+        stats["jinja_autoescape_limited_files"] += result.limited
+    return findings, stats
 
 
 class CallgraphScanner:
@@ -942,7 +959,7 @@ class CallgraphScanner:
         for rel in py:
             sources[rel] = (repo / rel).read_text(encoding="utf-8", errors="replace")
         hits, stats, skipped = analyze(sources, self.budget)
-        config, unresolved_settings = jinja_config_findings(sources, skipped)
+        config, jinja_stats = jinja_config_findings(sources, skipped)
         run.findings = [hit_to_raw(h) for h in hits] + config
         run.scanned = {rel for rel in py if rel not in skipped}
         run.scanned_reported = True
@@ -955,7 +972,7 @@ class CallgraphScanner:
             "self_dispatch": stats.self_dispatch,
             "depth_limited": stats.depth_limited,
             "max_depth": self.budget.max_depth,
-            "jinja_autoescape_unresolved_settings": unresolved_settings,
+            **jinja_stats,
         }
         run.duration_s = round(time.monotonic() - started, 3)
         return run
