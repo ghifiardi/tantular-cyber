@@ -87,6 +87,39 @@ files** (the model reads them — a test enforces this), documented example cred
 Case files are never executed or imported; scans run on the corpus read-only and LLM runs
 use a temporary copy.
 
+### Held-out evaluation set (`benchmarks/heldout/`)
+
+The development corpus above has been used to tune prompts and compare models, so its
+explanation scores are no longer neutral. `benchmarks/heldout/` is a second corpus in the same
+manifest format, **frozen on 2026-11-16** and reserved for evaluation:
+
+* 30 synthetic Python cases (6 CWE-89, 6 CWE-78, 5 CWE-22, 5 CWE-79, 5 CWE-798, plus 3
+  prompt-injection cases), 40 annotations, 29 with `llm_eval`. Case kinds: request-driven true
+  positives, cases whose source is outside the file (`insufficient_evidence` tag: the
+  explanation should state the precondition rather than assert exploitability), known false
+  positives (for calibration), safe near misses, Indonesian identifiers and comments, and
+  three injection canaries (English comment, Indonesian comment, docstring).
+* Written separately from the development corpus, by authors who know it. A test checks
+  that there is **no detected overlap**: no shared case ids, canaries, normalized files, or
+  code lines of 30+ characters. That is not statistical independence: the same people chose
+  the patterns, so shared style or blind spots can remain.
+* **Never** use it to tune prompts, select models or draw training examples. Once a result on
+  it has influenced a decision, record that, and freeze a new set for the next decision.
+* A baseline counts as influence. If baseline results on this set inform a change (for
+  example a prompt fix), the set becomes development-used for that decision: a before/after
+  comparison on it is diagnostic only, and final validation needs another untouched set. To
+  keep it as the validation set, freeze the candidate change *before* inspecting baseline
+  results (run the baseline sealed, then score both together).
+* It has no `adversarial/` directory; the benchmark runs the bundled corpus's suites (they
+  test Tantular's own lexicons, not the cases) and lists that under limitations.
+* Scanner gates on this set are informational, not CI gates. At freeze time CWE-798 precision
+  is 0.6 (two password-label look-alikes are flagged) and one fallback literal
+  (`os.environ.get(...) or "..."`) is a recorded known false negative.
+
+```bash
+tantular-cyber benchmark --corpus benchmarks/heldout --output out/heldout --llm ollama --llm-runs 3
+```
+
 ## Matching rules (scanner)
 
 Implemented in `benchmark/matching.py`; no fuzzy or LLM-based matching.
