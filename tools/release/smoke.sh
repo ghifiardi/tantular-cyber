@@ -37,6 +37,7 @@ export SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0
 
 "$V/tantular-cyber" --version
 "$V/tantular-cyber" --help >/dev/null
+"$V/tantular-agent-master" --help >/dev/null
 "$V/tantular-cyber" plugins list >/dev/null
 "$V/tantular-cyber" sample --dest "$WORK/demo"
 
