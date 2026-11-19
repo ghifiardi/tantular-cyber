@@ -45,6 +45,7 @@ Issues = "https://github.com/ghifiardi/tantular-cyber/issues"
 
 [project.scripts]
 tantular-cyber = "tantular_cyber.cli:main"
+tantular-agent-master = "tantular_cyber.agent_master.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tantular_cyber"]
