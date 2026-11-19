@@ -69,7 +69,8 @@ request is cancelled and awaited.
 - `/status RUN_ID`: task states and the saved final report.
 - `/cancel`: cancel the active request, close its HTTP operation or kill its process group.
 - `/resume RUN_ID`: continue an interrupted run's **queued** tasks with its original model,
-  workspace policy, call/step counters, limits and absolute deadline.
+  workspace policy, call/step counters, limits (budgets and tool file/traversal/output/
+  subprocess bounds) and absolute deadline.
 - `/quit`, EOF or Ctrl+C: stop active work and preserve task status.
 
 SQLite state and drafts default to `~/.local/state/tantular-agent-master/`; use
@@ -120,7 +121,9 @@ The only process tools are fixed argument lists in the trusted tool checkout:
 - `scan`: the existing scanner CLI with `--no-llm`; deterministic findings remain
   authoritative, with scanner status and exit code recorded. An incomplete scan cannot
   count as a successful check. Target code is never imported, installed, built, or executed.
-- `validate_dataset`: existing `tools/rung3/dataset.py` with a new output manifest.
+- `validate_dataset`: the trusted checkout's `tools/rung3/dataset.py` with a new output
+  manifest. It is offered to the Master and validator only when that script exists as a
+  regular file; this branch and the wheel do not ship it, so the tool is normally absent.
 
 Registered tests/validators are trusted application tooling explicitly authorized by this
 application. Files from arbitrary analyzed workspaces are never selected as executable tests

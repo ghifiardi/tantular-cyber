@@ -273,12 +273,12 @@ class Master:
             )
         if row["model"] != self.model.model or json.loads(row["policy"]) != self.tools.policy():
             raise ValueError("model or workspace policy changed; resume refused")
-        # Persisted limits and original deadline survive restart.
-        old = self.limits
+        # Persisted limits and original deadline survive restart, for budgets and tools alike.
+        old, old_tools = self.limits, self.tools.limits
         saved = Limits.model_validate_json(row["limits"])
         if saved.num_ctx and getattr(self.model, "num_ctx", saved.num_ctx) != saved.num_ctx:
             raise ValueError("inference context changed; use the saved --num-ctx value")
-        self.limits = saved
+        self.limits = self.tools.limits = saved
         try:
             self.guard(run)
             if not row["plan"]:
@@ -291,7 +291,7 @@ class Master:
         except (BudgetError, TimeoutError, ValueError, httpx.HTTPError) as exc:
             self.terminate(run, "failed", reason_for(exc))
         finally:
-            self.limits = old
+            self.limits, self.tools.limits = old, old_tools
 
     async def execute(self, run: str) -> None:
         while True:

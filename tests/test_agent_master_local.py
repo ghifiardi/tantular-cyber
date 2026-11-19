@@ -853,3 +853,48 @@ def test_timeout_stops_pending_generation_with_progress_wrapper(tmp_path):
         assert finished.is_set()
 
     asyncio.run(check())
+
+
+def test_resume_applies_saved_limits_to_tool_registry(tmp_path):
+    tasks = [{"id": "read", "role": "analyst", "instruction": "Read file", "depends_on": []}]
+    master, _ = setup(tmp_path, [tool(path="README.md"), result, REPORT], max_file_bytes=1000)
+    session = master.tools.limits
+    saved = Limits(max_file_bytes=100).model_dump()
+    run = master.store.new("Read", master.model.model, saved, master.tools.policy())
+    master.store.plan(run, plan(tasks))
+    master.store.update(run, status="interrupted")
+    (tmp_path / "workspace" / "README.md").write_text("x" * 200)
+    seen = []
+    original = master.tools.dispatch
+
+    async def recording(*args):
+        seen.append(master.tools.limits.max_file_bytes)
+        return await original(*args)
+
+    master.tools.dispatch = recording
+    asyncio.run(master.resume(run))
+    assert seen == [100]
+    assert master.tools.limits is session
+    assert master.store.tasks(run)[0]["status"] != "completed"
+
+
+def test_validate_dataset_only_offered_when_validator_exists(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "records.json").write_text("[]")
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    registry = Registry([root], tmp_path / "artifacts", Limits(), trusted=trusted)
+    assert "validate_dataset" not in registry.catalog("validator")
+    request = ToolRequest(name="validate_dataset", arguments={"path": "records.json"})
+    with pytest.raises(ToolDenied, match="not available"):
+        asyncio.run(registry.dispatch("validator", request, "effect-1"))
+    assert not (tmp_path / "artifacts" / "effect-1").exists()
+
+    script = trusted / "tools" / "rung3" / "dataset.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    assert "validate_dataset" in registry.catalog("validator")
+    script.unlink()
+    script.symlink_to(root / "records.json")
+    assert "validate_dataset" not in registry.catalog("validator")

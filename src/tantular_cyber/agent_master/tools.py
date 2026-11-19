@@ -96,8 +96,19 @@ class Registry:
             "version": 1,
         }
 
+    def validator_script(self) -> Path:
+        return self.trusted / "tools" / "rung3" / "dataset.py"
+
+    def available(self, role: str) -> set[str]:
+        tools = set(PERMISSIONS[role])
+        script = self.validator_script()
+        # Offer dataset validation only when the trusted validator ships with this checkout.
+        if not script.is_file() or script.is_symlink():
+            tools.discard("validate_dataset")
+        return tools
+
     def catalog(self, role: str) -> dict:
-        return {name: ARGUMENTS[name].model_json_schema() for name in sorted(PERMISSIONS[role])}
+        return {name: ARGUMENTS[name].model_json_schema() for name in sorted(self.available(role))}
 
     def _parts(self, raw: str) -> tuple[str, ...]:
         path = PurePosixPath(raw)
@@ -204,6 +215,8 @@ class Registry:
     async def dispatch(self, role: str, request: ToolRequest, effect: str) -> dict:
         if request.name not in PERMISSIONS[role]:
             raise ToolDenied("tool not allowed for this role")
+        if request.name not in self.available(role):
+            raise ToolDenied("tool not available in this checkout")
         args = ARGUMENTS[request.name].model_validate(request.arguments)
         name = request.name
         artifacts: list[str] = []
@@ -331,7 +344,7 @@ class Registry:
                 self.read(args.root, args.path)  # enforce size, regular-file and secret policy
                 command = [
                     sys.executable,
-                    str(self.trusted / "tools/rung3/dataset.py"),
+                    str(self.validator_script()),
                     "--manifest",
                     str(output / "manifest.json"),
                     "--",
