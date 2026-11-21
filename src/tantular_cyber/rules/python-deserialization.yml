@@ -1,12 +1,14 @@
 # Tantular Cyber local ruleset — Python deserialization of untrusted data (CWE-502).
 #
 # Supported sinks: pickle.load()/pickle.loads() and cPickle.load()/cPickle.loads();
-# yaml.load() without a safe loader (Loader=/loader positional argument of SafeLoader or
-# CSafeLoader, written as yaml.SafeLoader or a bare name); yaml.unsafe_load().
+# yaml.load() without a safe loader (Loader= argument of SafeLoader or CSafeLoader, written
+# as yaml.SafeLoader or a bare name; a safe loader passed positionally, yaml.load(text,
+# SafeLoader), is also not flagged); yaml.unsafe_load(). Aliased imports are detected:
+# `from pickle import loads; loads(x)` and `import pickle as pk; pk.loads(x)`.
 # Every call is flagged whatever its argument: the rule cannot tell trusted data (a file the
 # program wrote itself) from attacker-controlled bytes, hence confidence LOW.
 # Not covered: marshal, shelve, jsonpickle, dill, joblib, numpy.load(allow_pickle=True),
-# pandas.read_pickle, aliased imports (from pickle import loads), pickle.Unpickler(), and
+# pandas.read_pickle, pickle.Unpickler(), and
 # yaml.load() whose Loader is held in a variable (reported, a known false positive).
 rules:
   - id: tantular.python.deserialization.pickle-load
