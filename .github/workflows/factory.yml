@@ -2,7 +2,8 @@
 # It is the only per-repo change needed — all behaviour lives in the central
 # factory repo, so every repo gets improvements automatically.
 #
-# Required repo secrets: ANTHROPIC_API_KEY, FACTORY_TOKEN, FACTORY_LOG_KEY (set by scripts/bootstrap.sh)
+# Required repo secrets: FACTORY_TOKEN, FACTORY_LOG_KEY (set by scripts/bootstrap.sh), plus the credential for
+# factory.yaml → inference.provider: CLAUDE_CODE_OAUTH_TOKEN | GATEWAY_KEY | ANTHROPIC_API_KEY
 # The factory repo must be PUBLIC: a public product repo can't call workflows in a private one.
 name: software-factory
 
@@ -21,7 +22,10 @@ jobs:
       factory_repo: ghifiardi/software-factory
       data_repo: ghifiardi/software-factory-data
     secrets:   # pass only what the factory needs — not `inherit`, which hands over every repo secret
+      # Only the credential that factory.yaml → inference.provider names is used.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      GATEWAY_KEY: ${{ secrets.GATEWAY_KEY }}
       FACTORY_TOKEN: ${{ secrets.FACTORY_TOKEN }}
       FACTORY_LOG_KEY: ${{ secrets.FACTORY_LOG_KEY }}
 
@@ -37,6 +41,9 @@ jobs:
       factory_repo: ghifiardi/software-factory
       data_repo: ghifiardi/software-factory-data
     secrets:   # pass only what the factory needs — not `inherit`, which hands over every repo secret
+      # Only the credential that factory.yaml → inference.provider names is used.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      GATEWAY_KEY: ${{ secrets.GATEWAY_KEY }}
       FACTORY_TOKEN: ${{ secrets.FACTORY_TOKEN }}
       FACTORY_LOG_KEY: ${{ secrets.FACTORY_LOG_KEY }}
