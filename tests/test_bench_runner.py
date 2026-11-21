@@ -48,15 +48,16 @@ def test_offline_benchmark_passes_with_expected_metrics(offline) -> None:
     result, out = offline
     assert result.status == "pass", [g for g in result.gates if not g.passed]
     m = result.scanner.metrics
+    # CWE-502 deserialization: +3 TP, +1 known FP, +4 TN (3 near misses).
     # +2 TP, +1 known FP, +1 known FN, +2 TN from case xss-jinja-template (jinja2.Template).
-    assert (m.tp, m.fp, m.fn, m.tn) == (45, 9, 5, 25)
-    assert m.precision == 0.8333 and m.recall == 0.9
+    assert (m.tp, m.fp, m.fn, m.tn) == (48, 10, 5, 29)
+    assert m.precision == 0.8276 and m.recall == 0.9057
     assert "tantular.callgraph.sqli-interprocedural" in result.scanner.by_rule
     ctx = {s.strategy: s for s in result.context.strategies}
     assert ctx["ast"].construct_covered == ctx["ast"].n
     assert ctx["window"].construct_covered < ctx["ast"].construct_covered
     assert not result.context.lost_coverage
-    for cwe in ("CWE-89", "CWE-78", "CWE-22", "CWE-79", "CWE-798"):
+    for cwe in ("CWE-89", "CWE-78", "CWE-22", "CWE-79", "CWE-798", "CWE-502"):
         assert cwe in result.scanner.by_cwe
     labels = {r.label for r in result.scanner.records if r.outcome in ("TP", "TN", "FP", "FN")}
     assert {

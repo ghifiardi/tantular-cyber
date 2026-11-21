@@ -1,0 +1,54 @@
+# Tantular Cyber local ruleset — Python deserialization of untrusted data (CWE-502).
+#
+# Supported sinks: pickle.load()/pickle.loads() and cPickle.load()/cPickle.loads();
+# yaml.load() without a safe loader (Loader=/loader positional argument of SafeLoader or
+# CSafeLoader, written as yaml.SafeLoader or a bare name); yaml.unsafe_load().
+# Every call is flagged whatever its argument: the rule cannot tell trusted data (a file the
+# program wrote itself) from attacker-controlled bytes, hence confidence LOW.
+# Not covered: marshal, shelve, jsonpickle, dill, joblib, numpy.load(allow_pickle=True),
+# pandas.read_pickle, aliased imports (from pickle import loads), pickle.Unpickler(), and
+# yaml.load() whose Loader is held in a variable (reported, a known false positive).
+rules:
+  - id: tantular.python.deserialization.pickle-load
+    languages: [python]
+    severity: WARNING
+    message: >-
+      pickle deserialization can execute arbitrary code while loading. If the data comes
+      from an untrusted source (network, upload, shared cache) use a data-only format such
+      as JSON, or authenticate the data (for example with an HMAC) before loading it.
+    metadata:
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"
+      category: security
+      confidence: LOW
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: cPickle.loads(...)
+      - pattern: cPickle.load(...)
+  - id: tantular.python.deserialization.yaml-unsafe-load
+    languages: [python]
+    severity: WARNING
+    message: >-
+      yaml.load() without a safe loader (or yaml.unsafe_load()) can construct arbitrary
+      Python objects from the document. If the input is untrusted use yaml.safe_load() or
+      pass Loader=yaml.SafeLoader.
+    metadata:
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"
+      category: security
+      confidence: LOW
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+    patterns:
+      - pattern-either:
+          - pattern: yaml.unsafe_load(...)
+          - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=yaml.CSafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=SafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=CSafeLoader, ...)
+      - pattern-not: yaml.load($S, yaml.SafeLoader)
+      - pattern-not: yaml.load($S, yaml.CSafeLoader)
