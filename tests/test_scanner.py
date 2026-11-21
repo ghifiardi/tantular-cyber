@@ -171,8 +171,9 @@ DESERIALIZATION = Path(__file__).parent / "fixtures" / "deserialization"
 def test_real_semgrep_detects_every_cwe502_sink() -> None:
     run = SemgrepScanner(default_rules()).scan(DESERIALIZATION.resolve(), ["vulnerable.py"])
     assert run.succeeded, run.errors
-    # pickle.loads, pickle.load, cPickle.loads, yaml.load (no loader), yaml.unsafe_load
-    assert sorted(f.start_line for f in run.findings) == [8, 12, 16, 20, 24]
+    # pickle.loads, pickle.load, cPickle.loads, yaml.load (no loader), yaml.unsafe_load,
+    # then the aliased forms: `from pickle import loads` and `import pickle as pk`
+    assert sorted(f.start_line for f in run.findings) == [10, 14, 18, 22, 26, 30, 34]
     assert all(f.cwe == ("CWE-502",) for f in run.findings)
     assert all(f.rule_id.startswith("tantular.python.deserialization.") for f in run.findings)
 

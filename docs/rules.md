@@ -110,11 +110,13 @@ produce findings) and reports a call path plus uncertainty; see architecture.md.
   inspected, so trusted data (a file the program wrote itself) is flagged too.
 - **Boundaries:** `yaml.safe_load`, `yaml.load(..., Loader=yaml.SafeLoader | yaml.CSafeLoader)`
   (also bare `SafeLoader`/`CSafeLoader`, or the loader passed positionally as `yaml.SafeLoader`
-  / `yaml.CSafeLoader`) and `json.loads` are not flagged.
+  / `yaml.CSafeLoader` or as a bare name, `yaml.load(text, SafeLoader)`) and `json.loads` are
+  not flagged. Aliased imports are detected: `from pickle import loads; loads(x)` and
+  `import pickle as pk; pk.loads(x)`.
 - **Known gaps:** a safe loader held in a variable (`Loader=LOADER`) is flagged (FP; corpus case
   `deserialization-known-fp-loader-variable`); `marshal`, `shelve`, `jsonpickle`, `dill`,
-  `joblib`, `numpy.load(allow_pickle=True)`, `pandas.read_pickle`, `pickle.Unpickler`, and
-  aliased imports (`from pickle import loads`) are not covered.
+  `joblib`, `numpy.load(allow_pickle=True)`, `pandas.read_pickle`, and `pickle.Unpickler`
+  are not covered.
 
 ## Real-world evaluation backlog (2026-11-12)
 

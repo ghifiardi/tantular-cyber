@@ -143,7 +143,8 @@ make lock               # re-pin locks (network; review the diff)
 * Deterministic results gate CI; LLM and performance numbers are reported, never gated.
 * Changing scanner behavior on the corpus = update `expect_detected` in the manifest in the
   same change (an improvement fails the gate until acknowledged).
-* Blind spots are data, not secrets: record them with `known_blind_spot: true` + a note.
+* Blind spots are data, not secrets: record known false positives/negatives with `truth` +
+  `expect_detected` (see its field description in `benchmark/manifest.py`) and a `note`.
 * Benchmark output schema (`benchmark_schema_version`) is independent of `report.json`.
 * New rules need corpus cases first-class: TP, TN, near miss, known FP/FN and a `per_cwe`
   floor (`require_cwe_category_coverage`); document sinks/gaps in docs/rules.md.

@@ -1,7 +1,7 @@
 import json
 
 import yaml
-from yaml import SafeLoader
+from yaml import CSafeLoader, SafeLoader
 
 
 def parse_config(text):
@@ -22,3 +22,11 @@ def parse_bare(text):
 
 def parse_json(text):
     return json.loads(text)
+
+
+def parse_positional(text):
+    return yaml.load(text, SafeLoader)
+
+
+def parse_positional_c(text):
+    return yaml.load(text, CSafeLoader)
