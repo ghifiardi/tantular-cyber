@@ -25,7 +25,6 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, Field
@@ -40,6 +39,7 @@ from .ollama_client import (
     validate_base_url,
 )
 from .scanner import SemgrepScanner
+from .security import display_url
 
 # Semgrep range exercised by CI (`pip install 'tantular-cyber[semgrep]'`) and local testing.
 SEMGREP_TESTED = ((1, 90, 0), (2, 0, 0))  # [min, max)
@@ -317,18 +317,6 @@ def run_doctor(
 
 def _v(version: tuple[int, int, int]) -> str:
     return ".".join(map(str, version))
-
-
-def display_url(url: str) -> str:
-    """scheme://host[:port] only — never userinfo, path or query (may carry credentials)."""
-    try:
-        parts = urlsplit(url.strip())
-        port = f":{parts.port}" if parts.port else ""
-    except ValueError:
-        return "<invalid URL>"
-    host = parts.hostname or "?"
-    host = f"[{host}]" if ":" in host else host
-    return f"{parts.scheme or '?'}://{host}{port}"
 
 
 def _check_ollama(

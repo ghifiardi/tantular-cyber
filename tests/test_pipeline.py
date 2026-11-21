@@ -349,3 +349,27 @@ def test_callgraph_findings_carry_call_path_into_report_and_prompt(tmp_path: Pat
     assert "Jalur panggilan" in render_markdown(report)
     user = build_messages(cross)[1]["content"]
     assert "app/queries.py" in user and "scanner_uncertainty" in user
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://zq9user:zq9pass@127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("http://zq9user:zq9pass@localhost/x?token=zq9secret", "http://localhost"),
+        ("http://zq9user:zq9pass@localhost:8080/x?token=zq9secret", "http://localhost:8080"),
+        ("http://zq9user:zq9pass@[::1]:11434/p?q=1", "http://[::1]:11434"),
+        ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("http://host:notaport", "<invalid URL>"),
+    ],
+)
+def test_report_endpoint_is_structured_display_url(tmp_path: Path, url: str, expected: str) -> None:
+    from tantular_cyber.reports import render_markdown
+
+    s = settings(tmp_path, ollama=OllamaSettings(base_url=url))
+    report = run_scan(
+        s, scanners=[FakeScanner(vulnerable_raw_findings())], llm_client_factory=None
+    ).report
+    assert report.llm.endpoint == expected
+    blob = report.model_dump_json() + render_markdown(report)
+    for secret in ("zq9user", "zq9pass", "zq9secret", "token=", "REDACTED"):
+        assert secret not in blob
