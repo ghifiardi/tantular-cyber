@@ -30,6 +30,14 @@ class OllamaUnavailable(OllamaError):
     """Server unreachable or kept failing after the retry budget was spent."""
 
 
+class RemoteModelRefused(OllamaError):
+    """Model is cloud-backed (runs on a remote host) and remote use was not allowed."""
+
+    def __init__(self, message: str, *, model: str) -> None:
+        super().__init__(message)
+        self.model = model
+
+
 class RemoteEndpointNotAllowed(OllamaError):
     """Base URL is not localhost and remote endpoints were not explicitly allowed."""
 
@@ -147,10 +155,11 @@ class OllamaClient:
         # Cloud-backed models ("*:cloud") are proxied by the local server to a remote host:
         # a loopback URL would still send source excerpts off this machine.
         if is_remote_model(match) and not self.settings.allow_remote:
-            raise OllamaError(
+            raise RemoteModelRefused(
                 f"model '{self.model}' runs on a remote host ({match.get('remote_host')}); "
                 "source excerpts would leave this machine. Use a local model, or pass "
-                "--allow-remote-ollama to accept that explicitly."
+                "--allow-remote-ollama to accept that explicitly.",
+                model=self.model,
             )
         self._model_verified = True
 

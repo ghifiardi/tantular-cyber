@@ -43,7 +43,7 @@ from .models import (
     TargetInfo,
     Totals,
 )
-from .ollama_client import OllamaClient, OllamaError, OllamaUnavailable
+from .ollama_client import OllamaClient, OllamaError, OllamaUnavailable, RemoteModelRefused
 from .scanner import RawFinding, Scanner, ScannerRun, SemgrepScanner
 from .security import (
     FileInventory,
@@ -52,6 +52,7 @@ from .security import (
     redact,
     resolve_output,
     resolve_repo,
+    sanitize_text,
 )
 
 log = logging.getLogger(__name__)
@@ -366,10 +367,16 @@ def _analyze(
     except OllamaError as exc:
         info.available, info.error = False, str(exc)
         errors.append(ReportError(stage="llm", message=str(exc)))
-        reasons.append(
-            "LLM explanation unavailable: Ollama not reachable or model missing; "
-            "report contains scanner findings only"
-        )
+        if isinstance(exc, RemoteModelRefused):
+            reasons.append(
+                f"LLM explanation refused: model '{sanitize_text(exc.model)}' runs on a remote "
+                "host; use a local model or pass --allow-remote-ollama"
+            )
+        else:
+            reasons.append(
+                "LLM explanation unavailable: Ollama not reachable or model missing; "
+                "report contains scanner findings only"
+            )
         mark_all("skipped", "LLM unavailable")
         _close(client)
         return info

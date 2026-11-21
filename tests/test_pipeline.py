@@ -6,6 +6,7 @@ import json
 import socket
 from pathlib import Path
 
+import httpx
 import pytest
 from conftest import (
     CLEAN,
@@ -373,3 +374,59 @@ def test_report_endpoint_is_structured_display_url(tmp_path: Path, url: str, exp
     blob = report.model_dump_json() + render_markdown(report)
     for secret in ("zq9user", "zq9pass", "zq9secret", "token=", "REDACTED"):
         assert secret not in blob
+
+
+def _ollama_transport(tags: dict, paths: list[str]):
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.0-test"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json=tags)
+        return httpx.Response(500)
+
+    return httpx.MockTransport(handler)
+
+
+def _run_with_tags(tmp_path: Path, tags: dict, model: str, paths: list[str], **ollama_kw):
+    from tantular_cyber.ollama_client import OllamaClient
+
+    o = OllamaSettings(model=model, **ollama_kw)
+    return run_scan(
+        settings(tmp_path, ollama=o),
+        scanners=[FakeScanner(vulnerable_raw_findings())],
+        llm_client_factory=lambda: OllamaClient(o, transport=_ollama_transport(tags, paths)),
+    ).report
+
+
+CLOUD_TAGS = {"models": [{"name": "q:cloud", "remote_host": "https://ollama.com:443"}]}
+
+
+def test_cloud_model_refusal_has_specific_reason(tmp_path: Path) -> None:
+    paths: list[str] = []
+    report = _run_with_tags(tmp_path, CLOUD_TAGS, "q:cloud", paths)
+    assert report.status == "degraded"
+    assert any(
+        r.startswith("LLM explanation refused: model 'q:cloud' runs on a remote host")
+        and "--allow-remote-ollama" in r
+        for r in report.status_reasons
+    )
+    assert not any("not reachable" in r for r in report.status_reasons)
+    assert any("remote host" in e.message for e in report.errors)
+    assert report.totals.findings == 2
+    assert all(f.status == "unverified" for f in report.findings)
+    assert paths == ["/api/version", "/api/tags"]
+
+
+def test_cloud_model_allowed_when_opted_in(tmp_path: Path) -> None:
+    paths: list[str] = []
+    report = _run_with_tags(tmp_path, CLOUD_TAGS, "q:cloud", paths, allow_remote=True)
+    assert not any("refused" in r for r in report.status_reasons)
+
+
+def test_missing_model_reason_is_not_cloud_refusal(tmp_path: Path) -> None:
+    report = _run_with_tags(tmp_path, {"models": []}, "q:cloud", [])
+    assert report.status == "degraded"
+    assert any("not reachable or model missing" in r for r in report.status_reasons)
+    assert not any("refused" in r for r in report.status_reasons)
