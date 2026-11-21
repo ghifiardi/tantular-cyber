@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.3.0",
   "corpus_id": "tantular-python-security",
-  "description": "Synthetic Python/HTML-template corpus (CWE-89, 78, 22, 79, 798) for regression benchmarking of the bundled Semgrep rules and of LLM explanations. Independently written; not representative of real-world prevalence.",
+  "description": "Synthetic Python/HTML-template corpus (CWE-89, 78, 22, 79, 798, 502) for regression benchmarking of the bundled Semgrep rules and of LLM explanations. Independently written; not representative of real-world prevalence.",
   "language": "python",
   "cases_root": "cases",
   "thresholds": {
@@ -28,6 +28,10 @@
         "min_recall": 0.7
       },
       "CWE-798": {
+        "min_precision": 0.7,
+        "min_recall": 0.7
+      },
+      "CWE-502": {
         "min_precision": 0.7,
         "min_recall": 0.7
       }
@@ -1802,6 +1806,160 @@
           "near_miss": false
         }
       ]
+    },
+    {
+      "id": "deserialization-blobs",
+      "path": "deserialization/blobs.py",
+      "tags": [
+        "true_positive",
+        "true_negative"
+      ],
+      "llm_eval": false,
+      "description": "pickle.loads, yaml.load without a loader and yaml.unsafe_load on external data; yaml.safe_load counterpart in the same file.",
+      "annotations": [
+        {
+          "id": "deserialization-pickle-loads",
+          "truth": "vulnerable",
+          "cwe": "CWE-502",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "pickle.loads(raw_bytes)",
+          "rule_id": "tantular.python.deserialization.pickle-load",
+          "expect_detected": true,
+          "preconditions": [
+            "serialized data reaches the function from an untrusted source (e.g. network, upload or shared cache)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "deserialization-yaml-load",
+          "truth": "vulnerable",
+          "cwe": "CWE-502",
+          "line": 14,
+          "end_line": 14,
+          "anchor": "yaml.load(text)",
+          "rule_id": "tantular.python.deserialization.yaml-unsafe-load",
+          "expect_detected": true,
+          "preconditions": [
+            "serialized data reaches the function from an untrusted source (e.g. network, upload or shared cache)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "deserialization-yaml-unsafe-load",
+          "truth": "vulnerable",
+          "cwe": "CWE-502",
+          "line": 22,
+          "end_line": 22,
+          "anchor": "yaml.unsafe_load(text)",
+          "rule_id": "tantular.python.deserialization.yaml-unsafe-load",
+          "expect_detected": true,
+          "preconditions": [
+            "serialized data reaches the function from an untrusted source (e.g. network, upload or shared cache)"
+          ],
+          "note": "",
+          "near_miss": false
+        },
+        {
+          "id": "deserialization-yaml-safe-load",
+          "truth": "safe",
+          "cwe": "CWE-502",
+          "line": 18,
+          "end_line": 18,
+          "anchor": "yaml.safe_load(text)",
+          "rule_id": "tantular.python.deserialization.yaml-unsafe-load",
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "safe_load only constructs plain data types",
+          "near_miss": false
+        }
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
+    },
+    {
+      "id": "deserialization-near-miss",
+      "path": "deserialization/near_miss.py",
+      "tags": [
+        "near_miss",
+        "true_negative"
+      ],
+      "llm_eval": false,
+      "description": "yaml.load with SafeLoader passed positionally or CSafeLoader by keyword, and json.loads.",
+      "annotations": [
+        {
+          "id": "deserialization-near-miss-positional",
+          "truth": "safe",
+          "cwe": "CWE-502",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "yaml.load(text, yaml.SafeLoader)",
+          "rule_id": "tantular.python.deserialization.yaml-unsafe-load",
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "safe loader passed positionally",
+          "near_miss": true
+        },
+        {
+          "id": "deserialization-near-miss-csafe",
+          "truth": "safe",
+          "cwe": "CWE-502",
+          "line": 13,
+          "end_line": 13,
+          "anchor": "Loader=yaml.CSafeLoader",
+          "rule_id": "tantular.python.deserialization.yaml-unsafe-load",
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "safe C loader passed by keyword",
+          "near_miss": true
+        },
+        {
+          "id": "deserialization-near-miss-json",
+          "truth": "safe",
+          "cwe": "CWE-502",
+          "line": 17,
+          "end_line": 17,
+          "anchor": "json.loads(text)",
+          "rule_id": "tantular.python.deserialization.pickle-load",
+          "expect_detected": false,
+          "preconditions": [],
+          "note": "JSON is a data-only format",
+          "near_miss": true
+        }
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
+    },
+    {
+      "id": "deserialization-known-fp-loader-variable",
+      "path": "deserialization/loader_variable.py",
+      "tags": [
+        "known_false_positive"
+      ],
+      "llm_eval": false,
+      "description": "Rule limitation: a safe loader held in a module variable is not recognised, so yaml.load is flagged.",
+      "annotations": [
+        {
+          "id": "deserialization-known-fp-loader-variable",
+          "truth": "safe",
+          "cwe": "CWE-502",
+          "line": 9,
+          "end_line": 9,
+          "anchor": "yaml.load(text, Loader=LOADER)",
+          "rule_id": "tantular.python.deserialization.yaml-unsafe-load",
+          "expect_detected": true,
+          "preconditions": [],
+          "note": "known FP: Loader=LOADER resolves to yaml.SafeLoader but only literal loader names are recognised",
+          "near_miss": false
+        }
+      ],
+      "provenance": {
+        "kind": "synthetic"
+      }
     }
   ]
 }

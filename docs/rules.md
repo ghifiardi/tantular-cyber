@@ -102,6 +102,20 @@ produce findings) and reports a call path plus uncertainty; see architecture.md.
 - **Redaction:** values are masked in evidence, context, prompts and reports; findings
   point at the line, never reproduce the value.
 
+## CWE-502 — Deserialization of untrusted data (Python)
+
+- **Sinks:** `pickle.load`/`pickle.loads`, `cPickle.load`/`cPickle.loads`; `yaml.load` without a
+  safe loader; `yaml.unsafe_load`. Rule ids: `tantular.python.deserialization.pickle-load`,
+  `tantular.python.deserialization.yaml-unsafe-load`. Confidence is LOW: the argument is never
+  inspected, so trusted data (a file the program wrote itself) is flagged too.
+- **Boundaries:** `yaml.safe_load`, `yaml.load(..., Loader=yaml.SafeLoader | yaml.CSafeLoader)`
+  (also bare `SafeLoader`/`CSafeLoader`, or the loader passed positionally as `yaml.SafeLoader`
+  / `yaml.CSafeLoader`) and `json.loads` are not flagged.
+- **Known gaps:** a safe loader held in a variable (`Loader=LOADER`) is flagged (FP; corpus case
+  `deserialization-known-fp-loader-variable`); `marshal`, `shelve`, `jsonpickle`, `dill`,
+  `joblib`, `numpy.load(allow_pickle=True)`, `pandas.read_pickle`, `pickle.Unpickler`, and
+  aliased imports (`from pickle import loads`) are not covered.
+
 ## Real-world evaluation backlog (2026-11-12)
 
 Source: a reviewed three-way evaluation (Tantular / Antares / combined) of

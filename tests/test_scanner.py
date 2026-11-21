@@ -161,3 +161,32 @@ def test_real_semgrep_finds_nothing_in_clean_fixture() -> None:
     run = SemgrepScanner(default_rules()).scan(CLEAN.resolve(), ["app.py"])
     assert run.succeeded, run.errors
     assert run.findings == []
+
+
+DESERIALIZATION = Path(__file__).parent / "fixtures" / "deserialization"
+
+
+@requires_semgrep
+@pytest.mark.semgrep
+def test_real_semgrep_detects_every_cwe502_sink() -> None:
+    run = SemgrepScanner(default_rules()).scan(DESERIALIZATION.resolve(), ["vulnerable.py"])
+    assert run.succeeded, run.errors
+    # pickle.loads, pickle.load, cPickle.loads, yaml.load (no loader), yaml.unsafe_load
+    assert sorted(f.start_line for f in run.findings) == [8, 12, 16, 20, 24]
+    assert all(f.cwe == ("CWE-502",) for f in run.findings)
+    assert all(f.rule_id.startswith("tantular.python.deserialization.") for f in run.findings)
+
+
+@requires_semgrep
+@pytest.mark.semgrep
+def test_real_semgrep_cwe502_clean_fixture_has_no_findings() -> None:
+    run = SemgrepScanner(default_rules()).scan(DESERIALIZATION.resolve(), ["clean.py"])
+    assert run.succeeded, run.errors
+    assert run.findings == []
+
+
+def test_cwe502_ruleset_is_registered_last() -> None:
+    from tantular_cyber.config import DEFAULT_RULESETS
+
+    assert DEFAULT_RULESETS[-1] == "python-deserialization.yml"
+    assert DEFAULT_RULESETS[0] == "python-sqli.yml"

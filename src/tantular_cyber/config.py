@@ -17,6 +17,7 @@ DEFAULT_RULESETS = (
     "python-path-traversal.yml",  # CWE-22
     "python-xss.yml",  # CWE-79 (Flask/Jinja2, Django, HTML templates)
     "python-secrets.yml",  # CWE-798
+    "python-deserialization.yml",  # CWE-502
 )
 DEFAULT_RULESET = DEFAULT_RULESETS[0]  # backwards-compatible name (CWE-89 ruleset)
 
