@@ -1,0 +1,42 @@
+# Drop this file into each PRODUCT repo at .github/workflows/factory.yml
+# It is the only per-repo change needed — all behaviour lives in the central
+# factory repo, so every repo gets improvements automatically.
+#
+# Required repo secrets: ANTHROPIC_API_KEY, FACTORY_TOKEN, FACTORY_LOG_KEY (set by scripts/bootstrap.sh)
+# The factory repo must be PUBLIC: a public product repo can't call workflows in a private one.
+name: software-factory
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  triage:
+    if: github.event.action == 'opened'
+    permissions:
+      contents: read
+      issues: write
+    uses: ghifiardi/software-factory/.github/workflows/factory-triage.yml@main
+    with:
+      factory_repo: ghifiardi/software-factory
+      data_repo: ghifiardi/software-factory-data
+    secrets:   # pass only what the factory needs — not `inherit`, which hands over every repo secret
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FACTORY_TOKEN: ${{ secrets.FACTORY_TOKEN }}
+      FACTORY_LOG_KEY: ${{ secrets.FACTORY_LOG_KEY }}
+
+  implement:
+    if: github.event.action == 'labeled' && github.event.label.name == 'factory:implement'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    uses: ghifiardi/software-factory/.github/workflows/factory-implement.yml@main
+    with:
+      factory_repo: ghifiardi/software-factory
+      data_repo: ghifiardi/software-factory-data
+    secrets:   # pass only what the factory needs — not `inherit`, which hands over every repo secret
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FACTORY_TOKEN: ${{ secrets.FACTORY_TOKEN }}
+      FACTORY_LOG_KEY: ${{ secrets.FACTORY_LOG_KEY }}
