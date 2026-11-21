@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 BINARY_SNIFF_BYTES = 8192
 
@@ -420,3 +421,15 @@ def scrub_paths(text: str, repo: Path) -> str:
     if home and home != "/":
         text = text.replace(home, "~")
     return text
+
+
+def display_url(url: str) -> str:
+    """scheme://host[:port] only — never userinfo, path or query (may carry credentials)."""
+    try:
+        parts = urlsplit(url.strip())
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<invalid URL>"
+    host = parts.hostname or "?"
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme or '?'}://{host}{port}"

@@ -45,7 +45,14 @@ from .models import (
 )
 from .ollama_client import OllamaClient, OllamaError, OllamaUnavailable
 from .scanner import RawFinding, Scanner, ScannerRun, SemgrepScanner
-from .security import FileInventory, collect_files, redact, resolve_output, resolve_repo
+from .security import (
+    FileInventory,
+    collect_files,
+    display_url,
+    redact,
+    resolve_output,
+    resolve_repo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -321,7 +328,7 @@ def _analyze(
         enabled=settings.llm_enabled,
         provider="ollama",
         model=ollama.model,
-        endpoint=redact(ollama.base_url)[0],
+        endpoint=display_url(ollama.base_url),
     )
     if not settings.llm_enabled:
         for f in findings:
@@ -349,7 +356,8 @@ def _analyze(
 
     info.provider = client.provider
     info.model = client.model
-    info.endpoint = getattr(client, "base_url", None)
+    base_url = getattr(client, "base_url", None)
+    info.endpoint = display_url(base_url) if isinstance(base_url, str) else None
     try:
         health_check = getattr(client, "health_check", None)
         if findings:
