@@ -430,3 +430,28 @@ def test_missing_model_reason_is_not_cloud_refusal(tmp_path: Path) -> None:
     assert report.status == "degraded"
     assert any("not reachable or model missing" in r for r in report.status_reasons)
     assert not any("refused" in r for r in report.status_reasons)
+
+
+def test_unreachable_server_reason_is_not_cloud_refusal(tmp_path: Path) -> None:
+    from tantular_cyber.ollama_client import OllamaClient
+
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        raise httpx.ConnectError("connection refused", request=request)
+
+    o = OllamaSettings(model="q:cloud", max_retries=0)
+    report = run_scan(
+        settings(tmp_path, ollama=o),
+        scanners=[FakeScanner(vulnerable_raw_findings())],
+        llm_client_factory=lambda: OllamaClient(o, transport=httpx.MockTransport(handler)),
+    ).report
+    assert report.status == "degraded"
+    assert any("not reachable or model missing" in r for r in report.status_reasons)
+    assert not any("refused" in r for r in report.status_reasons)
+    assert report.totals.findings == 2
+    assert all(f.status == "unverified" for f in report.findings)
+    assert any(e.stage == "llm" for e in report.errors)
+    assert "/api/chat" not in paths
+    assert "/api/show" not in paths
