@@ -248,6 +248,19 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ignore and replace the samples.jsonl checkpoint in --output",
     )
+    cmp.add_argument(
+        "--controlled",
+        action="store_true",
+        help="controlled run: refuses a dirty checkout; exits 5 unless every response is "
+        "eligible (evaluation-run.json); only controlled runs are comparable",
+    )
+    cmp.add_argument(
+        "--store-prompts",
+        action="store_true",
+        help="keep rendered prompt text in the run record (bundled corpus only)",
+    )
+    cmp.add_argument("--split", type=Path, default=None, help="frozen evaluation-split JSON")
+    cmp.add_argument("--split-side", choices=["development", "heldout"], default=None)
     cmp.add_argument("--ollama-url", default=None)
     cmp.add_argument("--ollama-timeout", type=float, default=None)
     cmp.add_argument("--allow-remote-ollama", action="store_true")
@@ -534,6 +547,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_INPUT
     pair = [m.strip() for m in args.identity_pair.split(",") if m.strip()]
+    if (args.split is None) != (args.split_side is None):
+        print("error: --split and --split-side go together", file=sys.stderr)
+        return EXIT_INPUT
     try:
         result = run_comparison(
             args.corpus or default_corpus(),
@@ -545,6 +561,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
             on_progress=lambda msg: logging.getLogger(__name__).info(msg),
             checkpoint_path=args.output / "samples.jsonl",
             fresh=args.fresh,
+            mode="controlled" if args.controlled else "exploratory",
+            store_prompts=args.store_prompts,
+            split=(args.split, args.split_side) if args.split else None,
         )
     except (OllamaError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -552,12 +571,25 @@ def cmd_compare(args: argparse.Namespace) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "comparison.json").write_text(result.model_dump_json(indent=2) + "\n")
     (args.output / "comparison.md").write_text(render_comparison(result))
+    if result.evaluation_run is not None:
+        (args.output / "evaluation-run.json").write_text(
+            result.evaluation_run.model_dump_json(indent=2) + "\n"
+        )
     for arm in result.arms:
         rates = ", ".join(f"{k}={v['rate']}" for k, v in arm.checks.items())
         print(f"{arm.arm}: n={arm.n} p50={arm.latency.get('p50_s')}s {rates}")
     for a in result.adoption:
         print(f"adopt {a.arm}: {a.adopt} ({'; '.join(a.reasons)})")
     print(f"json: {args.output / 'comparison.json'}")
+    ev = result.evaluation_run
+    if ev is not None:
+        reasons = "; ".join(ev.status_reasons) or "-"
+        print(
+            f"evaluation run: mode={ev.mode} status={ev.status} comparable={ev.comparable} "
+            f"eligible={ev.counts['eligible']}/{ev.expected_responses} ({reasons})"
+        )
+        if ev.mode == "controlled" and not ev.comparable:
+            return EXIT_GATES
     return EXIT_OK
 
 

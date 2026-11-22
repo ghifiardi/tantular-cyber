@@ -234,6 +234,7 @@ corpus.
 
 | Contract | Before | Now | Compatibility |
 |---|---|---|---|
+| model comparison (POC-007 Step 1) | 1.2.0 | **1.3.0** | Additive: `code_dirty`, `mode`, `evaluation_status`, `comparable`, per-arm `excluded`; `code_commit` is now the commit at the *start* of the run. New companion file `evaluation-run.json` (`tantular-cyber.evaluation-run` 1.0.0, see evaluation.md). Old `samples.jsonl` checkpoints are refused (their header lacks the code and input hashes). |
 | `report.json` | 1.2.0 | **1.3.0** | Additive (POC-005): `findings[].call_path`, `findings[].uncertainty`, `scanners[].stats`, `scanners[].suppressed_duplicates`; second default scanner `tantular-callgraph`. |
 | `benchmark.json` | 1.1.0 | **1.2.0** | Additive (POC-005): `real_world`, `llm.notes`; callgraph rules in `by_rule`. |
 | manifest | 1.1.0 | **1.2.0** | Five former known FNs now `expect_detected: true` (tantular-callgraph); `interproc/*`, `chains/*` cases. |
