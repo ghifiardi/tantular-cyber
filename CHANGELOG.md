@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+* Held-out evaluation set `benchmarks/heldout/` (frozen 2026-11-16): 30 separately
+  written synthetic cases (CWE-89/78/22/79/798, insufficient-evidence cases, known false
+  positives, Indonesian identifiers, 3 prompt-injection canaries) for evaluating LLM
+  explanations without the bias of the development corpus. Evaluation only; never for
+  prompt tuning, model selection or training data. Tests check validity, label-free case
+  files and no detected overlap with the development corpus (shared ids, canaries,
+  files or code lines); this is not a claim of statistical independence. A corpus without its own
+  `adversarial/` directory now runs the bundled suites and says so under limitations.
 * Rule `tantular.python.xss.jinja2-template-autoescape-disabled` (CWE-79, WARNING / LOW):
   `jinja2.Template(source)` constructed directly without `autoescape=True` (it ignores any
   Environment's setting and does not escape). Found as a missed, reviewed likely-real stored

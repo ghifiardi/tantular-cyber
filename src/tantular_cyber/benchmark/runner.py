@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..analysis import LLMClient
-from ..config import OllamaSettings, ScanSettings
+from ..config import OllamaSettings, ScanSettings, default_corpus
 from ..models import Finding, ScanReport
 from ..ollama_client import OllamaClient, OllamaError, validate_base_url
 from ..pipeline import run_scan
@@ -196,7 +196,11 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         (opts.output / "scan-report.json").write_text(render_json(scan), encoding="utf-8")
         texts_to_check += [render_json(scan), render_markdown(scan)]
         scanner = _scanner_bench(manifest, scan)
-        adversarial = run_adversarial(corpus)
+        # The adversarial suites test Tantular's own lexicons (overclaim guard, redaction),
+        # not the cases; a corpus without its own copy (e.g. the held-out set) uses the
+        # bundled suites, and the report says so.
+        adversarial_source = adversarial_suite_dir(corpus)
+        adversarial = run_adversarial(adversarial_source)
         context = evaluate_context(manifest, cases_root, scanner.records)
         ablation = run_ablation(manifest, cases_root, tmp, opts.semgrep_bin, opts.context_strategy)
 
@@ -257,6 +261,12 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
         llm=llm_bench,
         performance=perf,
     )
+    if adversarial_source != corpus:
+        result.limitations = [
+            *result.limitations,
+            "Adversarial suites came from the bundled corpus: this corpus has no "
+            "adversarial/ directory of its own.",
+        ]
     if opts.real_world_manifest is not None:
         from .realworld import DEFAULT_CACHE, evaluate_pointers, load_realworld
 
@@ -270,6 +280,11 @@ def run_benchmark(opts: BenchmarkOptions) -> BenchmarkResult:
     result.provenance.finished_at = now()
     write_outputs(result, opts.output)
     return result
+
+
+def adversarial_suite_dir(corpus: Path) -> Path:
+    """Corpus whose ``adversarial/`` suites to run: its own, else the bundled corpus."""
+    return corpus if (corpus / "adversarial").is_dir() else default_corpus()
 
 
 def _endpoint_allowed(settings: OllamaSettings) -> bool:
