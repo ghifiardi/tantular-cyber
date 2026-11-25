@@ -83,7 +83,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["tests/fixtures", "benchmarks/corpus"]
+extend-exclude = ["tests/fixtures", "benchmarks/corpus", "output", "outputs", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
