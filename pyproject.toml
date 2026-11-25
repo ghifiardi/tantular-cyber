@@ -55,6 +55,8 @@ packages = ["src/tantular_cyber"]
 "benchmarks/corpus" = "tantular_cyber/_data/corpus"
 "benchmarks/realworld/manifest.json" = "tantular_cyber/_data/realworld/manifest.json"
 "tests/fixtures/vulnerable" = "tantular_cyber/_data/sample"
+# Synthetic runtime (Shirudo telemetry) evaluation suite; never executed.
+"benchmarks/runtime" = "tantular_cyber/_data/runtime"
 "THIRD_PARTY_NOTICES.md" = "tantular_cyber/_data/THIRD_PARTY_NOTICES.md"
 
 [tool.hatch.build.targets.sdist]

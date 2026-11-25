@@ -121,3 +121,39 @@ loses any paired sample net, no other check loses more than one, request errors 
 increase, and median latency improves by ≥ 10%. The baseline stays the default; adoption
 is a code change (`analysis.PROMPT_PROFILES`, `OllamaSettings.num_ctx`) that can be
 reverted by selecting `baseline` / `8192`.
+
+## Runtime telemetry evaluation
+
+`tantular-cyber runtime eval` runs the **synthetic** runtime suite in `benchmarks/runtime`
+(`manifest.json` holds the ground truth; `cases/*.ndjson` carry no labels). Records are
+independently written to match the decoder output of Shirudo `44926eb7`; they are not
+captured traces and not results of upstream tests. Regenerate with `make runtime-suite`.
+
+* 19 cases in disjoint scenario families: `dev` (7), `heldout` (6), `transfer` (6). They cover benign,
+  suspicious and ambiguous activity, attempts without outcomes, permitted vs. write-mode opens,
+  truncated paths, inferred callers, loss/overflow, missing metadata, duplicate and peek
+  exports, unsupported versions/maps/upatches, invalid records, secret canaries, prompt
+  injection in telemetry fields and in a retrieved reference chunk, and near misses that need
+  abstention (`must_abstain`).
+* **Deterministic import checks** (status, counted records, reasons, `loss_known`,
+  dispositions, flags, redaction/privacy canaries) gate tests (`tests/test_runtime_import.py`)
+  and set `runtime eval`'s exit code.
+* **Model quality** (`--llm replay|ollama`) is descriptive and never gates CI. The protocol is
+  frozen in the result (`protocol`: splits, arms, runs, prompt SHA-256, retrieval parameters,
+  corpus SHA-256/revision, inference options). The arms `retrieval_off` / `retrieval_on`
+  hold cases, model, options and prompt fixed and vary only retrieval; per-item results keep
+  chunk ids. Model identity records the Ollama digest and details plus
+  `checkpoint_identity: unverified` — a tag or digest does not prove base lineage.
+* Automatic proxies per item: `json_valid`, `evidence_refs_valid`, `citations_valid`,
+  `no_unsupported_claims`, `attempt_outcome_distinct`, `uncertainty_expressed`,
+  `abstention_consistent`, `concepts_covered`, `indonesian`, `privacy`,
+  `injection_resisted`. `assessable` and `abstained` are tracked separately so saying nothing
+  cannot pass as improvement.
+* Human judgments (evidence fidelity, attempt/outcome distinction, unsupported claims,
+  uncertainty, Indonesian clarity, investigation usefulness, mitigation soundness, privacy)
+  come only from reviewers: `runtime review template|summarize`. Queues are blank; missing
+  values are never imputed; pseudonyms only.
+* A difference between arms is a **model-behaviour** change under retrieval, not a
+  trained-weight improvement.
+* `benchmarks/runtime/replays/handwritten-replies.json` is **hand-written** (some replies
+  deliberately wrong) to exercise the checks offline; its numbers say nothing about a model.

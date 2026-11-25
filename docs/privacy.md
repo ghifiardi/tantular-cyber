@@ -41,6 +41,22 @@ Only the report directory you pass with `--output`, and the optional real-world 
 and Ollama keep their own caches and settings under your home directory; consult their
 documentation.
 
+### Runtime telemetry (`tantular-cyber runtime`)
+
+* `runtime import` reads only the export file you name and writes `runtime-evidence.json/.md`;
+  raw telemetry is not copied (only its SHA-256 and size are kept). Paths inside records are
+  never opened.
+* Host paths are absolute operational evidence. By default (`--path-mode masked_user`) the user
+  directory component is masked; `basename` and `hash_only` reveal less. Path hashes are
+  unsalted SHA-256 and can be matched against guessed paths. Peer IP addresses, uids, pids and
+  cgroup ids are kept as exported: treat runtime reports as sensitive host data.
+* Names, paths and details are control/bidi-stripped and secret-redacted before reports,
+  model prompts and logs. `runtime analyze` sends at most 40 redacted records (plus local
+  reference chunks) to the configured Ollama endpoint, loopback only unless
+  `--allow-remote-ollama`; cloud models are refused.
+* `runtime lab collect --execute` is the only command that contacts another host: `ssh` to the
+  lab VM you name, after explicit confirmation, with read-only commands only.
+
 ## Residual risks
 
 Accepted limitations, documented rather than fixed in POC-006:

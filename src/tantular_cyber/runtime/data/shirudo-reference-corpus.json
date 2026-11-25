@@ -1,0 +1,442 @@
+{
+ "chunks": [
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#kernel-obs-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "kernel-obs",
+   "sha256": "bc0fe75805b0500386865fe8daa67f5c15269d55b222b034a5bf4b9b91af1597",
+   "text": "The `kernel-obs` package installs the `kernel-obs` upatch and the\n`userns-unshare-counter` upatch. `kernel-obs` provides host\nobservability for executed programs, network peers and volumes,\nlisteners, DNS answers, watched destinations, privilege transitions\nand access to credential and persistence files. Every hook observes;\nnothing in this package enforces. `userns-unshare-counter` counts calls\nto `unshare()` that request a new user namespace; it does not block or\nchange them. Its `userns_unshare_calls` per-CPU map holds the count.\n\nEach table lives in one BPF arena and holds one export interval: the\nexport flips to a fresh buffer, drains the previous one and clears it,\nso a table never fills up for good and every snapshot reports the\nallocations it had to refuse (`interval.overflow`) and records a\nprevious, unfinished export left behind (`interval.lost`). Records are\nper-interval deltas with first- and last-seen wall-clock timestamps.\n\nRun installation and map commands on the target. The target needs\nshirudo initialized before loading the package."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#verify-the-signing-key-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Verify the signing key",
+   "sha256": "8323bedbc9ee9fa01607d0e2584e2e39cbdbf2056bfac62372296e01961f6e7f",
+   "text": "Use the package reference supplied by your publisher:\n\n```sh\nPACKAGE=oci://quay.io/namespace/kernel-obs:0.0.1\nshirudo bpm key fingerprint \"$PACKAGE\"\n```\n\nCompare the printed SHA-256 public-key fingerprint with the one the\npublisher gave you through a trusted channel and proceed only when they\nmatch. For first-time target setup, import the verified certificate\nbefore initializing shirudo:\n\n```sh\nsudo shirudo bpm key add \"$PACKAGE\"\nsudo shirudo bpm key list\n```"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#install-the-package-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Install the package",
+   "sha256": "7cec098b6327010e2dcdc2bd534f4abdc49fa93b556a09510ab6acd7df19e726",
+   "text": "```sh\nsudo shirudo bpm install \"$PACKAGE\"\nsudo shirudo upatch list\n```\n\n`shirudo bpm info \"$PACKAGE\"` prints this document without installing.\n\nThe Beefile has a tree entry for `kernel-obs`, without a selector, so\na signed upatch tree can take it and every node that syncs the tree\nloads it. `userns-unshare-counter` has none and reaches a node with\n`bpm install` alone:\n\n```sh\nshirudo bpm tree append kernel-obs-<version>.bee oci://<registry>/<tree> --keys-dir <keys>\n```"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#tables-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Tables",
+   "sha256": "f8c2d22b2aedd33612d1897f1f82a18265172ccca3782ca9e65c9d76f8456f0d",
+   "text": "| Map | Key | Records |\n| --- | --- | --- |\n| `exec` | executable, calling image, cgroup, euid | name, resolved path, uid, effective capabilities, pid, exec count; scripts yield one record for the script and a flagged one for the interpreter |\n| `net` | executable, cgroup, protocol, role, peer address and port | connects or datagrams sent, packets and bytes in each direction, pid; accepted and listener-side peers aggregate by address, without the ephemeral port |\n| `socket` | creator and current caller, family, type, protocol and operation | socket creation attempts for every family, plus bind/connect/listen/accept/send/receive/option/shutdown activity for IP, packet, XDP, UNIX, NETLINK and VSOCK sockets |\n| `listen` | executable, cgroup, protocol, local address and port | TCP listens and UDP binds to a fixed port, with backlog |\n| `watch` | executable, cgroup, protocol, destination | attempts and packets towards addresses in `watch.list` |\n| `dns` | executable, cgroup, answered address | up to four names that resolved to the address, with counts |\n| `priv` | executable, cgroup, kind, subtype, euid | setuid to root, root without an exec or setuid to explain it, ptrace attach, mount"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#tables-1",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Tables",
+   "sha256": "72c87f37ec7d941753094f9e5469e7e6bb07e47f791b5c8c5199523109f54871",
+   "text": "To inspect the unshare counter, use `shirudo upatch map\nuserns-unshare-counter userns_unshare_calls`. Running `unshare -U true`\ntriggers the traced path.\n\n, executable mmap and mprotect requests, kernel file and module loads, user namespace creation, bpf() use |\n| `file` | executable, cgroup, euid, open mode, path | opens matching `file-watch.list`, with the filesystem magic |\n| `watch_stat` | per-CPU counters | metric: socket-level checks against the watch list and matches |\n\nRecords include first- and last-seen timestamps and available task\nidentity. Executable identity is `{dev, ino}` with a cgroup id. Socket\nrecords keep separate `owner` and `actor` identities with known and\ninferred flags. Other tables flag a task that started before the upatch\nloaded as `caller_inferred` when its mapped executable is first observed."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#tables-2",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Tables",
+   "sha256": "44c9f19b28a71896d38762dd747a5cd58f637724f074ebde47b1b8df20280771",
+   "text": "The `mmap_exec` privilege records report mapping requests that include\n`PROT_EXEC`; `mprotect_exec` records transitions that newly grant it.\nTheir subtype is the requested protection bits; `mmap_exec` stores\nmapping flags in `aux`, while `mprotect_exec` stores the VMA length.\n`name` is the backing file name or `anonymous`. These hooks observe\nrequests, not whether the mapping succeeds or code runs.\n\nSocket records describe attempts at the LSM hook; byte counts are\nrequested send or receive lengths, not confirmed transfers. Socket type\nflags such as `SOCK_CLOEXEC` and `SOCK_NONBLOCK` are stripped before the\ncreation hook, so records retain the base type. Families without detailed\noperation hooks still get creation, family, type and protocol records.\nSockets already open when the upatch loads are not enumerated; their owner\nis marked inferred when an operation is first observed. Kernel-space\ncreations are not recorded. UNIX paths, message payloads and VSOCK peer\nidentifiers are not recorded. AF_PACKET and AF_XDP ring records cover setup\nand wakeup calls, not individual frames."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#tables-3",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Tables",
+   "sha256": "064bb75904f7be5e52703fff9240463f20a35d2c98b6ffdf670dde3f5df9f206",
+   "text": "DNS records keep the question name of the query an answer resolved, its\nlabels joined by dots. A label may hold any byte; a NUL, a dot, a space\nor any other byte outside printable ASCII in it is recorded as `?`, so\nthat the recorded name keeps the length and the labels of the name\nqueried. The labels `www.good` and `example` are recorded as\n`www?good.example`, not as the three labels of `www.good.example`, and\n`ww\\0w.evil.example`, whose first label holds a NUL, as\n`ww?w.evil.example` rather than `ww`.\n\nPacket counts come from the cgroup hooks on the root cgroup and cover\nevery socket on the host, including sockets created before the load,\nwhich are attributed to their cgroup alone until their owner is known.\nPackets are counted as the socket layer sees them, before segmentation\noffload splits them on the wire."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#watch-lists-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Watch lists",
+   "sha256": "f74770a77e79bf6cb4bb50e58f7e63c253438aa904e665901eae8162b46c98b5",
+   "text": "`watch.list` holds IPv4 and IPv6 addresses or prefixes; attempts to\nreach them are recorded in `watch` in addition to `net`. The shipped\nlist names the cloud instance metadata addresses and the public\nDNS-over-HTTPS resolvers. `file-watch.list` holds base names,\n`parent/name` pairs or `parent/*` directory rules, optionally with a\ntrailing `w` for opens for writing only. Both are compiled into the\nsigned object: edit the list, run `make lists` in this directory and\nrebuild the package. There is nothing to configure on the target.\n\nTo update only the watch addresses in an existing `.upatch`, run\n`python3 rewrite_watch_upatch.py watch.list kernel-obs.upatch`. It takes\nthe same address and CIDR format as `gen_watch.py`, preserves the compiled\nloader and BTF, and re-signs the changed `.rodata` with the operator key\nfrom `/var/lib/shirudo/keys` (or `--keys-dir`). Use `--dry-run` to check\nthat the new tries fit the arrays in the existing BTF layout, or `-o` to\nwrite a separate artifact. The tool refuses a list that needs more trie\nnodes than the existing arrays hold; changing those capacities still\nrequires rebuilding the BPF object."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#watch-lists-1",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Watch lists",
+   "sha256": "37f40309985a20e06a04ea14e6eac27d985815b2f471167b46124b09ee03c65e",
+   "text": "The Beefile also declares `watch.list` as the input for both watch trie\nvariables. `bpm build` uses `gen_watch_rodata.py` to create their raw BTF\nvalues. The input name is derived from the basename before its first dot,\nso `watch.list` is named `watch`; override it for one build with:\n\n```sh\nshirudo bpm build ./upatches/kernel-obs --version 0.1.1 \\\n\t--rodata-input watch=./customer/watch.list\n```\n\nTo update the data without recompiling BPF, `bpm config update` reads the\nBeefile and updater dependencies from a previously built package. This\nchooses to trust and run the package's updater on the operator; those files\nare not covered by the upatch CMS signature. It then writes a new versioned\npackage:\n\n```sh\nshirudo bpm config update \\\n\t--base-package oci://registry.example.com/shirudo/kernel-obs:0.1.0 \\\n\t--version 0.1.1 \\\n\t--rodata-input watch=./customer/watch.list\n```\n\nPass `-f ./upatches/kernel-obs/Beefile` to use the local Beefile\nand updater files instead. The target receives only the newly signed\nupatch and never runs the updater."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#read-the-tables-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Read the tables",
+   "sha256": "d83fc0a995dc759d9ea8d98926bd7f9b130f5f1125c957e9d657fbcef169262b",
+   "text": "```sh\nsudo shirudo upatch map kernel-obs\nsudo shirudo upatch map kernel-obs exec\nsudo shirudo upatch map kernel-obs exec --json\nsudo shirudo upatch map kernel-obs net --show-full\nsudo shirudo upatch map kernel-obs priv --json=./priv.ndjson\n```\n\nReading a table drains it, exactly as the map-export timer does; add\n`--peek` to look at the interval being collected without taking it\nfrom the exporter."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#preemption-model-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Preemption model",
+   "sha256": "e88393844df8bbbaeb5706fe6b74ebe55a1aae4edfc41b806a1f1ece600b3b7e",
+   "text": "`kernel-obs` is written for the preemption model of the kernel the test\nVM runs: `CONFIG_PREEMPT_LAZY` alone, without `CONFIG_PREEMPT_DYNAMIC`\nand so without preemptible RCU (`CONFIG_PREEMPT_RCU`). The VM suite is\nwhere the package is loaded and its tables are checked, in CI and in a\nlocal `make tests`, so its concurrency is reviewed against the kernel\nthat suite runs rather than against one no test exercises.\n\nOn that kernel the `lsm` and `cgroup_skb` programs run with preemption\ndisabled, so no other task's run starts on a CPU before one ends; a\nsoftirq can still run an ingress program on top of an egress one, and\nthe sleepable `lsm.s` programs can sleep. The DNS parser builds a query\nin a per-CPU scratch buffer without a guard: only egress runs use it,\nand those come from the task that sends the query, so on that kernel\nnone starts before another ends. Runs on different CPUs share the arena\ntables on every kernel, so the tables take and count their entries with\natomics, publish a buffer with a release store, and an export expects\nlate writes into the buffer it drains."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#preemption-model-1",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Preemption model",
+   "sha256": "3e34fcded7611adf6ba135b4cc3e39c7888529b0eb4574c145dcb4571dd687a9",
+   "text": "A kernel with preemptible RCU, which `CONFIG_PREEMPT`,\n`CONFIG_PREEMPT_RT` and `CONFIG_PREEMPT_DYNAMIC` bring, is outside that\nmodel. `PREEMPT_DYNAMIC` is the kernel's default and what distribution\nkernels use, and since 7.0 it boots only in its `full` or `lazy` mode;\nbefore, distribution kernels mostly booted it as `voluntary`, which does\nnot preempt a running program. On such a kernel another task's egress\nrun can preempt a DNS query parse on the same CPU and overwrite the\nscratch, so that a DNS record carries the name of another query. The\nrecord is wrong, nothing more: `kernel-obs` observes and decides\nnothing."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#limits-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Limits",
+   "sha256": "33409b8a2e14590fa32598277ae9077756c73f03906d4611a5a7909ed0f0484b",
+   "text": "DNS over TCP, TLS and HTTPS is not parsed; the resolvers are on the\nwatch list instead, and DNS on ports other than 53 is not looked at.\nIPv6 extension headers are not walked. Forwarded traffic does not pass\nthe cgroup hooks and is not counted."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/kernel-obs/README.md#open-work-0",
+   "path": "upatches/kernel-obs/README.md",
+   "section": "Open work",
+   "sha256": "30baa4917c162104b8539d91f918b7f30765dd68b3ea660300397d359a507a84",
+   "text": "The DNS parser correlates a UDP response with its request by network\nnamespace, addresses, ports and transaction ID. It does not yet:\n\n- [ ] compare the response's question name, case-insensitively, and its\n      class with the request's;\n- [ ] check the response's opcode, RCODE and TC bits, and decide whether a\n      truncated response yields no record or a partial one;\n- [ ] keep A answers to A queries and AAAA answers to AAAA queries;\n- [ ] age out pending requests, so a late response cannot match a later\n      reuse of the same flow and ID;\n- [ ] reject IP fragments, check the IP and UDP lengths against the packet\n      and hold the 1232-byte parsing budget on the packet itself;\n- [ ] walk IPv6 extension headers, or reject packets that carry one;\n- [ ] bound every compression pointer it skips, against loops and\n      out-of-packet targets;\n- [ ] count a full pending table, LRU displacement, stale responses and\n      answers past its cap of 75, instead of dropping them silently;\n- [ ] cover malformed packets on the target, which needs a live packet\n      harness; `dns_obs_matrix.py` in shirudo's tests only builds them."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#app-sandbox-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "app-sandbox",
+   "sha256": "8f4b7b9cc4633eafecbec0b5de349423a4508e92f6fffb326ded1dba43a80338",
+   "text": "The `app-sandbox` package installs the `app-sandbox` upatch, which puts\napplications in sandboxes. A sandbox restricts every task that executed\none of its files, and the tasks those start, in three things:\n\n- what it executes: its own files and those of the policies it names;\n- where it connects and sends: the networks it names;\n- which files it creates, renames and opens for writing or truncates:\n  none whose name matches a pattern it denies.\n\nThe package ships sandboxes for Apache httpd and PHP-FPM that keep a web\napplication from writing the PHP files it serves, from starting other\nprograms and from reaching beyond private networks: what an attacker\nwho found a hole in the application does first. Replace them with\nsandboxes for your own applications.\n\nIts tree entry names the PHP2Shell advisories, CVE-2026-109618 and\nCVE-2026-109619, as `fixes`, so that a backend that reads the tree\ncounts a node that loaded the upatch as shielded against them. The\nsandboxes do not close the hole in PHP: a request can still run the\nattacker's code in the application. They keep that code from leaving a\nPHP file behind, from running another program and from connecting out.\nUpgrade PHP as well."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#app-sandbox-1",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "app-sandbox",
+   "sha256": "d57e2dfe269947696dd0e1ce860c702a9aee7a264c02f7a6ff1113bfd2d08228",
+   "text": "A sandbox restricts and never grants: a task in it keeps every limit it\nhad. It is not a boundary against root outside the sandbox, and a file\nreplaced after the load is a new file without the label, see \"Limits\"."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#define-a-sandbox-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Define a sandbox",
+   "sha256": "7ebb8fd087dd34bd1f4a3ab2aba9318f6575bfba3f4d54c755fae77a1562ad03",
+   "text": "A sandbox has two parts. The `Beefile` gives it a name, a policy bit and\nthe executables that put a task in it, as a `[[upatches.policy]]` table\n(see `Documentation/reference/formats/beefile.rst`):\n\n```toml\n[[upatches.policy]]\nid = \"apache\"\nbit = 0x1\npaths = [\"/usr/sbin/apache2\", \"/usr/sbin/httpd\"]\n```\n\nThe last component of a path may be a pattern, as in\n`/usr/sbin/php-fpm*` for the PHP-FPM of any version: the target labels\nevery regular file of the directory that matches it.\n\n`sandbox.toml` gives the rules of the sandbox of that name:\n\n```toml\n[networks]\nlocalnet = [\"127.0.0.0/8\", \"10.0.0.0/8\", \"::1/128\"]\n\n[sandbox.apache]\nexec = [\"apache-helpers\"]\nnetwork = [\"@localnet\", \"192.0.2.10/32\"]\n\n[sandbox.apache.deny]\ncreate = [\"*.php\"]\nrename = [\"*.php\"]\nwrite = [\"*.php\"]\n```"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#define-a-sandbox-1",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Define a sandbox",
+   "sha256": "fd1c3b38c7f9e4dd8a15d9ff8709b1cc782c5f413aa8a8db7432b2f4614ce3c3",
+   "text": "| Key | Without it | With it |\n|---|---|---|\n| `exec` | The task executes anything. | It executes only files labeled with its own policy or with one of the policy IDs listed, each a `[[upatches.policy]]` table of the Beefile. `exec = []` allows its own files alone. |\n| `network` | The task connects anywhere. | It connects and sends only to the networks listed, IPv4 or IPv6 in CIDR form, or `@<name>` for a list of `[networks]`. An IPv4 network also covers its IPv4-mapped IPv6 form. It creates no raw and no packet socket. `network = []` allows no IP peer. |\n| `deny.create` | | It creates no file, directory, device, symbolic link or hard link with a matching name. |\n| `deny.rename` | | It renames no file from or to a matching name. |\n| `deny.write` | | It opens no file with a matching name for writing and does not truncate one. |\n\nA pattern is matched against the last component of the path. It is the\nname itself, or holds one `*` for any run of bytes, and `?` for any one\nbyte, with at most 32 bytes on each side of the `*`."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#define-a-sandbox-2",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Define a sandbox",
+   "sha256": "512895904f8622f8e9e3d5036490a2fb392a183a7eaf5c4de13b6b02a3a5c0b1",
+   "text": "A script is executed with its interpreter, and the kernel asks for\nboth: a sandbox with `exec` runs a script only when the script and its\ninterpreter are each labeled with a policy the sandbox allows.\n\nThe package holds up to 32 sandboxes with `exec`, 128 networks and 64\npatterns. A task in two sandboxes, one that executed files of both, is\nheld to the rules of each.\n\n`gen_policy.py` turns `sandbox.toml` into the `sandbox_policy` variable\nof the upatch when `shirudo bpm build` runs, and fails the build for a\nsandbox the Beefile declares no policy for, a network or a pattern it\ncannot read and a table it does not know. Read back what a build holds\nwith:\n\n```sh\nshirudo bpm info data app-sandbox-<version>.bee upatches/app-sandbox.upatch\n```"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#build-and-publish-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Build and publish",
+   "sha256": "72baed098be37e6f0b72cf032f05ded3a4c40f6672b04ec550c8b1972d129d51",
+   "text": "Build in a directory that holds shirudo's BPF headers and a `vmlinux.h`\n(see `Documentation/start/guides/publish-package.rst`):\n\n```sh\nshirudo bpm build upatches/app-sandbox --version 1.0.0 --keys-dir <keys>\nshirudo bpm push app-sandbox-1.0.0.bee oci://<registry>/<namespace>/app-sandbox --keys-dir <keys>\nshirudo bpm tree append app-sandbox-1.0.0.bee oci://<registry>/<tree> --keys-dir <keys>\n```\n\nThe Beefile has a tree entry without a selector, with the advisories\nabove as its `fixes`, so every node that syncs the tree loads the\nupatch; on a node without the applications it labels nothing and\nrestricts nothing. Add a selector to load it only where they run:\n\n```toml\n[upatches.tree.selector.labels]\nrole = [\"web\"]\n```\n\n`tools/put-shields`, and `make shields` with it, publishes the package\nwith the other shields of `upatches/`.\n\n`--rodata-input sandbox=<file>` builds with other rules for the\npolicies of the Beefile, and `shirudo bpm config update` signs new rules\ninto a package already built, without compiling it again."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#what-a-load-does-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "What a load does",
+   "sha256": "72065da28ac156277e39317d995df43d2e9b90ec5f2d610d25d343afb47eda88",
+   "text": "The load labels each path of the Beefile that exists on the target with\nits policy bit, in the `security.bpf.shirudo.policy` xattr. shirudo\ngives a task the bits of every file it executes, and its children\ninherit them, so a task enters a sandbox at its next `execve()` of a\nlabeled file: restart the application after the first load. An unload\nleaves the labels, which restrict nothing once the upatch is gone.\n\nEvery refusal is `EACCES`."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#try-it-with-apache-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Try it with Apache",
+   "sha256": "e03c189eba17069855095838b69ca8072d0c158d91e37cd9987cc69f83e3a4a7",
+   "text": "`demo/` in the source of this package holds a web server to try the\n`apache` sandbox on: Apache httpd with PHP from the official\n`php:8.4-apache` image, a site on port 8443 and `attack.php`, which\ndoes from inside PHP what an attacker would next. `demo/build.sh` writes\nthe image's file system to an archive, and `demo/apache.sh` unpacks it\non a target and runs Apache from it in a chroot, with `/usr/sbin/apache2`\na hard link to its binary. `Documentation/start/guides/system-hardening.rst`\nwalks through it."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#limits-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Limits",
+   "sha256": "10cb31be97b98fdf35a5d50b300d15ba975f2fabb2dc8fcd2584b1373d19fd0f",
+   "text": "- A path that does not exist at the load is not labeled, and a file\n  that replaces a labeled one, as a package upgrade does, is a new file\n  without the label, whether a path or a pattern named it. Load the upatch again after the application is\n  installed or upgraded.\n- The file rules name files, not their contents: a descriptor that was\n  open for writing before the task entered the sandbox, or that another\n  process passes to it, still writes.\n- The network rules cover `connect()` and the address of `sendmsg()`\n  and `sendto()` on IPv4 and IPv6 sockets. Other address families pass,\n  and so does what a task receives or accepts.\n- Root outside a sandbox can remove nothing of it, as only shirudo's\n  runtime sets the label, but a task that root starts from an unlabeled\n  file is in no sandbox."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:upatches/app-sandbox/README.md#kernels-and-cost-0",
+   "path": "upatches/app-sandbox/README.md",
+   "section": "Kernels and cost",
+   "sha256": "16c3188a818484054d6df7d1b67ec1a7020354796fab6fd9b0ba37c40663a842",
+   "text": "The programs keep no state of their own: they read the task's policy\nbits and the rules, which never change after the load, so they are\nright on every preemption model.\n\nA task in no sandbox pays one task-storage lookup at each hook, and\nnone when it opens a file for reading. The hooks are the LSM hooks of\n`execve()`, `connect()`, `sendmsg()`, `socket()`, the creation, linking\nand renaming of a directory entry, an open for writing and a change of\nsize. A task in a sandbox pays a scan of the rules on top: at most 128\nnetworks, or 64 patterns of at most 64 bytes."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#intro-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "(intro)",
+   "sha256": "18908a288cf54bb39ac10b0abb319adace47f2565cf12d232503513cfe2971d6",
+   "text": "..\n   SPDX-License-Identifier: BSD-2-Clause\n   Copyright (c) 2026 Authors of shirudo\n\n:page-type: Reference\n:audience: Operators"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#map-logs-and-metrics-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Map logs and metrics",
+   "sha256": "39e824e4b49b66f3d94f6407055438ff7c2af53cea30caa9e22c60882202ba15",
+   "text": "What ``shirudo upatch map --otel`` and ``shirudo upatch map --all``\nexport from a upatch's maps: a log record or the decoder's metrics per\nmap, a reference to a snapshot stored in S3, or a line of JSON. The\ntransport, the endpoint and the resource it shares with the keepalive\nare in :doc:`otlp`."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#map-snapshot-log-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Map snapshot log",
+   "sha256": "0e8de9d197ef8c9fb51ed5dfe34f1e00cd1b0b970ea8f48a26176f3912c8edcc",
+   "text": "One log record per map:\n\n.. list-table::\n   :header-rows: 1\n   :widths: 30 70"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#map-snapshot-log-1",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Map snapshot log",
+   "sha256": "28d6758dad570e479ff0bb91fa8c50d1b9295c4de010e0c22b5ff34e69de9276",
+   "text": "* - Field\n     - Value\n   * - ``timeUnixNano``, ``observedTimeUnixNano``\n     - Wall clock when shirudo builds the document, nanoseconds since\n       the epoch, decimal string.\n   * - ``severityNumber``, ``severityText``\n     - ``9``, ``INFO``\n   * - ``eventName``\n     - ``shirudo.bpf.map.snapshot``\n   * - ``body``\n     - The value the map's decoder returns, as an OTLP value. Without a\n       decoder, a ``kvlistValue`` of the map's contents, see\n       `Undecoded body`_.\n   * - Attribute ``shirudo.upatch.name``\n     - The upatch name.\n   * - Attribute ``shirudo.upatch.location``\n     - The upatch's attach point.\n   * - Attribute ``shirudo.map.name``\n     - The map name.\n   * - Attribute ``shirudo.map.type``\n     - The map type name.\n   * - Attribute ``shirudo.map.max_entries``\n     - Integer.\n   * - Attribute ``shirudo.map.n_entries``\n     - Integer, entries read.\n   * - Attribute ``shirudo.map.n_cpus``\n     - Integer.\n   * - Attribute ``shirudo.map.serialized``\n     - Boolean, the map was read through its serializer.\n   * - Attribute ``shirudo.map.truncated``\n     - Boolean, the read stopped before the last entry."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#map-snapshot-log-2",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Map snapshot log",
+   "sha256": "9c4854e2f801594edd5d43599693ae99d3e56b4dcd48d5c8b7749dee87731e8d",
+   "text": "A decoded body larger than ``map_export.log_record_max_bytes`` (default\n1048576, at most ``map_export.otlp_max_bytes``) fails with ``E2BIG``."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#undecoded-body-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Undecoded body",
+   "sha256": "19fefb49c0fd717872e0b8edc1161a1e10d9043b4e717af68ac4a1a603c6b1cb",
+   "text": ".. list-table::\n   :header-rows: 1\n   :widths: 30 70\n\n* - Key\n     - Value\n   * - ``name``, ``type``, ``max_entries``, ``n_entries``\n     - The map.\n   * - ``n_cpus``\n     - Per-CPU maps only.\n   * - ``serialized``\n     - Boolean.\n   * - ``serialized_pages``, ``serialized_bytes``, ``pages``\n     - Serializer-backed maps. Each page has ``page_index``,\n       ``cursor``, ``next_cursor``, ``done``, ``flags``, ``chunks``,\n       ``bytes`` and ``data_hex``.\n   * - ``skipped``\n     - The reason, for a map type shirudo cannot read generically.\n   * - ``truncated``, ``n_truncated_at``\n     - Other maps. ``n_truncated_at`` only when truncated.\n   * - ``btf``\n     - ``key_type``, ``value_type``, and ``key_type_def`` and\n       ``value_type_def`` when known.\n   * - ``entries``\n     - Each with ``key`` and ``value``, or for per-CPU maps ``key``,\n       ``values_per_cpu`` and ``sum``, formatted from BTF."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#map-metrics-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Map metrics",
+   "sha256": "1c6e84f3781ea02d4e97d1816ce6ad7d0a90c31ad81c07d57d4c081bbda3e9a9",
+   "text": "A decoder that declares the metric signal returns a list of OTLP\n``Metric`` objects. shirudo sends them as\n``resourceMetrics[0].scopeMetrics[0].metrics`` under the resource and\nscope of :ref:`otlp-resource-scope` and adds no attributes."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#signal-selection-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Signal selection",
+   "sha256": "ee28342c093b1bae71a64ddcc32e7cf7266742acf3a018737e0d3d7e0ba5ca6f",
+   "text": ".. list-table::\n   :header-rows: 1\n   :widths: 40 60\n\n* - Map\n     - Export\n   * - Has a decoder\n     - The signal the decoder declares, log or metric.\n   * - No decoder, unsigned per-CPU integer value\n     - Classified as a metric. Metrics come only from decoders, so the\n       export fails with ``ENODATA``.\n   * - No decoder, any other map\n     - Log record with the undecoded body.\n\nFor an undecoded map ``upatch map`` prints the choice on standard\nerror as ``otel: selected <signal> for <type> map <name>: <reason>``."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#s3-snapshots-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "S3 snapshots",
+   "sha256": "d2d72ab615b03b189636196f90e3ff172bdf661e8de824bcc5000d981efb2514",
+   "text": "* - Property\n     - Value\n   * - URI\n     - ``s3://<bucket>[/<prefix>]``. Bucket: 3 to 63 characters from\n       ``a-z``, ``0-9``, ``.`` and ``-``, starting and ending with a\n       letter or digit. Prefix: at most 512 bytes, no control\n       characters, ``?``, ``#``, ``.`` or ``..`` segments.\n   * - Object\n     - The decoder's JSON output, gzip-compressed, at most 64 MiB\n       before compression.\n   * - Key\n     - ``[<prefix>/]<host>/<upatch>/<map>/<sha256>.json.gz``.\n       ``<host>`` is the host name with every character other than\n       ``A-Z``, ``a-z``, ``0-9``, ``-``, ``_`` and ``.`` replaced by\n       ``_``. ``<sha256>`` is the digest of the compressed object.\n   * - URL\n     - With ``AWS_ENDPOINT_URL_S3``: ``<endpoint>/<bucket>/<key>``.\n       Else ``https://<bucket>.s3.<region>.amazonaws.com/<key>``, or\n       ``https://s3.<region>.amazonaws.com/<bucket>/<key>`` for a\n       bucket name with a dot.\n   * - Request\n     - ``PUT`` signed with AWS SigV4, with ``If-None-Match: *``,\n       ``Cache-Control: immutable``, ``x-amz-content-sha256``,\n       ``x-amz-checksum-sha256``, ``x-amz-meta-shirudo-schema: 1``,\n       ``x-amz-meta-shirudo-upatch`` and ``x-amz-meta-shirudo-map"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#s3-snapshots-1",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "S3 snapshots",
+   "sha256": "25b9ca051189fce1ef43abde237a3baec40e295d0e1582db561b617e011c970a",
+   "text": "When a decoded map's document fails with ``E2BIG`` and an S3 URI is\nset (``--s3-uri=<uri>`` or ``map_export.s3_uri``), shirudo uploads the\nsnapshot to S3 and sends a reference log record instead. Undecoded,\nskipped and truncated maps are not uploaded.\n``map_export.s3_uri`` requires ``map_export.otel_endpoint``.\n\n.. list-table::\n   :header-rows: 1\n   :widths: 30 70\n\n``.\n       ``412`` counts as already uploaded.\n   * - Timeout and retries\n     - 10 seconds per attempt. Retries as for OTLP, also on ``408``,\n       ``409`` and ``500``.\n   * - Cleartext\n     - As for OTLP, for ``AWS_ENDPOINT_URL_S3``. Insecure mode also\n       turns off certificate verification for the AWS endpoints.\n\n.. list-table::\n   :header-rows: 1\n   :widths: 40 60\n\n* - Variable\n     - Value\n   * - ``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``\n     - Required. Missing credentials fail with ``EACCES``.\n   * - ``AWS_SESSION_TOKEN``\n     - Sent as ``x-amz-security-token``.\n   * - ``AWS_REGION``, ``AWS_DEFAULT_REGION``\n     - Region, in this order, default ``us-east-1``.\n   * - ``AWS_ENDPOINT_URL_S3``\n     - S3-compatible endpoint, path-style.\n   * - ``AWS_CA_BUNDLE``\n     - CA bundle for the S3 endpoint."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#s3-snapshots-2",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "S3 snapshots",
+   "sha256": "e4b799b42bf55cb8f8d26c46d659db1391ef92afcc5eec44ade1271e24dad0a6",
+   "text": "The reference log record goes to the logs endpoint, whatever signal\nthe decoder declares, and is not subject to\n``map_export.otlp_max_bytes``:\n\n.. list-table::\n   :header-rows: 1\n   :widths: 44 56\n\n* - Field\n     - Value\n   * - ``eventName``\n     - ``shirudo.bpf.map.snapshot.reference``\n   * - ``severityNumber``, ``severityText``\n     - ``9``, ``INFO``\n   * - ``body``\n     - ``stringValue``: ``BPF map snapshot stored in S3: <uri>``\n   * - Attributes\n     - The map snapshot attributes above, and\n       ``shirudo.map.snapshot.uri``,\n       ``shirudo.map.snapshot.format`` (``shirudo.map.v1+json``),\n       ``shirudo.map.snapshot.content_type`` (``application/json``),\n       ``shirudo.map.snapshot.content_encoding`` (``gzip``),\n       ``shirudo.map.snapshot.size_bytes``,\n       ``shirudo.map.snapshot.uncompressed_size_bytes`` and\n       ``shirudo.map.snapshot.sha256``."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#json-lines-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "JSON lines",
+   "sha256": "29f4cc7f396aa079a8b77232085b05061ad85c0f5fc4c35c1f7be3f7e567ba00",
+   "text": "``map_export.json_path`` or ``upatch map --json=<path>`` appends one line\nper map to a file, instead of OTLP or besides it. The line is the JSON\nvalue the map's decoder returns, not an OTLP document. A map without a\ndecoder fails with ``ENODATA``. ``map_export.json_path`` must be an\nabsolute path. A file or directory that carries shirudo's seal label is\nrefused. A new file gets mode ``0644``."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/formats/map-export.rst#related-0",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "section": "Related",
+   "sha256": "520118038ff478ee1042e59b390c1710baf70bbc661d7daaee52996af1d90041",
+   "text": "- :doc:`otlp`\n- :doc:`/reference/cli/upatch-map`\n- :doc:`/upatches/write/decoders`\n- :doc:`/operate/run/telemetry`\n- :doc:`/reference/configuration`"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#intro-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "(intro)",
+   "sha256": "18908a288cf54bb39ac10b0abb319adace47f2565cf12d232503513cfe2971d6",
+   "text": "..\n   SPDX-License-Identifier: BSD-2-Clause\n   Copyright (c) 2026 Authors of shirudo\n\n:page-type: Reference\n:audience: Operators"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#shirudo-upatch-map-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "shirudo upatch map",
+   "sha256": "00132072486eed6d1c2dcf658efb1e63ce413ce9383f61d13ddfdcc7fe3e58d0",
+   "text": "List the pinned maps of the loaded upatches, print one map's contents, or\nexport maps as JSON lines, OTLP or S3 objects.\n\nRuns on: target, as root with the runtime binary. Requires: loaded\nupatches with pinned maps. Changes measured state: no."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#usage-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Usage",
+   "sha256": "0323ea3bbf7779043fef6db8a4cde6253a16e67a0bd0a88ee4142ac702a31275",
+   "text": ".. code-block:: none\n\nshirudo upatch map [<upatch>] [--json | --json=<path>]\n   shirudo upatch map <upatch> <map> [--json | --json=<path>] [--show-full] [--peek]\n                      [--otel [--otel-endpoint=<url>] [--tenant-id=<id>]\n                              [--otel-insecure] [--otel-retries=<retries>]\n                              [--s3-uri=<uri>]]\n   shirudo upatch map --all [--json | --json=<path>] [--show-full] [--peek]\n                      [--otel [<otlp-options>]]\n\n``--json`` takes its path after ``=`` only. The other options with a\nvalue take it after ``=`` or as the next argument."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#listing-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Listing",
+   "sha256": "b89f763053c7e2effbf1e2797aaa74caa5fb5563b6c44a1717cfeb02f4d3112a",
+   "text": "Without arguments, ``map`` lists every pinned map of every loaded upatch\nwith its type and maximum number of entries. With ``<upatch>``, it lists the maps of that\nupatch. ``--json`` prints the list as ``{\"schema\":1,\"maps\":[...]}`` with\n``upatch``, ``name``, ``type``, ``max_entries`` and, for a per-CPU map,\n``n_cpus`` per map."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#one-map-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "One map",
+   "sha256": "b6d0f4ee7a98f92bdfee35909ca774f0845d7ee1cac5e05462b93759cc10cb5f",
+   "text": "With ``<upatch> <map>``, ``map`` reads the map:\n\n- A map is decoded through its BTF types when the build kept them\n  (``shirudo build`` compiles with ``-g``).\n- When the upatch pins a serializer program for the map, ``map`` runs it\n  and prints the pages it returns. Such a read drains the serializer:\n  records it returns are gone for the next reader, the export timer\n  included. ``--peek`` reads the interval being collected without taking\n  it.\n- The human output shows at most 256 entries unless ``--show-full``.\n  JSON and OTLP output have no limit.\n- ``--json`` prints one JSON line to standard output. ``--json=<path>``\n  appends it to ``<path>``.\n- ``--otel`` sends the map to an OTLP collector. A map with a signed Lua\n  decoder is sent as the log or metric the decoder declares. A map\n  without one is classified by shirudo (see\n  :doc:`/reference/formats/map-export`)."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#every-map-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Every map",
+   "sha256": "e4e552df91961a075045b43d775a3462e501fd657903aff33f3dec0734b8e3c1",
+   "text": "``--all`` handles every map of every loaded upatch as above and loads the\n``map_export`` settings (:doc:`/reference/configuration`):\n``map_export.json_path`` turns on JSON output to that file and\n``map_export.otel_endpoint`` turns on OTLP, together with the tenant,\nTLS, retry, size and S3 settings. Options on the command line take\nprecedence.\n\nWith neither a JSON nor an OTLP destination, ``--all`` prints every map in\nfull detail on standard output, draining every serializer-backed map\nunless ``--peek``. ``shirudo-map-export.timer`` runs ``upatch map --all``\nevery five seconds, so without a configured destination it drains the\nmaps into the journal."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#options-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Options",
+   "sha256": "2574f975e020f9e838bc4439dd321d4f7da9d546531fe7609956c3633002413d",
+   "text": "* - Option\n     - Argument\n     - Default\n     - Description\n   * - ``--all``\n     - none\n     - off\n     - Handle every map of every loaded upatch. Takes no positional\n       argument.\n   * - ``--json``\n     - optional ``<path>`` after ``=``\n     - off\n     - Print JSON, or append it to ``<path>``.\n   * - ``--show-full``\n     - none\n     - off\n     - Lift the 256-entry limit of the human output.\n   * - ``--peek``\n     - none\n     - off\n     - Read serializer-backed maps without draining them.\n   * - ``--otel``\n     - none\n     - off\n     - Export through OTLP. Without ``--all`` it needs ``<upatch>`` and\n       ``<map>``.\n   * - ``--otel-endpoint``\n     - ``<url>``\n     - ``map_export.otel_endpoint`` with ``--all``, else the\n       ``OTEL_EXPORTER_OTLP_*`` variables, else ``http://localhost:4318``\n     - OTLP base URL. The signal path is appended.\n   * - ``--tenant-id``\n     - ``<id>``, 1 to 128 of ``A-Z a-z 0-9 . _ -``\n     - ``map_export.tenant_id`` with ``--all``\n     - Send an ``X-Tenant-ID`` header.\n   * - ``--otel-insecure``\n     - none\n     - ``map_export.otel_insecure`` with ``--all``\n     - Allow cleartext OTLP to a remote host, or turn off HTTPS\n       certificate verific"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#options-1",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Options",
+   "sha256": "c3c7744bbd75400012c373d1e828394145bea09cf9b71cb1e36e6f85813c7c16",
+   "text": ".. list-table::\n   :header-rows: 1\n   :widths: 22 22 12 44\n\nation.\n   * - ``--otel-retries``\n     - ``<retries>``, 0 to 10\n     - 3\n     - Retries after the first attempt.\n   * - ``--s3-uri``\n     - ``<uri>``\n     - ``map_export.s3_uri`` with ``--all``\n     - Where to store an OTLP payload that is too large to send.\n\nThe OTLP options require ``--otel``. ``--all``, ``--json``, ``--otel`` and\neach OTLP option may appear once."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#exit-status-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Exit status",
+   "sha256": "2cebe675e27be5279551dba3e45cb5b10a1f3acb1a01ebbdd8ca8e8401f26ddf",
+   "text": ".. list-table::\n   :header-rows: 1\n   :widths: 15 85\n\n* - Status\n     - Meaning\n   * - 0\n     - Every map was read and exported.\n   * - 1\n     - A map could not be read, written as JSON or sent. With ``--all``\n       the other maps are still handled. Also, with ``--all``, the\n       configuration cannot be loaded.\n   * - 2\n     - A usage error: an unknown or repeated option, a value missing,\n       empty or invalid, positional arguments with\n       ``--all``, ``--otel`` without a map, OTLP options without\n       ``--otel``, an invalid upatch name, or with ``--all`` an invalid\n       ``map_export`` configuration."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#files-and-environment-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Files and environment",
+   "sha256": "3583bd11a0b383be0ba9e9a54c46c7973872cceeb4f7875c216943b6c1a71ed7",
+   "text": "- Reads the pinned maps under ``/run/shirudo/bpffs/upatches/``\n- Appends to the ``--json`` or ``map_export.json_path`` file\n- OTLP and S3: the ``OTEL_EXPORTER_OTLP_*`` and ``AWS_*`` variables (see\n  :doc:`/reference/environment`). ``shirudo-map-export.service`` reads\n  them from ``/etc/shirudo/map-export.env``"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#examples-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Examples",
+   "sha256": "5f1486a90d4efc2613c00a1e2a6847bf6b9dca6a278b2fb763e78ee4920419f3",
+   "text": "List the pinned maps of a target without any:\n\n.. code-block:: console\n\ntarget# shirudo upatch map\n   Pinned maps (0):\n     none\n\nLook at a serializer-backed map without taking its records from the\nexporter:\n\n.. code-block:: console\n\ntarget# shirudo upatch map kernel-obs exec --json --peek\n\nSend one map to a collector:\n\n.. code-block:: console\n\ntarget# shirudo upatch map kernel-obs exec --otel --otel-endpoint=https://collector.example:4318 --tenant-id=fleet-eu-1"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/reference/cli/upatch-map.rst#related-0",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "section": "Related",
+   "sha256": "ae59300f02747b00d4838c4fefff6740ee95cd3b57588650c95e20d74e2cb05b",
+   "text": "- :doc:`/operate/run/telemetry`\n- :doc:`/reference/formats/otlp`\n- :doc:`/reference/formats/map-export`\n- :doc:`/upatches/write/maps-arenas-serializers`\n- :doc:`/upatches/write/decoders`\n- :doc:`upatch-get`"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#intro-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "(intro)",
+   "sha256": "83beeda8c2dd1bbfe5f9126f3a88725bbb67aca38b274e8baac56da9ee317f00",
+   "text": "..\n   SPDX-License-Identifier: BSD-2-Clause\n   Copyright (c) 2026 Authors of shirudo\n\n:page-type: Explanation\n:audience: Security reviewers, Operators"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#security-model-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "Security model",
+   "sha256": "c6688f80a552a569431db8c5a330607d62c63ab2d11ca3fe2d3ce40bef47109a",
+   "text": "shirudo restricts the ``bpf()`` system call so that only loaders signed\nwith the operator's key install BPF code, root included. Every change to\nthe set of loaded upatches is measured in the TPM, and an operator\nchecks that measurement with evidence the TPM signs. This page is the short\nversion of the :doc:`threat-model`, which states each mechanism, its\nlimits and the gaps not closed yet."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#what-shirudo-provides-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "What shirudo provides",
+   "sha256": "c65b0c4761ad965f84c52880d4d0da33f6fa107138f82ea1439525beb9d61d40",
+   "text": "* - Goal\n     - Mechanism\n     - Limit\n     - Threat model\n   * - Only signed BPF enters the kernel\n     - ``lsm/bpf`` admits only signed loaders from userspace. The kernel\n       verifies them against the sealed ``.bpf`` keyring, and\n       ``lsm/bpf_prog_load`` admits only that keyring.\n     - Any artifact the key ever signed loads. In-kernel BPF users and\n       classic BPF are outside the gate.\n     - :ref:`T1 <tm-t1>`, R16, R18\n   * - Enforcement stays attached\n     - Detach, update and foreign attach commands are refused; pins,\n       descriptors and the private bpffs mount are guarded.\n     - The pins depend on the mount tree; a stopped runtime command\n       keeps its descriptors.\n     - :ref:`T2 <tm-t2>`, R3, U17\n   * - Only shirudo changes its state\n     - The seal labels ``/var/lib/shirudo`` and checks every change to\n       a labeled inode; keyrings and authorized processes are guarded.\n     - Offline writes bypass it.\n     - :ref:`T3 <tm-t3>`, R19\n   * - Every change is measured\n     - Loads, unloads, revocations and tree operations extend a TPM NV\n       register whose writes ``lsm/tpm_command`` keeps to shirudo;\n       salted sessions authenticate TPM acknowledgments"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#what-shirudo-provides-1",
+   "path": "Documentation/security/security-model.rst",
+   "section": "What shirudo provides",
+   "sha256": "ec29ce77e8b3b1d7db904126b18a0dc901a5fd529123563b179223b2d21b0bbd",
+   "text": ".. list-table::\n   :header-rows: 1\n   :widths: 20 32 30 18\n\n and readbacks.\n     - Initial session-key enrollment trusts the initrd; the config\n       PCR is not guarded.\n     - :ref:`T5 <tm-t5>`, R4, U9\n   * - A verifier can tell\n     - ``shirudo attest`` returns a TPM quote and a certification of the\n       register; ``shirudo attest verify`` checks them offline.\n     - Only the TPM-signed parts are evidence, and only with the\n       verifier pinning the key, the binding and the expected state.\n     - :ref:`T9 <tm-t9>`, U1\n   * - Attempts leave a trace\n     - Guards count their refusals in a frozen map that ``shirudo\n       status`` and the keepalive report.\n     - Some refusals move no counter; telemetry is the target's own\n       account.\n     - :ref:`T10 <tm-t10>`, R17\n   * - Delivered content is authentic\n     - Indexes, tree publications and configs are signed; the kernel\n       verifies loaders and config roots.\n     - A registry can withhold and replay signed content.\n     - :ref:`T7 <tm-t7>`, :ref:`T11 <tm-t11>`, R8"
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#main-adversary-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "Main adversary",
+   "sha256": "c407e02e78bfa16a4eced331e076209f1949c7d30d64ca1436b3ca9a9f956c33",
+   "text": "The adversary shirudo is built against is root on the target without\nthe signing key: a compromised administrator account, a container\nescape, a persistence implant. Capabilities do not stop it, so shirudo\ndoes not rest on capabilities. A task gains authority only by a\nsuccessful exec of a file on the dm-verity runtime image, and the\nguards let only such tasks through. Root can still run the runtime binary,\nso the command interface is the boundary: root can make shirudo do\nanything a shirudo command does, and every such change to the loaded\nset is measured.\n\nThe other adversaries are unprivileged code, root with mount-namespace\nand device control, the network and the registries, a malicious\ncollector, and the holder of a compromised signing key. The\n:ref:`adversaries <tm-adversaries>` section says what each can do."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#what-shirudo-assumes-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "What shirudo assumes",
+   "sha256": "2485af1a30e40f209cd27a3696ad6cc8a5883323bb03aec441245d15371ae0f1",
+   "text": "The properties above hold only on a deployment that provides the\n:ref:`assumptions <tm-assumptions>`. In brief:\n\n- A trusted kernel with the BPF LSM, the signed-loader ABI and the\n  kernel project patches\n- Module signatures, no 32-bit compatibility, no resume device in the\n  UKI and no writes under mounted file systems\n- Secure Boot with a signed, measured UKI and an authenticated kernel\n  command line\n- Config signing keys chosen by the authenticated runtime image\n- A TPM 2.0 reachable only through the kernel driver\n- A runtime image without generic tools\n- An operator host that keeps the signing key safe\n\nshirudo checks only some of these. The pre-flight of ``shirudo init``\nchecks that the BPF LSM is active, that the kernel has the\nsigned-loader ABI and that it checks module signatures. The target\nchecks a config's signature against the runtime image's keys itself. It\ndoes not check the rest of the kernel configuration or the boot chain\n(U10)."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#what-you-must-do-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "What you must do",
+   "sha256": "6e7e11a39320f597bcac7e62e1f8151cbda56ebd337fbda5639207c61045c4bd",
+   "text": "The deployer and the verifier each have a part that no code does for\nthem. The :ref:`duties <tm-duties>` section lists it in full. The\nessentials:\n\n- Build and boot the kernel as :doc:`/operate/plan/hardening` describes.\n- Start every shirudo unit from the runtime image, and keep the units'\n  environment files empty.\n- Verify each target with ``shirudo attest verify`` and always pass\n  ``--ak-name``, the binding PCRs, an expected state and the expected\n  config root, as :doc:`/operate/run/attest` describes.\n- Treat ``shirudo status``, keepalives and tamper counters as the\n  target's own account, and a ``tampered`` status as an incident\n  (:doc:`/operate/troubleshoot/incident-tampered`)."
+  },
+  {
+   "chunk_id": "shirudo@44926eb77751:Documentation/security/security-model.rst#related-0",
+   "path": "Documentation/security/security-model.rst",
+   "section": "Related",
+   "sha256": "ed26331260357e2640e4ad351db15c53b7381c29ffa4383f43bb8ed952c8ceae",
+   "text": "- :doc:`threat-model` for every mechanism, limit and open gap\n- :doc:`tamper-counters` for what the counters record\n- :doc:`cryptography` for the algorithms"
+  }
+ ],
+ "corpus_sha256": "e9fd95fbec39097089b89208557d84bbe71f6a45ec7a5402cd256594cfac3bcf",
+ "corpus_version": "1.0",
+ "documents": [
+  {
+   "license": "BSD-2-Clause (repository LICENSE; no per-file SPDX)",
+   "path": "upatches/kernel-obs/README.md",
+   "sha256": "fa33a55b99daa6e85315a6169b85c4fd74da5b8c6a7b73a1cca544041a558062",
+   "source_url": "https://github.com/shirudo-dev/shirudo/blob/44926eb77751495be6cc39cd745692355678956f/upatches/kernel-obs/README.md"
+  },
+  {
+   "license": "BSD-2-Clause (repository LICENSE; no per-file SPDX)",
+   "path": "upatches/app-sandbox/README.md",
+   "sha256": "298c2bafe66818e54597b9755984e7bd1ec39a6d86183f58592db70ddeed4c33",
+   "source_url": "https://github.com/shirudo-dev/shirudo/blob/44926eb77751495be6cc39cd745692355678956f/upatches/app-sandbox/README.md"
+  },
+  {
+   "license": "BSD-2-Clause (SPDX header)",
+   "path": "Documentation/reference/formats/map-export.rst",
+   "sha256": "683af295bbfbd1d817209488f9deb5ced8590501bd0d9d1f049ba4d49d214351",
+   "source_url": "https://github.com/shirudo-dev/shirudo/blob/44926eb77751495be6cc39cd745692355678956f/Documentation/reference/formats/map-export.rst"
+  },
+  {
+   "license": "BSD-2-Clause (SPDX header)",
+   "path": "Documentation/reference/cli/upatch-map.rst",
+   "sha256": "0a6ee6f00345dd6d0515570ed87d94cbc2a74f2867eaa82b18146de0844d54be",
+   "source_url": "https://github.com/shirudo-dev/shirudo/blob/44926eb77751495be6cc39cd745692355678956f/Documentation/reference/cli/upatch-map.rst"
+  },
+  {
+   "license": "BSD-2-Clause (SPDX header)",
+   "path": "Documentation/security/security-model.rst",
+   "sha256": "aae4132bf369236c2e54495d7fe8762e1888c1cb4c0ba866062fd1f522e61e21",
+   "source_url": "https://github.com/shirudo-dev/shirudo/blob/44926eb77751495be6cc39cd745692355678956f/Documentation/security/security-model.rst"
+  }
+ ],
+ "license_notice": "Excerpts of Shirudo documentation, Copyright (c) 2026 Authors of shirudo, BSD-2-Clause. See THIRD_PARTY_NOTICES.md for the full license text.",
+ "project": "shirudo",
+ "repository": "https://github.com/shirudo-dev/shirudo",
+ "revision": "44926eb77751495be6cc39cd745692355678956f",
+ "revision_source": "checkout_head"
+}

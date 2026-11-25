@@ -1,0 +1,389 @@
+{
+  "$defs": {
+    "ConditionalInterpretation": {
+      "properties": {
+        "text": {
+          "maxLength": 4000,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "conditions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Conditions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "ConditionalInterpretation",
+      "type": "object"
+    },
+    "Observation": {
+      "properties": {
+        "text": {
+          "maxLength": 4000,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "Observation",
+      "type": "object"
+    },
+    "RetrievalRecord": {
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "corpus_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Corpus Id"
+        },
+        "corpus_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Corpus Sha256"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "query_terms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Query Terms",
+          "type": "array"
+        },
+        "chunk_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Chunk Ids",
+          "type": "array"
+        },
+        "unavailable_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unavailable Reason"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "RetrievalRecord",
+      "type": "object"
+    },
+    "RuntimeExplanation": {
+      "properties": {
+        "summary": {
+          "maxLength": 6000,
+          "title": "Summary",
+          "type": "string"
+        },
+        "observations": {
+          "items": {
+            "$ref": "#/$defs/Observation"
+          },
+          "title": "Observations",
+          "type": "array"
+        },
+        "conditional_interpretations": {
+          "items": {
+            "$ref": "#/$defs/ConditionalInterpretation"
+          },
+          "title": "Conditional Interpretations",
+          "type": "array"
+        },
+        "benign_alternatives": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Benign Alternatives",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "recommended_investigation": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recommended Investigation",
+          "type": "array"
+        },
+        "mitigation_suggestions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mitigation Suggestions",
+          "type": "array"
+        },
+        "citations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "abstain": {
+          "title": "Abstain",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "summary",
+        "observations",
+        "conditional_interpretations",
+        "benign_alternatives",
+        "limitations",
+        "recommended_investigation",
+        "mitigation_suggestions",
+        "citations",
+        "confidence",
+        "abstain"
+      ],
+      "title": "RuntimeExplanation",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "runtime_analysis_schema_version": {
+      "default": "1.0.0",
+      "title": "Runtime Analysis Schema Version",
+      "type": "string"
+    },
+    "report_type": {
+      "default": "tantular-cyber.runtime-analysis",
+      "title": "Report Type",
+      "type": "string"
+    },
+    "advisory": {
+      "const": true,
+      "default": true,
+      "title": "Advisory",
+      "type": "boolean"
+    },
+    "disclaimer": {
+      "default": "Tafsiran ini dihasilkan model bahasa lokal dan bersifat saran. Bukti runtime yang diimpor adalah sumber otoritatif; tafsiran tidak mengubah bukti, status, atau verifikasi.",
+      "title": "Disclaimer",
+      "type": "string"
+    },
+    "evidence_sha256": {
+      "title": "Evidence Sha256",
+      "type": "string"
+    },
+    "evidence_import_id": {
+      "title": "Evidence Import Id",
+      "type": "string"
+    },
+    "evidence_status": {
+      "title": "Evidence Status",
+      "type": "string"
+    },
+    "evidence_verified": {
+      "const": false,
+      "default": false,
+      "title": "Evidence Verified",
+      "type": "boolean"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "degraded",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "status_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Status Reasons",
+      "type": "array"
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider"
+    },
+    "model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model"
+    },
+    "model_identity": {
+      "additionalProperties": true,
+      "title": "Model Identity",
+      "type": "object"
+    },
+    "prompt_sha256": {
+      "title": "Prompt Sha256",
+      "type": "string"
+    },
+    "input_sha256": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Input Sha256"
+    },
+    "retrieval": {
+      "$ref": "#/$defs/RetrievalRecord"
+    },
+    "explanation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RuntimeExplanation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "output_valid_json": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Valid Json"
+    },
+    "validation_warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Validation Warnings",
+      "type": "array"
+    },
+    "rejected_evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rejected Evidence Refs",
+      "type": "array"
+    },
+    "rejected_citations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rejected Citations",
+      "type": "array"
+    },
+    "duration_s": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duration S"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    }
+  },
+  "required": [
+    "evidence_sha256",
+    "evidence_import_id",
+    "evidence_status",
+    "status",
+    "prompt_sha256",
+    "retrieval"
+  ],
+  "title": "RuntimeAnalysisReport",
+  "type": "object"
+}

@@ -1,0 +1,875 @@
+{
+  "$defs": {
+    "Coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "maps": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MapCoverage"
+          },
+          "title": "Maps",
+          "type": "object"
+        },
+        "maps_absent": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Maps Absent",
+          "type": "array"
+        },
+        "unsupported": {
+          "items": {
+            "$ref": "#/$defs/UnsupportedEntry"
+          },
+          "title": "Unsupported",
+          "type": "array"
+        },
+        "rejected_documents": {
+          "items": {
+            "$ref": "#/$defs/RejectedDocument"
+          },
+          "title": "Rejected Documents",
+          "type": "array"
+        },
+        "loss_known": {
+          "description": "False when any counted interval lacks overflow/lost metadata: missing metadata means unknown coverage, not zero loss.",
+          "title": "Loss Known",
+          "type": "boolean"
+        },
+        "dedup_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dedup Notes",
+          "type": "array"
+        },
+        "report_records_omitted": {
+          "default": 0,
+          "title": "Report Records Omitted",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maps",
+        "maps_absent",
+        "unsupported",
+        "rejected_documents",
+        "loss_known",
+        "dedup_notes"
+      ],
+      "title": "Coverage",
+      "type": "object"
+    },
+    "ExecutableId": {
+      "additionalProperties": false,
+      "properties": {
+        "dev": {
+          "title": "Dev",
+          "type": "integer"
+        },
+        "ino": {
+          "description": "u64 inode as a decimal string (never converted to float).",
+          "title": "Ino",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dev",
+        "ino"
+      ],
+      "title": "ExecutableId",
+      "type": "object"
+    },
+    "Generator": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "default": "tantular-cyber",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "Generator",
+      "type": "object"
+    },
+    "HostPath": {
+      "additionalProperties": false,
+      "description": "A host path from telemetry. Absolute operational evidence, not a repository path.\n\nTantular never opens, stats or otherwise reads a host path from a record.",
+      "properties": {
+        "display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Rendered according to path_mode; redacted.",
+          "title": "Display"
+        },
+        "sha256": {
+          "description": "SHA-256 of the exported string (unsalted; guessable for common paths).",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "truncated_by_decoder": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Decoder flag where available (exec.path_truncated).",
+          "title": "Truncated By Decoder"
+        },
+        "at_capacity": {
+          "description": "Length reached the decoder's fixed buffer; the path may be cut.",
+          "title": "At Capacity",
+          "type": "boolean"
+        },
+        "redactions": {
+          "default": 0,
+          "title": "Redactions",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "display",
+        "sha256",
+        "at_capacity"
+      ],
+      "title": "HostPath",
+      "type": "object"
+    },
+    "InputDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Sanitized base name of the input file (no directory).",
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "bytes": {
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "form": {
+          "enum": [
+            "json",
+            "ndjson",
+            "unknown"
+          ],
+          "title": "Form",
+          "type": "string"
+        },
+        "lines": {
+          "title": "Lines",
+          "type": "integer"
+        },
+        "documents": {
+          "title": "Documents",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "sha256",
+        "bytes",
+        "form",
+        "lines",
+        "documents"
+      ],
+      "title": "InputDescriptor",
+      "type": "object"
+    },
+    "IntervalSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "document_ref": {
+          "title": "Document Ref",
+          "type": "string"
+        },
+        "upatch": {
+          "title": "Upatch",
+          "type": "string"
+        },
+        "map": {
+          "title": "Map",
+          "type": "string"
+        },
+        "schema_version": {
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "since_unix_nano": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Since Unix Nano"
+        },
+        "used": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Used"
+        },
+        "overflow": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Overflow"
+        },
+        "lost": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Lost"
+        },
+        "peek": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Peek"
+        },
+        "metadata_missing": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Metadata Missing",
+          "type": "array"
+        },
+        "records": {
+          "title": "Records",
+          "type": "integer"
+        },
+        "records_rejected": {
+          "title": "Records Rejected",
+          "type": "integer"
+        },
+        "content_sha256": {
+          "title": "Content Sha256",
+          "type": "string"
+        },
+        "identity_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "upatch/map/schema/since_unix_nano/peek; null when since is unknown.",
+          "title": "Identity Key"
+        },
+        "disposition": {
+          "enum": [
+            "counted",
+            "duplicate",
+            "superseded_peek",
+            "conflict"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "disposition_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Disposition Reason"
+        }
+      },
+      "required": [
+        "document_ref",
+        "upatch",
+        "map",
+        "schema_version",
+        "since_unix_nano",
+        "used",
+        "overflow",
+        "lost",
+        "peek",
+        "metadata_missing",
+        "records",
+        "records_rejected",
+        "content_sha256",
+        "identity_key",
+        "disposition"
+      ],
+      "title": "IntervalSummary",
+      "type": "object"
+    },
+    "MapCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "documents": {
+          "default": 0,
+          "title": "Documents",
+          "type": "integer"
+        },
+        "counted": {
+          "default": 0,
+          "title": "Counted",
+          "type": "integer"
+        },
+        "duplicate": {
+          "default": 0,
+          "title": "Duplicate",
+          "type": "integer"
+        },
+        "superseded_peek": {
+          "default": 0,
+          "title": "Superseded Peek",
+          "type": "integer"
+        },
+        "conflict": {
+          "default": 0,
+          "title": "Conflict",
+          "type": "integer"
+        },
+        "records": {
+          "default": 0,
+          "title": "Records",
+          "type": "integer"
+        },
+        "records_rejected": {
+          "default": 0,
+          "title": "Records Rejected",
+          "type": "integer"
+        },
+        "overflow_total": {
+          "default": 0,
+          "title": "Overflow Total",
+          "type": "integer"
+        },
+        "lost_total": {
+          "default": 0,
+          "title": "Lost Total",
+          "type": "integer"
+        },
+        "intervals_missing_metadata": {
+          "default": 0,
+          "title": "Intervals Missing Metadata",
+          "type": "integer"
+        },
+        "peek_only_intervals": {
+          "default": 0,
+          "title": "Peek Only Intervals",
+          "type": "integer"
+        },
+        "event_count_total": {
+          "default": "0",
+          "title": "Event Count Total",
+          "type": "string"
+        },
+        "path_truncated_records": {
+          "default": 0,
+          "title": "Path Truncated Records",
+          "type": "integer"
+        },
+        "path_at_capacity_records": {
+          "default": 0,
+          "title": "Path At Capacity Records",
+          "type": "integer"
+        },
+        "caller_inferred_records": {
+          "default": 0,
+          "title": "Caller Inferred Records",
+          "type": "integer"
+        },
+        "unknown_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknown Fields",
+          "type": "array"
+        }
+      },
+      "title": "MapCoverage",
+      "type": "object"
+    },
+    "Privacy": {
+      "additionalProperties": false,
+      "properties": {
+        "path_mode": {
+          "enum": [
+            "masked_user",
+            "full",
+            "basename",
+            "hash_only"
+          ],
+          "title": "Path Mode",
+          "type": "string"
+        },
+        "raw_telemetry_persisted": {
+          "const": false,
+          "default": false,
+          "title": "Raw Telemetry Persisted",
+          "type": "boolean"
+        },
+        "host_paths_are_absolute": {
+          "default": true,
+          "title": "Host Paths Are Absolute",
+          "type": "boolean"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "path_mode",
+        "notes"
+      ],
+      "title": "Privacy",
+      "type": "object"
+    },
+    "RejectedDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Line"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "line",
+        "reason"
+      ],
+      "title": "RejectedDocument",
+      "type": "object"
+    },
+    "RuntimeRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "description": "Stable evidence reference: <document_ref>/<map>/<entry>.",
+          "title": "Ref",
+          "type": "string"
+        },
+        "document_ref": {
+          "title": "Document Ref",
+          "type": "string"
+        },
+        "map": {
+          "enum": [
+            "exec",
+            "net",
+            "priv",
+            "file"
+          ],
+          "title": "Map",
+          "type": "string"
+        },
+        "entry_index": {
+          "title": "Entry Index",
+          "type": "integer"
+        },
+        "executable": {
+          "$ref": "#/$defs/ExecutableId"
+        },
+        "cgroup_id": {
+          "title": "Cgroup Id",
+          "type": "string"
+        },
+        "pid": {
+          "title": "Pid",
+          "type": "integer"
+        },
+        "first_seen_unix_nano": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "First Seen Unix Nano"
+        },
+        "last_seen_unix_nano": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Seen Unix Nano"
+        },
+        "count": {
+          "description": "Per-interval delta: exec_count or count, decimal string.",
+          "title": "Count",
+          "type": "string"
+        },
+        "hook": {
+          "title": "Hook",
+          "type": "string"
+        },
+        "outcome": {
+          "const": "not_recorded",
+          "default": "not_recorded",
+          "title": "Outcome",
+          "type": "string"
+        },
+        "caller_inferred": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "null = not exported by this map's decoder at the pin.",
+          "title": "Caller Inferred"
+        },
+        "fields": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "$ref": "#/$defs/HostPath"
+              },
+              {
+                "$ref": "#/$defs/ExecutableId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "Map-specific decoder fields, validated and sanitized.",
+          "title": "Fields",
+          "type": "object"
+        }
+      },
+      "required": [
+        "ref",
+        "document_ref",
+        "map",
+        "entry_index",
+        "executable",
+        "cgroup_id",
+        "pid",
+        "first_seen_unix_nano",
+        "last_seen_unix_nano",
+        "count",
+        "hook",
+        "fields"
+      ],
+      "title": "RuntimeRecord",
+      "type": "object"
+    },
+    "UnsupportedEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "upatch": {
+          "title": "Upatch",
+          "type": "string"
+        },
+        "map": {
+          "title": "Map",
+          "type": "string"
+        },
+        "schema_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Schema Version"
+        },
+        "reason": {
+          "enum": [
+            "unsupported_upatch",
+            "unsupported_schema",
+            "recognized_unsupported_map",
+            "metric_document",
+            "unknown_map"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "documents": {
+          "title": "Documents",
+          "type": "integer"
+        },
+        "records": {
+          "title": "Records",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "upatch",
+        "map",
+        "schema_version",
+        "reason",
+        "documents",
+        "records"
+      ],
+      "title": "UnsupportedEntry",
+      "type": "object"
+    },
+    "UpstreamTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "project": {
+          "title": "Project",
+          "type": "string"
+        },
+        "repository": {
+          "title": "Repository",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "supported_schema": {
+          "title": "Supported Schema",
+          "type": "integer"
+        },
+        "supported_maps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Maps",
+          "type": "array"
+        },
+        "recognized_unsupported_maps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recognized Unsupported Maps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "project",
+        "repository",
+        "revision",
+        "supported_schema",
+        "supported_maps",
+        "recognized_unsupported_maps"
+      ],
+      "title": "UpstreamTarget",
+      "type": "object"
+    },
+    "Verification": {
+      "additionalProperties": false,
+      "properties": {
+        "verified": {
+          "const": false,
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        },
+        "status": {
+          "const": "unverified",
+          "default": "unverified",
+          "title": "Status",
+          "type": "string"
+        },
+        "tpm_authenticated": {
+          "const": false,
+          "default": false,
+          "title": "Tpm Authenticated",
+          "type": "boolean"
+        },
+        "note": {
+          "default": "Diimpor dari berkas ekspor yang diberikan pengguna; Tantular tidak memverifikasi asal, integritas, atau kelengkapannya.",
+          "title": "Note",
+          "type": "string"
+        }
+      },
+      "title": "Verification",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "runtime_schema_version": {
+      "default": "1.0.0",
+      "title": "Runtime Schema Version",
+      "type": "string"
+    },
+    "report_type": {
+      "default": "tantular-cyber.runtime-evidence",
+      "title": "Report Type",
+      "type": "string"
+    },
+    "generator": {
+      "$ref": "#/$defs/Generator"
+    },
+    "import_id": {
+      "title": "Import Id",
+      "type": "string"
+    },
+    "imported_at": {
+      "title": "Imported At",
+      "type": "string"
+    },
+    "upstream": {
+      "$ref": "#/$defs/UpstreamTarget"
+    },
+    "input": {
+      "$ref": "#/$defs/InputDescriptor"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "degraded",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "status_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Status Reasons",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "verification": {
+      "$ref": "#/$defs/Verification"
+    },
+    "privacy": {
+      "$ref": "#/$defs/Privacy"
+    },
+    "coverage": {
+      "$ref": "#/$defs/Coverage"
+    },
+    "intervals": {
+      "items": {
+        "$ref": "#/$defs/IntervalSummary"
+      },
+      "title": "Intervals",
+      "type": "array"
+    },
+    "records": {
+      "items": {
+        "$ref": "#/$defs/RuntimeRecord"
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "hook_semantics": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Hook Semantics",
+      "type": "object"
+    },
+    "interpretation_notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Interpretation Notes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "generator",
+    "import_id",
+    "imported_at",
+    "upstream",
+    "input",
+    "status",
+    "status_reasons",
+    "errors",
+    "privacy",
+    "coverage",
+    "intervals",
+    "records",
+    "hook_semantics"
+  ],
+  "title": "RuntimeEvidenceReport",
+  "type": "object"
+}
