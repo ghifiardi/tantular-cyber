@@ -106,6 +106,25 @@ unavailable or partial). `doctor` returns `0` full / `4` partial / `3` unavailab
 `tantular-cyber schema` prints the JSON schema of `report.json`
 (committed as [docs/report-schema.json](docs/report-schema.json) for GATRA).
 
+## Import Shirudo runtime telemetry (offline)
+
+`runtime import` reads a Shirudo `kernel-obs` decoder export (`shirudo upatch map kernel-obs
+<map> --json`, or the NDJSON file from `--json=<path>` / `map_export.json_path`) and writes a
+versioned `runtime-evidence.json` + `.md`. It needs no Shirudo, root, VM, network, Semgrep or
+model, and never loads BPF, drains maps or runs decoders. Supported maps at the pinned
+upstream revision `44926eb7`: `exec`, `net`, `priv`, `file`; other maps and versions are
+reported as coverage gaps.
+
+```bash
+tantular-cyber runtime import --input kernel-obs.ndjson --output ./rt      # exit 0/4/3/2
+tantular-cyber runtime analyze --evidence ./rt/runtime-evidence.json --output ./rt --retrieval
+```
+
+`analyze` is opt-in and uses a local model; its output is advisory and stored separately from
+the evidence, which stays unverified and not TPM-authenticated. Telemetry records attempts per
+interval: it does not prove compromise or exfiltration, and an empty export does not mean a
+clean host. Details: [docs/runtime/README.md](docs/runtime/README.md).
+
 ## Sample output
 
 Deterministic scan (default, no model):

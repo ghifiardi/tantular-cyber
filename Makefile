@@ -3,7 +3,7 @@ VENV ?= .venv
 BIN := $(VENV)/bin
 OUT ?= ./out
 
-.PHONY: install install-semgrep test smoke bench bench-live bench-replay lint format schema scan scan-clean doctor clean lock dist package-smoke
+.PHONY: install install-semgrep test smoke bench bench-live bench-replay lint format schema scan scan-clean doctor clean lock dist package-smoke runtime-eval runtime-eval-replay runtime-eval-live runtime-suite
 
 install:  ## create venv and install with dev extras (semgrep from brew or `make install-semgrep`)
 	$(PYTHON) -m venv $(VENV)
@@ -41,6 +41,23 @@ format:
 
 schema:  ## regenerate the GATRA-facing report schema
 	$(BIN)/tantular-cyber schema > docs/report-schema.json
+	$(BIN)/tantular-cyber runtime schema evidence > docs/runtime/runtime-evidence-schema.json
+	$(BIN)/tantular-cyber runtime schema analysis > docs/runtime/runtime-analysis-schema.json
+
+runtime-eval:  ## offline deterministic runtime import evaluation (synthetic suite)
+	$(BIN)/tantular-cyber runtime eval --output $(OUT)/runtime-eval
+
+runtime-eval-replay:  ## runtime analysis checks with HAND-WRITTEN replies (no model)
+	$(BIN)/tantular-cyber runtime eval --output $(OUT)/runtime-eval-replay --llm replay \
+		--replay-file benchmarks/runtime/replays/handwritten-replies.json
+
+runtime-eval-live:  ## opt-in: local Ollama, retrieval off vs on, same model/options
+	$(BIN)/tantular-cyber runtime eval --output $(OUT)/runtime-eval-live --llm ollama --runs 1
+
+runtime-suite:  ## regenerate the synthetic runtime suite + hand-written replays
+	$(BIN)/python tools/runtime/gen_synthetic_suite.py benchmarks/runtime
+	PYTHONPATH=src $(BIN)/python tools/runtime/gen_handwritten_replays.py benchmarks/runtime \
+		benchmarks/runtime/replays/handwritten-replies.json
 
 scan:
 	$(BIN)/tantular-cyber scan --repo tests/fixtures/vulnerable --output $(OUT)

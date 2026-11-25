@@ -262,6 +262,10 @@ def _build_parser() -> argparse.ArgumentParser:
     rev.add_argument("--adjudication", type=Path, nargs="*", default=[])
     rev.add_argument("--output", type=Path, required=True)
 
+    from .runtime.cli import add_runtime_parser
+
+    add_runtime_parser(sub)
+
     sub.add_parser("schema", help="print the JSON schema of report.json")
     return parser
 
@@ -632,6 +636,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_compare(args)
     if args.command == "review":
         return cmd_review(args)
+    if args.command == "runtime":
+        from .runtime.cli import cmd_runtime
+
+        return cmd_runtime(args)
     print(json.dumps(ScanReport.model_json_schema(), indent=2))
     return EXIT_OK
 

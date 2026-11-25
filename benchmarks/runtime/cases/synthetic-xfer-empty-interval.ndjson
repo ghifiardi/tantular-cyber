@@ -1,0 +1,2 @@
+{"interval": {"lost": 0, "overflow": 0, "peek": false, "since_unix_nano": "1764000000000000000", "used": 0}, "map": "exec", "records": [], "schema": 1, "upatch": "kernel-obs"}
+{"interval": {"lost": 0, "overflow": 0, "peek": false, "since_unix_nano": "1764000000000000000", "used": 0}, "map": "priv", "records": [], "schema": 1, "upatch": "kernel-obs"}

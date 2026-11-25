@@ -211,6 +211,18 @@ and U+2028, which would let a crafted file shift the displayed evidence line.
   factory via `run_scan(llm_client_factory=...)`.
 * **New rules** — add local YAML under `src/tantular_cyber/rules/` or pass `--rules`.
 
+## Runtime telemetry (`runtime/`, separate contract)
+
+Shirudo kernel-obs exports are imported by `runtime/importer.py` into `RuntimeEvidenceReport`
+(`runtime/models.py`, runtime schema 1.0.0, `docs/runtime/runtime-evidence-schema.json`). It
+is independent of `ScanReport`; the scanner pipeline never reads telemetry and telemetry never
+creates CWE findings. `runtime/analysis.py` adds an opt-in advisory `RuntimeAnalysisReport`
+that references the evidence by hash, with its own constant prompt and runtime claim guard;
+`runtime/retrieval.py` is a local BM25 index over a pinned, hashed documentation corpus;
+`runtime/evaluation.py`, `runtime/lab.py` and `runtime/sandbox_policy.py` hold the synthetic
+evaluation, the read-only lab adapter and draft-only sandbox proposals. Collection from a live
+host never happens inside `scan`. See [runtime/README.md](runtime/README.md).
+
 ## GATRA integration contract
 
 `report.json` is the integration surface. It is described by

@@ -29,6 +29,10 @@ src/tantular_cyber/
   models.py         pydantic models; ScanReport is the GATRA-facing contract
   reports.py        JSON / Markdown writers (atomic, escaped)
   rules/            local Semgrep rules, one file per CWE (89/78/22/79/798; docs/rules.md)
+  runtime/          Shirudo kernel-obs telemetry: offline import (RuntimeEvidenceReport, own
+                    schema), opt-in advisory analysis + runtime claim guard, BM25 reference
+                    retrieval (bundled pinned corpus), synthetic eval, lab adapter, draft
+                    sandbox policies (docs/runtime/README.md)
   benchmark/        evaluation: manifest, matching, adversarial, llm_eval, perf, provenance,
                     results, render, runner, context_eval, realworld (pointers), review
                     (human ratings/kappa), compare (models/profiles)

@@ -1,0 +1,1 @@
+{"map": "priv", "records": [{"aux": "0", "cgroup_id": "7001", "count": "1", "detail": "gdb", "entry_index": 1, "euid": 1000, "executable": {"dev": 2049, "ino": "2301"}, "first_seen_unix_nano": "1764000001000000000", "kind": "ptrace_attach", "last_seen_unix_nano": "1764000002000000000", "name": "gdb", "pid": 4000, "subtype": 0, "uid": 1000}], "schema": 1, "upatch": "kernel-obs"}
